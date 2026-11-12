@@ -168,27 +168,64 @@ def disarm_auto_merge(token: str, node_id: str) -> None:
     _graphql(token, query, {"id": node_id}, "disable auto-merge")
 
 
-def auto_merge_state(token: str, node_id: str | None) -> tuple[bool, str | None]:
-    """(on, the merge method GitHub records) for this pull request. Unreadable is a failure, not 'off'."""
+STATE = ("query($id:ID!){node(id:$id){... on PullRequest{number isDraft "
+         "autoMergeRequest{enabledAt mergeMethod}}}}")
+
+
+def pr_state(token: str, node_id: str | None) -> dict:
+    """{draft, armed, merge_method} as GitHub reads them now. Unreadable is a failure, never 'off' or 'ready'."""
     if not node_id:
-        raise OpenPrError("auto-merge state could not be read — no node id for the pull request")
-    data = _graphql(token, "query($id:ID!){node(id:$id){... on PullRequest{number "
-                           "autoMergeRequest{enabledAt mergeMethod}}}}", {"id": node_id}, "auto-merge read")
-    node = data.get("node")
-    if not isinstance(node, dict) or "autoMergeRequest" not in node:
-        raise OpenPrError(f"pull request {node_id} came back without its auto-merge state")
+        raise OpenPrError("the pull request's state could not be read — no node id for it")
+    node = _graphql(token, STATE, {"id": node_id}, "pull request state read").get("node")
+    if not isinstance(node, dict) or "autoMergeRequest" not in node or not isinstance(node.get("isDraft"), bool):
+        raise OpenPrError(f"pull request {node_id} came back without its draft and auto-merge state")
     request = node["autoMergeRequest"]
-    return request is not None, (str(request.get("mergeMethod") or "") or None) if isinstance(request, dict) else None
+    method = (str(request.get("mergeMethod") or "") or None) if isinstance(request, dict) else None
+    return {"draft": node["isDraft"], "armed": request is not None, "merge_method": method}
+
+
+def auto_merge_state(token: str, node_id: str | None) -> tuple[bool, str | None]:
+    """(on, the merge method GitHub records) for this pull request."""
+    state = pr_state(token, node_id)
+    return state["armed"], state["merge_method"]
 
 
 def auto_merge_enabled(token: str, node_id: str | None) -> bool:
     """Whether GitHub says auto-merge is on for this pull request. Unreadable is a failure, not 'off'."""
-    return auto_merge_state(token, node_id)[0]
+    return pr_state(token, node_id)["armed"]
 
 
-def _settle(token: str, node_id: str | None, arm: bool, base: str) -> dict:
-    """Arm (with the queue's method), or make sure auto-merge is off, then report what GitHub says — never the
-    intent.
+def mark_ready(token: str, node_id: str) -> None:
+    _graphql(token, "mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id})"
+                    "{pullRequest{isDraft}}}", {"id": node_id}, "mark ready for review")
+
+
+def convert_to_draft(token: str, node_id: str) -> None:
+    _graphql(token, "mutation($id:ID!){convertPullRequestToDraft(input:{pullRequestId:$id})"
+                    "{pullRequest{isDraft}}}", {"id": node_id}, "convert to draft")
+
+
+def hold(token: str, number: int, node_id: str | None) -> None:
+    """Make the pull request a draft with auto-merge off, and read both back — before unclean work is pushed (#5).
+
+    Lunate's CI runs its heavy legs only on ready pull requests, and an armed pull request could land
+    half-done work, so nothing that is not a clean finish is pushed to one that is ready or armed.
+    """
+    state = pr_state(token, node_id)
+    if state["armed"]:
+        disarm_auto_merge(token, node_id)  # type: ignore[arg-type]
+    if not state["draft"]:
+        convert_to_draft(token, node_id)  # type: ignore[arg-type]
+    after = pr_state(token, node_id)
+    if after["armed"] or not after["draft"]:
+        raise OpenPrError(f"#{number}: should be a draft with auto-merge off but GitHub reads it as "
+                          f"{'a draft' if after['draft'] else 'ready'} with auto-merge "
+                          f"{'on' if after['armed'] else 'off'} — nothing was pushed")
+
+
+def _settle(token: str, number: int, node_id: str | None, arm: bool, base: str) -> dict:
+    """After the push: a clean finish is marked ready, then armed with the queue's method; anything else stays a
+    draft with auto-merge off. Then report what GitHub says — never the intent (#5, #6).
 
     The method GitHub records is reported but not required to match: with a merge queue required, GitHub has
     recorded MERGE on a pull request armed with SQUASH (#813), while the queue landed every merge as one squash
@@ -196,15 +233,19 @@ def _settle(token: str, node_id: str | None, arm: bool, base: str) -> dict:
     """
     queue = None
     if arm:
+        if pr_state(token, node_id)["draft"]:
+            mark_ready(token, node_id)  # type: ignore[arg-type]
         queue = queue_method(token, base)
         arm_auto_merge(token, node_id, queue)
-    elif auto_merge_enabled(token, node_id):
-        disarm_auto_merge(token, node_id)  # type: ignore[arg-type]
-    actual, recorded = auto_merge_state(token, node_id)
-    if actual != arm:
-        raise OpenPrError(f"auto-merge should be {'on' if arm else 'off'} but GitHub reads it as "
-                          f"{'on' if actual else 'off'}")
-    return {"auto_merge": "armed" if actual else "not armed", "queue_method": queue, "merge_method": recorded}
+    else:
+        hold(token, number, node_id)
+    state = pr_state(token, node_id)
+    if state["armed"] != arm or state["draft"] == arm:
+        raise OpenPrError(f"#{number} should be {'ready and armed' if arm else 'a draft, not armed'} but GitHub reads "
+                          f"it as {'a draft' if state['draft'] else 'ready'}, auto-merge "
+                          f"{'on' if state['armed'] else 'off'}")
+    return {"auto_merge": "armed" if state["armed"] else "not armed", "draft": state["draft"],
+            "queue_method": queue, "merge_method": state["merge_method"]}
 
 
 def _worker_token() -> str:
@@ -223,58 +264,49 @@ def find_open_pr(branch: str, token: str) -> dict | None:
     return pulls[0] if pulls else None
 
 
+def _owned(existing: dict, branch: str) -> tuple[int, str]:
+    number = existing.get("number")
+    author = (existing.get("user") or {}).get("login", "")
+    if author != WORKER_LOGIN:
+        raise OpenPrError(f"#{number} is already open for {branch!r} but authored by {author!r}, not {WORKER_LOGIN}")
+    return int(number), author
+
+
 def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = "main", arm: bool = True) -> dict:
-    """Open or reuse the pull request for `branch`, as the worker identity, then arm auto-merge.
+    """Open or reuse the pull request for `branch`, as the worker identity — always opened as a draft (#5).
 
-    `arm=False` leaves auto-merge off — and turns it off on a reused pull request that was armed, before the push:
-    the lane opens a card's pull request at its first commit, so the worker knows the number for its changelog
-    fragment, and arms it only when the session finished cleanly. A rework that is not clean disarms it again.
+    `arm=True` is a clean finish: push, mark ready, then arm auto-merge. `arm=False` keeps it a draft with
+    auto-merge off — and makes a reused pull request so before the push: the lane opens a card's pull request at
+    its first commit, so the worker knows the number for its changelog fragment, and a rework that is not clean
+    must not sit on a ready or armed pull request, not even briefly.
 
-    Raises on anything short of a pull request that exists, is authored by `lunate-worker[bot]`, and whose
-    auto-merge state, read back from GitHub, is the one asked for. `auto_merge` in the result is that read.
+    Raises on anything short of a pull request that exists, is authored by `lunate-worker[bot]`, and whose draft
+    and auto-merge state, read back from GitHub, are the ones asked for. The result carries that read.
     """
     token = _worker_token()
 
     # the author is checked before the push: never overwrite a branch whose PR belongs to someone else
     existing = find_open_pr(branch, token)
     if existing:
-        number = existing.get("number")
-        author = (existing.get("user") or {}).get("login", "")
-        if author != WORKER_LOGIN:
-            raise OpenPrError(
-                f"#{number} is already open for {branch!r} but authored by {author!r}, not {WORKER_LOGIN}"
-            )
-        if not arm and auto_merge_enabled(token, existing.get("node_id")):
-            # off before the push: work that is not clean never sits on an armed pull request, not even briefly
-            disarm_auto_merge(token, existing["node_id"])
-            if auto_merge_enabled(token, existing["node_id"]):
-                raise OpenPrError(f"#{number}: auto-merge should be off but GitHub reads it as on after the disarm "
-                                  "— nothing was pushed")
+        number, author = _owned(existing, branch)
+        if not arm:
+            hold(token, number, existing.get("node_id"))
         # a re-dispatch usually carries new commits, and reuse must deliver them
         push(repo, branch, token)
         return {"number": number, "url": existing.get("html_url"), "author": author,
-                **_settle(token, existing.get("node_id"), arm, base), "reused": True}
+                **_settle(token, number, existing.get("node_id"), arm, base), "reused": True}
 
     push(repo, branch, token)
     try:
-        pull = _api(
-            token,
-            "POST",
-            f"/repos/{SLUG}/pulls",
-            {"title": title, "body": body, "head": branch, "base": base},
-        )
+        pull = _api(token, "POST", f"/repos/{SLUG}/pulls",
+                    {"title": title, "body": body, "head": branch, "base": base, "draft": True})
     except OpenPrError:
         # a race: another run opened it between the check and this call
         raced = find_open_pr(branch, token)
         if raced:
-            raced_author = (raced.get("user") or {}).get("login", "")
-            if raced_author != WORKER_LOGIN:
-                raise OpenPrError(
-                    f"#{raced.get('number')} already exists for {branch!r} but is authored by {raced_author!r}"
-                )
-            return {"number": raced.get("number"), "url": raced.get("html_url"),
-                    "author": (raced.get("user") or {}).get("login", ""),
-                    **_settle(token, raced.get("node_id"), arm, base), "reused": True}
+            number, author = _owned(raced, branch)
+            return {"number": number, "url": raced.get("html_url"), "author": author,
+                    **_settle(token, number, raced.get("node_id"), arm, base), "reused": True}
         raise
 
     number = pull.get("number")
@@ -291,7 +323,19 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
         raise OpenPrError(f"the pull request came back authored by {author!r}, not {WORKER_LOGIN}{closed}")
 
     return {"number": number, "url": pull.get("html_url"), "author": author,
-            **_settle(token, pull.get("node_id"), arm, base), "reused": False}
+            **_settle(token, number, pull.get("node_id"), arm, base), "reused": False}
+
+
+def return_to_draft(branch: str, expected: int) -> None:
+    """At the start of a rework: the branch's open pull request goes back to draft with auto-merge off (#5)."""
+    token = _worker_token()
+    existing = find_open_pr(branch, token)
+    if not existing:
+        raise OpenPrError(f"no open pull request for {branch!r} to return to draft")
+    number, _ = _owned(existing, branch)
+    if number != expected:
+        raise OpenPrError(f"the open pull request for {branch!r} is #{number}, not #{expected}")
+    hold(token, number, existing.get("node_id"))
 
 
 def comment(number: int, body: str) -> None:

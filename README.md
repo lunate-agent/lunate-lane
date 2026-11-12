@@ -57,12 +57,14 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
 2. **Worker** (`scripts/worker.py --issue N [--rework PR]`, started detached by the feeder). Cuts or continues
    the worktree `<state>/worktrees/issue-N` of the checkout on `wt/issue-N`, renders `templates/worker-brief.md`
    with the issue body, and runs one Pi session on the worker model. The session has no GitHub credential; the
-   lane pushes. At the branch's first commit the pull request is opened **without** auto-merge (so the worker can
-   name its `changes/<pr>.md` fragment); when the session ends with commits the branch is pushed again, the
-   session's final report is posted on the pull request, and auto-merge is armed — only if the run was clean (exit
-   0, not stalled, nothing uncommitted, a new commit, a real final message). Otherwise auto-merge is left off — and
-   turned **off** before the push when a rework lands on a pull request that was armed — with a comment naming
-   why, and the orchestrator takes over. The auto-merge state in the comment and the log is read back from
+   lane pushes. At the branch's first commit the pull request is opened **as a draft**, without auto-merge (so
+   the worker can name its `changes/<pr>.md` fragment, and Lunate's CI skips its heavy legs on work still being
+   written); when the session ends with commits the branch is pushed again, the session's final report is posted
+   on the pull request, and — only if the run was clean (exit 0, not stalled, nothing uncommitted, a new commit, a
+   real final message) — the pull request is marked ready and then auto-merge is armed. Otherwise it stays a draft
+   with auto-merge off, with a comment naming why, and the orchestrator takes over. A rework returns its pull
+   request to draft, with auto-merge off, before its session starts, and is made ready again only at its own clean
+   finish. The draft and auto-merge state in the comment and the log are read back from
    GitHub, never assumed. Auto-merge is armed with the merge queue's own method, read from the base branch's
    rules (no queue rule is a refusal, not a guess). GitHub may record a different `mergeMethod` on the pull
    request than the one sent (it recorded `MERGE` on #813, armed with `SQUASH`); the log shows both, and what

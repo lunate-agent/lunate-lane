@@ -4,10 +4,11 @@
     .venv/bin/python scripts/worker.py --issue 794 --rework 812 # the reviewer requested changes on #812
 
 The feeder starts this detached. It cuts (or continues) the card's worktree on `wt/issue-<n>`, writes the
-brief, and runs the session. The pull request is opened, without auto-merge, as soon as the branch has its
-first commit, so the worker can name its changelog fragment after it. When the session ends with commits the
-branch is pushed again and auto-merge is armed — only if the run was clean. A stalled, failed or dirty run
-leaves the pull request unarmed with a comment saying why; the orchestrator takes it from there.
+brief, and runs the session. The pull request is opened as a draft, without auto-merge, as soon as the branch
+has its first commit, so the worker can name its changelog fragment after it. When the session ends with commits
+the branch is pushed again and — only if the run was clean — marked ready, then armed. A stalled, failed or dirty
+run leaves it a draft and unarmed with a comment saying why; the orchestrator takes it from there. A rework
+returns its pull request to draft before the session.
 """
 
 from __future__ import annotations
@@ -154,6 +155,10 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
     worktree = prepare_worktree(cfg, number)
     issue = dispatch_card.card(worktree, number)
     findings = rework_findings(cfg, rework_pr) if rework_pr else ""
+    if rework_pr:
+        # back to draft before the session: CI's heavy legs and the reviewer wait for the clean finish (#5)
+        open_pr.return_to_draft(f"wt/issue-{number}", rework_pr)
+        common.log(job, f"#{rework_pr} is a draft again for the rework, auto-merge off")
     scratch = common.state_dir("scratch", f"issue-{number}")
     pr_file = scratch / "pr-number"
     pr_file.unlink(missing_ok=True)
@@ -201,7 +206,8 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
     head = common.git(worktree, "rev-parse", "HEAD")[:9]
     lines = [f"**Worker session** on `{cfg.worker_model}` at `{head}`, {outcome.elapsed // 60} min."]
     if found:
-        lines.append(f"**Incomplete — auto-merge is {result['auto_merge']}:** " + "; ".join(found) + ".")
+        lines.append(f"**Incomplete — the pull request stays a draft and auto-merge is {result['auto_merge']}:** "
+                     + "; ".join(found) + ".")
     report = harness.last_text(session_log).strip() or "(the session left no final message)"
     kind = harness.secret_kind(report, (harness.read_credential(cfg),))
     if kind:

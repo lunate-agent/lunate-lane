@@ -167,7 +167,10 @@ class DriveTests(RepoCase):
             mock.patch.object(dispatch_card, "dispatch", side_effect=self.dispatch),
             mock.patch.object(open_pr, "comment", side_effect=lambda n, body: self.comments.append((n, body))),
             mock.patch.object(harness, "read_credential", return_value="model-credential-value-1234"),
+            mock.patch.object(open_pr, "return_to_draft", side_effect=lambda branch, pr: self.drafted.append(pr)),
+            mock.patch.object(open_pr, "_worker_token", side_effect=AssertionError("no live token in tests")),
         ]
+        self.drafted = []
         for patch in self.patches:
             patch.start()
 
@@ -266,8 +269,9 @@ class DriveTests(RepoCase):
         self.assertFalse((self.cfg.state / "workers" / "3.json").exists())
 
     def test_an_unclean_rework_on_an_armed_pull_request_leaves_it_disarmed(self) -> None:
-        """Through the real dispatch and open_pr: only GitHub (a stateful fake) and the push are replaced."""
-        armed = {"N77": True}
+        """Through the real dispatch and open_pr: only GitHub (a stateful fake) and the push are replaced. The
+        rework returns the ready, armed pull request to draft before the session (#5), and it stays one."""
+        armed, draft = {"N77": True}, {"N77": False}
         pushed = []
 
         def graphql(token, query, variables, what):
@@ -275,28 +279,35 @@ class DriveTests(RepoCase):
             if "disablePullRequestAutoMerge" in query:
                 armed[node] = False
                 return {}
-            if "enablePullRequestAutoMerge" in query:
-                raise AssertionError("an unclean rework must never arm")
-            return {"node": {"number": 77, "autoMergeRequest": {"enabledAt": "t"} if armed[node] else None}}
+            if "convertPullRequestToDraft" in query:
+                draft[node] = True
+                return {}
+            if "enablePullRequestAutoMerge" in query or "markPullRequestReadyForReview" in query:
+                raise AssertionError("an unclean rework must never be made ready or armed")
+            return {"node": {"number": 77, "isDraft": draft[node],
+                             "autoMergeRequest": {"enabledAt": "t"} if armed[node] else None}}
 
         def api(token, method, path, payload=None):
             if method == "GET":
                 return [{"number": 77, "html_url": "u", "user": {"login": open_pr.WORKER_LOGIN}, "node_id": "N77"}]
             raise AssertionError(f"unexpected {method} {path}")
 
-        self.patches[1].stop()  # the real dispatch_card.dispatch from here on
-        self.patches[1:2] = []
+        for index in (5, 4, 1):  # the real dispatch, return_to_draft and token path from here on
+            self.patches[index].stop()
+            del self.patches[index]
         sha = self.push_branch("wt/issue-3", "first.cs")
         with self.fake_session(stalled=True), \
                 mock.patch.object(open_pr, "_graphql", side_effect=graphql), \
                 mock.patch.object(open_pr, "_api", side_effect=api), \
                 mock.patch.object(open_pr, "_worker_token", return_value="t"), \
-                mock.patch.object(open_pr, "push", side_effect=lambda repo, branch, token: pushed.append(armed["N77"])), \
+                mock.patch.object(open_pr, "push", side_effect=lambda repo, branch, token:
+                                  pushed.append((armed["N77"], draft["N77"]))), \
                 mock.patch.object(github, "pull", return_value=pull(77, 3, head=sha,
                                                                     reviews=[review("CHANGES_REQUESTED", commit=sha)])):
             self.assertEqual(worker.drive(self.cfg, 3, 77), 1)
         self.assertFalse(armed["N77"])
-        self.assertEqual(pushed, [False], "the push happened only after auto-merge was off")
+        self.assertTrue(draft["N77"])
+        self.assertEqual(pushed, [(False, True)], "the push happened only after it was a draft with auto-merge off")
         self.assertIn("auto-merge is not armed", self.comments[0][1])
         self.assertIn("auto-merge not armed", (self.cfg.state / "logs" / "worker-3.log").read_text())
 
@@ -328,6 +339,19 @@ class DriveTests(RepoCase):
         self.assertIn("card #3 is parked", body)
         self.assertIn("attempts/3.json", body)
         self.assertIn("parked after 3 idle runs", (self.cfg.state / "logs" / "worker-3.log").read_text())
+
+    def test_a_rework_returns_its_pull_request_to_draft_before_the_session(self) -> None:
+        sha = self.push_branch("wt/issue-3", "first.cs")
+        order = []
+        open_pr.return_to_draft.side_effect = lambda branch, pr: order.append(("draft", branch, pr))
+        with mock.patch.object(github, "pull", return_value=pull(77, 3, head=sha,
+                                                                 reviews=[review("CHANGES_REQUESTED", commit=sha)])):
+            with self.fake_session() as session:
+                session.side_effect, real = None, session.side_effect
+                session.side_effect = lambda *a, **k: order.append(("session",)) or real(*a, **k)
+                worker.drive(self.cfg, 3, 77)
+        self.assertEqual(order[:2], [("draft", "wt/issue-3", 77), ("session",)])
+        self.assertIn("#77 is a draft again", (self.cfg.state / "logs" / "worker-3.log").read_text())
 
     def test_a_rework_that_keeps_adding_nothing_is_parked_on_its_pull_request(self) -> None:
         sha = self.push_branch("wt/issue-3", "first.cs")

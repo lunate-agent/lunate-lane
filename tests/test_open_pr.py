@@ -30,13 +30,18 @@ class FailurePathTests(unittest.TestCase):
         open_pr.identity.installation_token = lambda name: "token-for-tests"  # type: ignore[assignment]
         # a fake of GitHub's auto-merge state, per pull request node id
         self.armed: dict = {}
+        self.drafts: dict = {}
         self.events: list = []
         self.disarm_sticks = False
         open_pr._graphql = self.fake_graphql
 
     def fake_graphql(self, token, query, variables, what):
+        """GitHub's state per node: draft (a created or unknown pull request starts as one) and auto-merge."""
         node = variables["id"]
+        self.drafts.setdefault(node, True)
         if "enablePullRequestAutoMerge" in query:
+            if self.drafts[node]:
+                raise open_pr.OpenPrError("auto-merge was refused: pull request is in draft state")
             self.events.append(("arm", node))
             self.methods = getattr(self, "methods", []) + [variables["method"]]
             self.armed[node] = True
@@ -45,9 +50,18 @@ class FailurePathTests(unittest.TestCase):
             self.events.append(("disarm", node))
             self.armed[node] = self.disarm_sticks and self.armed.get(node, False)
             return {"disablePullRequestAutoMerge": {"pullRequest": {"autoMergeRequest": None}}}
+        if "markPullRequestReadyForReview" in query:
+            self.events.append(("ready", node))
+            self.drafts[node] = False
+            return {"markPullRequestReadyForReview": {"pullRequest": {"isDraft": False}}}
+        if "convertPullRequestToDraft" in query:
+            self.events.append(("draft", node))
+            self.drafts[node] = True
+            return {"convertPullRequestToDraft": {"pullRequest": {"isDraft": True}}}
         self.events.append(("read", node))
         recorded = getattr(self, "recorded", "SQUASH")
-        return {"node": {"number": 1, "autoMergeRequest": {"enabledAt": "t", "mergeMethod": recorded}
+        return {"node": {"number": 1, "isDraft": self.drafts[node],
+                         "autoMergeRequest": {"enabledAt": "t", "mergeMethod": recorded}
                          if self.armed.get(node) else None}}
 
     def tearDown(self) -> None:
@@ -175,7 +189,7 @@ class FailurePathTests(unittest.TestCase):
         self.disarm_sticks = True
         with self.assertRaises(open_pr.OpenPrError) as caught:
             open_pr.open_pr(self.repo, "lane/x", "t", "b", arm=False)
-        self.assertIn("GitHub reads it as on", str(caught.exception))
+        self.assertIn("auto-merge on — nothing was pushed", str(caught.exception))
         self.assertNotIn(("push", "lane/x"), self.events, "unclean work must not reach a PR that is still armed")
 
     def test_a_disarm_call_that_fails_pushes_nothing(self) -> None:
@@ -213,6 +227,81 @@ class FailurePathTests(unittest.TestCase):
         with self.assertRaises(open_pr.OpenPrError) as caught:
             open_pr.push(self.repo, "lane/never-created", "token-for-tests")
         self.assertIn("no local branch", str(caught.exception))
+
+    def test_a_new_pull_request_is_opened_as_a_draft(self) -> None:
+        """#5: created as a draft, and read back as one while unarmed."""
+        posts = []
+
+        def api(token, method, path, payload=None):
+            if method == "GET":
+                return []
+            posts.append(payload)
+            return {"number": 3, "html_url": "u", "user": {"login": open_pr.WORKER_LOGIN}, "node_id": "N3"}
+
+        open_pr._api = api
+        open_pr.push = lambda *a, **k: self.events.append(("push", a[1]))
+        result = open_pr.open_pr(self.repo, "lane/x", "t", "b", arm=False)
+        self.assertIs(posts[0]["draft"], True)
+        self.assertEqual((result["draft"], result["auto_merge"]), (True, "not armed"))
+        self.assertNotIn(("ready", "N3"), self.events)
+
+    def test_a_clean_finish_pushes_then_marks_ready_then_arms_and_reads_both_back(self) -> None:
+        self.reuse()
+        self.drafts["N42"] = True
+        result = open_pr.open_pr(self.repo, "lane/x", "t", "b", arm=True)
+        order = [e for e in self.events if e[0] in ("push", "ready", "arm")]
+        self.assertEqual(order, [("push", "lane/x"), ("ready", "N42"), ("arm", "N42")])
+        self.assertEqual((result["draft"], result["auto_merge"]), (False, "armed"))
+        self.assertEqual(self.events[-1], ("read", "N42"), "the result is GitHub's read, not the intent")
+
+    def test_a_rework_returns_a_ready_armed_pull_request_to_draft_before_its_push(self) -> None:
+        self.reuse()
+        self.drafts["N42"], self.armed["N42"] = False, True
+        result = open_pr.open_pr(self.repo, "lane/x", "t", "b", arm=False)
+        push_at = self.events.index(("push", "lane/x"))
+        self.assertLess(self.events.index(("disarm", "N42")), push_at)
+        self.assertLess(self.events.index(("draft", "N42")), push_at)
+        self.assertEqual((result["draft"], result["auto_merge"]), (True, "not armed"))
+
+    def test_the_three_transitions_created_draft_ready_on_clean_draft_again_on_rework(self) -> None:
+        def api(token, method, path, payload=None):
+            if method == "GET":
+                return [{"number": 5, "html_url": "u", "user": {"login": open_pr.WORKER_LOGIN}, "node_id": "N5"}] \
+                    if "N5" in self.drafts else []
+            return {"number": 5, "html_url": "u", "user": {"login": open_pr.WORKER_LOGIN}, "node_id": "N5"}
+
+        open_pr._api = api
+        open_pr.push = lambda *a, **k: self.events.append(("push", a[1]))
+        first = open_pr.open_pr(self.repo, "wt/issue-5", "t", "b", arm=False)
+        self.assertEqual((first["reused"], first["draft"]), (False, True))
+        clean = open_pr.open_pr(self.repo, "wt/issue-5", "t", "b", arm=True)
+        self.assertEqual((clean["draft"], clean["auto_merge"]), (False, "armed"))
+        open_pr.return_to_draft("wt/issue-5", 5)
+        self.assertEqual((self.drafts["N5"], self.armed["N5"]), (True, False))
+        again = open_pr.open_pr(self.repo, "wt/issue-5", "t", "b", arm=True)
+        self.assertEqual((again["draft"], again["auto_merge"]), (False, "armed"))
+
+    def test_a_draft_conversion_that_does_not_take_pushes_nothing(self) -> None:
+        self.reuse()
+        self.drafts["N42"] = False
+        fake = self.fake_graphql
+
+        def stuck(token, query, variables, what):
+            if "convertPullRequestToDraft" in query:
+                return {"convertPullRequestToDraft": {"pullRequest": {"isDraft": False}}}
+            return fake(token, query, variables, what)
+
+        open_pr._graphql = stuck
+        with self.assertRaises(open_pr.OpenPrError) as caught:
+            open_pr.open_pr(self.repo, "lane/x", "t", "b", arm=False)
+        self.assertIn("nothing was pushed", str(caught.exception))
+        self.assertNotIn(("push", "lane/x"), self.events)
+
+    def test_return_to_draft_refuses_another_pull_request(self) -> None:
+        self.reuse(42)
+        with self.assertRaises(open_pr.OpenPrError):
+            open_pr.return_to_draft("lane/x", 77)
+        self.assertNotIn(("draft", "N42"), self.events)
 
     def test_auto_merge_is_armed_with_the_queues_method_and_the_recorded_method_is_reported(self) -> None:
         """#6: the mutation's method is the merge queue's, read from the rules — and what GitHub records is
