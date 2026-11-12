@@ -43,6 +43,13 @@ class FailurePathTests(unittest.TestCase):
         # a fake of GitHub's auto-merge state, per pull request node id
         self.armed: dict = {}
         self.drafts: dict = {}
+        # the pull request's head as GitHub shows it: `lagging` heads first (a push GitHub has not caught up
+        # with), then the local branch's
+        self.local_head = subprocess.run(["git", "rev-parse", "lane/x"], cwd=self._tmp, capture_output=True,
+                                         text=True).stdout.strip()
+        self.lagging: list = []
+        self.saved_wait = (open_pr.HEAD_WAIT, open_pr.HEAD_POLL)
+        open_pr.HEAD_WAIT, open_pr.HEAD_POLL = 2, 0.01
         self.events: list = []
         self.disarm_sticks = False
         open_pr._graphql = self.fake_graphql
@@ -72,13 +79,15 @@ class FailurePathTests(unittest.TestCase):
             return {"convertPullRequestToDraft": {"pullRequest": {"isDraft": True}}}
         self.events.append(("read", node))
         recorded = getattr(self, "recorded", "SQUASH")
-        return {"node": {"number": 1, "isDraft": self.drafts[node],
+        head = self.lagging.pop(0) if self.lagging else self.local_head
+        return {"node": {"number": 1, "isDraft": self.drafts[node], "headRefOid": head,
                          "autoMergeRequest": {"enabledAt": "t", "mergeMethod": recorded}
                          if self.armed.get(node) else None}}
 
     def tearDown(self) -> None:
         (open_pr._api, open_pr.identity.installation_token, open_pr.push, open_pr._graphql,
          open_pr.queue_method) = self.saved
+        open_pr.HEAD_WAIT, open_pr.HEAD_POLL = self.saved_wait
         shutil.rmtree(self._tmp, ignore_errors=True)
 
     def test_auto_merge_refused_is_a_failure_not_a_pass(self) -> None:
@@ -468,6 +477,33 @@ class FailurePathTests(unittest.TestCase):
         self.assertEqual(order, [("push", "lane/x"), ("ready", "N42"), ("arm", "N42")])
         self.assertEqual((result["draft"], result["auto_merge"]), (False, "armed"))
         self.assertEqual(self.events[-1], ("read", "N42"), "the result is GitHub's read, not the intent")
+
+    def test_ready_waits_until_github_shows_the_pushed_head(self) -> None:
+        """#813: marked ready a second after the push, before GitHub had moved the head — ready_for_review went
+        out with the old head, and the new head's only CI run still saw a draft."""
+        self.reuse()
+        self.drafts["N42"] = True
+        self.lagging = ["0ld" * 13 + "0"] * 3  # three reads still show the old head
+        result = open_pr.open_pr(self.repo, "lane/x", "t", "b", arm=True)
+        reads_before_ready = [e for e in self.events[:self.events.index(("ready", "N42"))] if e == ("read", "N42")]
+        self.assertGreaterEqual(len(reads_before_ready), 4, "ready only after the head read back as pushed")
+        self.assertLess(self.events.index(("push", "lane/x")), self.events.index(("ready", "N42")))
+        self.assertEqual((result["draft"], result["auto_merge"]), (False, "armed"))
+
+    def test_a_head_github_never_catches_up_with_is_a_named_failure_and_stays_a_draft(self) -> None:
+        self.reuse()
+        self.drafts["N42"] = True
+        self.lagging = ["0ld" * 13 + "0"] * 10_000
+        with self.assertRaises(open_pr.OpenPrError) as caught:
+            open_pr.open_pr(self.repo, "lane/x", "t", "b", arm=True)
+        self.assertIn("not marked ready", str(caught.exception))
+        self.assertNotIn(("ready", "N42"), self.events)
+        self.assertTrue(self.drafts["N42"])
+
+    def test_an_unarmed_push_does_not_wait_for_the_head(self) -> None:
+        self.reuse()
+        self.lagging = ["0ld" * 13 + "0"] * 10_000
+        self.assertEqual(open_pr.open_pr(self.repo, "lane/x", "t", "b", arm=False)["draft"], True)
 
     def test_a_rework_returns_a_ready_armed_pull_request_to_draft_before_its_push(self) -> None:
         self.reuse()
