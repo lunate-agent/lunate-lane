@@ -172,10 +172,17 @@ delivers it (cron mail, or the orchestrator's own scheduler capturing stdout). B
 
 ## Known limitations
 
-- **Sessions run as the same macOS user as the lane.** A session has its own HOME and no GitHub credential in
-  its environment, but it runs with `--approve` and the lane's uid. It could still read
-  `~/.config/lunate-lane/app.json` and the App private keys by absolute path, mint a reviewer token and approve
-  its own pull request. It could also read a push's environment (`ps -E`) while the push runs. The output scan
-  and the review author read-back catch some misuse after the fact, but neither is a boundary. The fix is to run
-  sessions as a separate macOS user that cannot read the keys or the lane's processes. That is deferred to a
-  later round.
+- **The sandbox is the v1 boundary; a separate macOS user is the follow-up.** Every Pi session — worker and
+  reviewer — runs under `sandbox-exec` with a profile (`harness.sandbox_profile`) that denies reading or writing
+  `~/.config/lunate-lane` (the App keys, `app.json`, the model key, the push's askpass files), `~/.hermes`,
+  `~/.ssh`, `~/.config/gh` and `~/Library/Keychains`, and denies process-info calls on any process outside the
+  session's own sandbox. Two things it cannot do, and what covers them:
+  - `sysctl(KERN_PROCARGS2)` is not mediated by the sandbox on this macOS, so a session can still read the
+    argv and environment of any process of the same user. The lane therefore keeps secrets out of both: the
+    push's token reaches git through a `GIT_ASKPASS` helper that reads a mode-600 file in a denied directory
+    (the old URL rewrite put the token in `git-remote-https`'s argv, visible to plain `ps`). The model key is
+    in the session's own environment by design.
+  - `sandbox-exec` is deprecated by Apple and the profile language is undocumented; a macOS update could change
+    what it enforces. `tests/test_harness.py` checks the profile against the real `sandbox-exec` on every run.
+  The session still runs with `--approve` as the lane's uid. Running sessions as a separate macOS user that
+  cannot read the keys or the lane's processes remains the follow-up.

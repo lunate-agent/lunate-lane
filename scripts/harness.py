@@ -6,9 +6,12 @@ tool-markup check) and `lunate-claims.py` (a pid file per running worker), cut d
 A session gets a minimal environment: PATH (with the pinned .NET SDK first when it exists), a HOME of its own
 under its scratch directory (seeded with only what Pi needs), a private TMPDIR, and the model credential. It is
 handed no GitHub credential: `gh` points at an empty config directory and git's credential helpers are blanked,
-so the lane, not the session, pushes and opens pull requests as the worker identity. This is not a sandbox: the
-session runs as the same macOS user and could still read files outside its HOME by absolute path (README,
-"Known limitations").
+so the lane, not the session, pushes and opens pull requests as the worker identity.
+
+Every session — worker and reviewer — runs under `sandbox-exec` (#10): its profile denies reading or writing the
+lane's credentials (`~/.config/lunate-lane`), the old lane's (`~/.hermes`), `~/.ssh`, `~/.config/gh` and
+`~/Library/Keychains`, and denies process-info calls on other processes. It is the v1 boundary; the session still
+runs as the lane's macOS user (README, "Known limitations").
 """
 
 from __future__ import annotations
@@ -31,6 +34,9 @@ DEFAULT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 TOOL_MARKUP = ("</arg_value>", "</arg_key>", "<arg_value>", "<arg_key>")
 # What Pi needs from the real home, copied into the session's own. Not auth.json: the credential is in the env.
 HOME_SEED = (".pi/agent/settings.json", ".pi/agent/models-store.json", ".pi/agent/bin/fd")
+# Under the real home: what a session may neither read nor write.
+SANDBOX_DENY = (".config/lunate-lane", ".hermes", ".ssh", ".config/gh", "Library/Keychains")
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
 
 
 class HarnessError(LaneError):
@@ -128,6 +134,47 @@ def session_env(cfg: common.Config, scratch: pathlib.Path, extra: dict | None = 
     return env
 
 
+def _sbpl(path: str) -> str:
+    return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def denied_paths(cfg: common.Config, real_home: pathlib.Path | None = None) -> list[str]:
+    """The directories a session may not touch, each as given and as resolved (the sandbox matches real paths)."""
+    real_home = real_home or pathlib.Path.home()
+    found: list[str] = []
+    for path in [real_home / d for d in SANDBOX_DENY] + [cfg.app_config.parent]:
+        for form in (str(path), os.path.realpath(path)):
+            if form not in found:
+                found.append(form)
+    return found
+
+
+def sandbox_profile(cfg: common.Config, real_home: pathlib.Path | None = None) -> str:
+    """The session's sandbox: everything allowed except the lane's and the user's secrets, and other processes'
+    information. On this macOS the kernel does not ask the sandbox about `sysctl(KERN_PROCARGS2)`, so another
+    process's argv and environment stay readable — the lane therefore keeps tokens out of both (open_pr.push)."""
+    deny = " ".join(f"(subpath {_sbpl(p)})" for p in denied_paths(cfg, real_home))
+    return ("(version 1)\n(allow default)\n"
+            f"(deny file-read* file-write* {deny})\n"
+            # deny, then allow the session's own sandbox: `(target others)` alone is not enforced on this macOS
+            # (a probe still read the lane's pids); this form is, and it keeps a session's own children readable
+            # (dotnet's test host watches them)
+            "(deny process-info*)\n(allow process-info* (target same-sandbox))\n")
+
+
+def sandboxed(command: list, profile: pathlib.Path) -> list:
+    return [SANDBOX_EXEC, "-f", str(profile), *command]
+
+
+def write_profile(cfg: common.Config, scratch: pathlib.Path, real_home: pathlib.Path | None = None) -> pathlib.Path:
+    path = scratch / "session.sb"
+    try:
+        path.write_text(sandbox_profile(cfg, real_home), encoding="utf-8")
+    except OSError as exc:
+        raise HarnessError(f"the sandbox profile {path} could not be written ({exc.__class__.__name__}: {exc})") from exc
+    return path
+
+
 def argv(cfg: common.Config, model: str, session_dir: pathlib.Path, session_id: str, prompt: str) -> list:
     provider, slash, model_id = model.partition("/")
     if not slash:
@@ -149,8 +196,8 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
     """
     timeout, idle = int(cfg.harness["session_timeout"]), int(cfg.harness["stall_idle"])
     session_id = f"{worktree.name}-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
-    command = argv(cfg, model, scratch / "sessions", session_id, prompt)
     env = session_env(cfg, scratch, extra_env)
+    command = sandboxed(argv(cfg, model, scratch / "sessions", session_id, prompt), write_profile(cfg, scratch))
     log_path.parent.mkdir(parents=True, exist_ok=True)
     with log_path.open("ab") as out:
         try:

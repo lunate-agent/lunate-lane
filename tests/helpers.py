@@ -21,7 +21,8 @@ class TempState:
     def __init__(self, **over) -> None:
         self.root = pathlib.Path(tempfile.mkdtemp(prefix="lane-state-"))
         self.cfg = dataclasses.replace(common.load_config(), state=self.root / "state", checkout=self.root / "checkout",
-                                       pins=self.root / "pins.json", **over)
+                                       pins=self.root / "pins.json", app_config=self.root / "config" / "app.json",
+                                       **over)
         self.saved = common._CONFIG
         common._CONFIG = self.cfg
 

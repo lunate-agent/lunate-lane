@@ -122,6 +122,74 @@ class CredentialAndEnvTests(HarnessCase):
             harness.argv(self.cfg, "bare-model", self.state.root, "s1", "p")
 
 
+class SandboxTests(HarnessCase):
+    """#10: every session runs under sandbox-exec with the lane's profile."""
+
+    def profile(self):
+        scratch = self.state.root / "scratch"
+        scratch.mkdir(exist_ok=True)
+        return harness.write_profile(self.cfg, scratch, self.real_home)
+
+    def run_in(self, command, profile=None):
+        return subprocess.run(harness.sandboxed(command, profile or self.profile()), capture_output=True, text=True,
+                              timeout=60)
+
+    def test_a_sandboxed_child_cannot_read_or_write_any_denied_directory(self) -> None:
+        allowed = self.state.root / "allowed.txt"
+        allowed.write_text("fine\n")
+        self.assertEqual(self.run_in(["/bin/cat", str(allowed)]).stdout, "fine\n", "the profile is not deny-all")
+        profile = self.profile()
+        for denied in harness.SANDBOX_DENY:
+            secret = self.real_home / denied / "secret"
+            secret.parent.mkdir(parents=True, exist_ok=True)
+            secret.write_text("key material\n")
+            with self.subTest(directory=denied):
+                read = self.run_in(["/bin/cat", str(secret)], profile)
+                self.assertNotEqual(read.returncode, 0)
+                self.assertNotIn("key material", read.stdout)
+                self.assertIn("Operation not permitted", read.stderr)
+                wrote = self.run_in(["/usr/bin/touch", str(secret.parent / "planted")], profile)
+                self.assertNotEqual(wrote.returncode, 0)
+                self.assertFalse((secret.parent / "planted").exists())
+
+    def test_the_app_config_directory_is_denied_wherever_it_lives(self) -> None:
+        key = self.cfg.app_config.parent / "lunate-reviewer.pem"
+        key.parent.mkdir(parents=True, exist_ok=True)
+        key.write_text("-----BEGIN PRIVATE KEY-----\n")
+        self.assertNotEqual(self.run_in(["/bin/cat", str(key)]).returncode, 0)
+
+    def test_a_sandboxed_child_cannot_read_another_processs_info_but_can_read_its_own(self) -> None:
+        probe = ("import ctypes, os, sys; lib = ctypes.CDLL('/usr/lib/libproc.dylib'); "
+                 "buf = ctypes.create_string_buffer(4096); "
+                 "print(lib.proc_pidpath(int(sys.argv[1]), buf, 4096) > 0, lib.proc_pidpath(os.getpid(), buf, 4096) > 0)")
+        done = self.run_in(["/usr/bin/python3", "-c", probe, str(os.getpid())])
+        self.assertEqual(done.stdout.split(), ["False", "True"], done.stderr)
+        plain = subprocess.run(["/usr/bin/python3", "-c", probe, str(os.getpid())], capture_output=True, text=True)
+        self.assertEqual(plain.stdout.split(), ["True", "True"], "outside the sandbox the same probe can read it")
+
+    def test_the_real_pi_still_starts_under_the_profile(self) -> None:
+        import shutil
+
+        pi = shutil.which("pi")
+        if pi is None:
+            self.skipTest("pi is not installed on this host")
+        done = self.run_in([pi, "--version"])
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertRegex(done.stdout.strip(), r"^\d+\.\d+")
+
+    def test_run_session_launches_pi_inside_the_sandbox(self) -> None:
+        secret = self.real_home / ".ssh" / "id_ed25519"
+        self.fake_pi(f'cat "{secret}" 2>&1; echo work > "$PWD/out.txt"\n')
+        log = self.state.root / "s.log"
+        outcome = harness.run_session(self.cfg, model="p/m", worktree=self.worktree, prompt="x",
+                                      scratch=self.state.root / "scratch", log_path=log, tick=0.2)
+        self.assertEqual(outcome.rc, 0)
+        text = log.read_text()
+        self.assertIn("Operation not permitted", text)
+        self.assertNotIn("key\n", text.replace("Operation not permitted", ""))
+        self.assertEqual((self.worktree / "out.txt").read_text(), "work\n", "the worktree stays writable")
+
+
 class SecretShapeTests(unittest.TestCase):
     def test_token_and_key_shapes_are_caught(self) -> None:
         cases = {

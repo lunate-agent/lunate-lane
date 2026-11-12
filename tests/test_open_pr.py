@@ -3,15 +3,20 @@
 No network: every GitHub call is replaced, so a failure is the only thing that can make these pass.
 """
 
+import base64
+import http.server
+import os
 import pathlib
 import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from scripts import open_pr  # noqa: E402
+from tests.helpers import TempState  # noqa: E402
 
 
 def fake_api(monkey_self=None, **_):
@@ -23,6 +28,8 @@ class FailurePathTests(unittest.TestCase):
         # a real repository, so a failure can only come from the branch being absent
         self._tmp = tempfile.mkdtemp(prefix="lane-test-")
         self.repo = pathlib.Path(self._tmp)
+        self.state = TempState()
+        self.addCleanup(self.state.close)
         subprocess.run(["git", "init", "-q", "-b", "main"], cwd=self._tmp, capture_output=True)
         self.saved = (open_pr._api, open_pr.identity.installation_token, open_pr.push, open_pr._graphql,
                       open_pr.queue_method)
@@ -243,6 +250,49 @@ class FailurePathTests(unittest.TestCase):
         self.assertIn("refused", str(caught.exception))
         self.assertEqual(subprocess.run(["git", "-C", str(origin), "rev-parse", "wt/issue-3"], capture_output=True,
                                         text=True).stdout.strip(), first)
+
+    def test_the_push_token_reaches_git_through_askpass_and_no_process_shows_it(self) -> None:
+        """#10: a real git against a local server that demands basic auth. While git waits on the authenticated
+        request, no process's argv or environment holds the token; the askpass files are gone afterwards."""
+        token = "ghs_" + "Zz9" * 12
+        seen: dict = {}
+
+        class Server(http.server.BaseHTTPRequestHandler):
+            def do_GET(self):  # noqa: N802
+                auth = self.headers.get("Authorization")
+                if not auth or base64.b64decode(auth.split()[1]).decode().endswith(":"):  # no password: 401
+                    self.send_response(401)
+                    self.send_header("WWW-Authenticate", 'Basic realm="lane"')
+                    self.end_headers()
+                    return
+                seen["auth"] = base64.b64decode(auth.split()[1]).decode()
+                listing = subprocess.run(["ps", "-E", "-ww", "-axo", "command"], capture_output=True, text=True)
+                seen["listed"] = listing.stdout.count("\n")
+                seen["leaked"] = token in listing.stdout
+                self.send_response(404)
+                self.end_headers()
+
+            def log_message(self, *a):
+                pass
+
+        server = http.server.HTTPServer(("127.0.0.1", 0), Server)
+        threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.shutdown)
+        run_dir = open_pr._secret_dir()
+        self.assertEqual(oct(run_dir.stat().st_mode & 0o777), "0o700")
+        env = open_pr.push_env(token, run_dir, self.repo / "hooks", host="127.0.0.1")
+        token_file = pathlib.Path(env["LANE_PUSH_FILES"].split(os.pathsep)[0])
+        self.assertEqual(oct(token_file.stat().st_mode & 0o777), "0o600")
+        self.assertNotIn(token, "".join(f"{k}={v}" for k, v in env.items()))
+        try:
+            subprocess.run(["git", "ls-remote", f"http://x-access-token@127.0.0.1:{server.server_port}/r.git"],
+                           env=env, capture_output=True, text=True, timeout=60)
+        finally:
+            open_pr._drop_push_files(env)
+        self.assertEqual(seen.get("auth"), f"x-access-token:{token}")
+        self.assertGreater(seen["listed"], 5, "the process listing was read")
+        self.assertFalse(seen["leaked"], "the token showed in a process's argv or environment")
+        self.assertEqual(list(run_dir.iterdir()), [])
 
     def test_a_branch_that_does_not_exist_is_refused_before_pushing(self) -> None:
         with self.assertRaises(open_pr.OpenPrError) as caught:
