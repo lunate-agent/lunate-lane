@@ -66,7 +66,14 @@ def prepare_worktree(cfg: common.Config, number: int) -> pathlib.Path:
 
     A branch git would refuse to check out because another worktree holds it (the old lane kept its worktrees at
     `<checkout>/.worktrees/<card>`) is a named `WorktreeError` saying which one, never git's bare exit 128 (#4).
+    All of it — the fetch, the prune, the add, the fast-forward — runs under the checkout lock, and a new branch
+    is created with --no-track, so cutting a worktree never writes `.git/config`.
     """
+    with common.checkout_lock():
+        return _prepare_worktree(cfg, number)
+
+
+def _prepare_worktree(cfg: common.Config, number: int) -> pathlib.Path:
     repo, branch = cfg.checkout, f"wt/issue-{number}"
     path = common.state_dir("worktrees") / f"issue-{number}"
     common.git(repo, "fetch", "-q", "origin")
@@ -86,9 +93,9 @@ def prepare_worktree(cfg: common.Config, number: int) -> pathlib.Path:
         if ref_exists(repo, f"refs/heads/{branch}"):
             common.git(repo, "worktree", "add", str(path), branch)
         elif remote:
-            common.git(repo, "worktree", "add", "-b", branch, str(path), f"origin/{branch}")
+            common.git(repo, "worktree", "add", "--no-track", "-b", branch, str(path), f"origin/{branch}")
         else:
-            common.git(repo, "worktree", "add", "-b", branch, str(path), f"origin/{cfg.base}")
+            common.git(repo, "worktree", "add", "--no-track", "-b", branch, str(path), f"origin/{cfg.base}")
     if remote:
         common.wt_git(cfg, path, "merge", "--ff-only", "-q", f"origin/{branch}")
     return path

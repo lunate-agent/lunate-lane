@@ -36,7 +36,9 @@ copied into a repository, or passed to a model. Installation tokens are minted p
 
 ## How the loop runs
 
-Three cron jobs and one detached driver. Each cron job is one script, takes its own lock
+Three cron jobs and one detached driver. Every lane git that writes the product checkout's shared `.git` (fetch, worktree add/remove/prune, branch
+create/delete) runs under one more lock, `<state>/locks/checkout.lock`, so workers started in the same tick never
+race for `.git/config.lock`; new branches are cut with `--no-track`. Each cron job is one script, takes its own lock
 (`<state>/locks/<job>.lock`, a kernel `flock`, so two runs never overlap and a crash never leaves it held),
 logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
 

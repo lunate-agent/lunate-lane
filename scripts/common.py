@@ -15,6 +15,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import threading
 import time
 import urllib.error
 import urllib.request
@@ -201,7 +202,8 @@ def git_env(extra: dict | None = None) -> dict:
     """The environment for the lane's own git: no inherited GIT_*/GH_* settings, no system config, and a global
     config that is an empty lane-owned file."""
     env = {key: value for key, value in os.environ.items() if not key.startswith(("GIT_", "GH_", "GITHUB_"))}
-    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": str(empty_gitconfig()), "GIT_TERMINAL_PROMPT": "0"})
+    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": str(empty_gitconfig()), "GIT_TERMINAL_PROMPT": "0",
+                "GIT_OPTIONAL_LOCKS": "0"})  # a read (status) never refreshes and writes an index
     env.update(extra or {})
     return env
 
@@ -334,6 +336,48 @@ def job_lock(job: str) -> Iterator[None]:
         try:
             yield
         finally:
+            fcntl.flock(handle, fcntl.LOCK_UN)
+
+
+_CHECKOUT_LOCK = threading.local()
+CHECKOUT_LOCK_WAIT = 600
+
+
+@contextlib.contextmanager
+def checkout_lock(timeout: float | None = None) -> Iterator[None]:
+    """One writer at a time for the shared `<checkout>/.git`: every driver git that writes it — fetch, worktree
+    add/remove/prune, branch create/delete — runs under `<state>/locks/checkout.lock`. Concurrent `worktree add`s
+    raced for `.git/config.lock` on the first live tick and one card lost its launch. Blocks (a kernel flock,
+    released if the holder dies) up to CHECKOUT_LOCK_WAIT seconds, then a named StateError. Re-entrant within a
+    thread, so a locked step can call another."""
+    if getattr(_CHECKOUT_LOCK, "depth", 0):
+        _CHECKOUT_LOCK.depth += 1
+        try:
+            yield
+        finally:
+            _CHECKOUT_LOCK.depth -= 1
+        return
+    path = state_dir("locks") / "checkout.lock"
+    try:
+        handle = path.open("a")
+    except OSError as exc:
+        raise StateError(f"the checkout lock {path} could not be opened: {exc}") from exc
+    with handle:
+        deadline = time.monotonic() + (CHECKOUT_LOCK_WAIT if timeout is None else timeout)
+        while True:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise StateError(f"the checkout lock {path} stayed held for {timeout or CHECKOUT_LOCK_WAIT}s") \
+                        from None
+                time.sleep(0.1)
+        _CHECKOUT_LOCK.depth = 1
+        try:
+            yield
+        finally:
+            _CHECKOUT_LOCK.depth = 0
             fcntl.flock(handle, fcntl.LOCK_UN)
 
 

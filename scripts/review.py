@@ -139,12 +139,13 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str, str]:
         verdict_file.unlink(missing_ok=True)
     except OSError as exc:
         raise ReviewError(f"the old verdict {verdict_file} could not be removed: {exc}") from exc
-    common.git(repo, "fetch", "-q", "origin", p.head)
-    if worktree.exists() or worktree.is_symlink():
-        remove_review_worktree(cfg, p.number)
     driver = os.getpid()
-    harness.record_review(p.number, driver, worktree)  # so a SIGKILLed run's session and worktree get cleared
-    common.git(repo, "worktree", "add", "--detach", str(worktree), p.head)
+    with common.checkout_lock():  # fetch and worktree add write the shared .git
+        common.git(repo, "fetch", "-q", "origin", p.head)
+        if worktree.exists() or worktree.is_symlink():
+            remove_review_worktree(cfg, p.number)
+        harness.record_review(p.number, driver, worktree)  # so a SIGKILLed run's session and worktree get cleared
+        common.git(repo, "worktree", "add", "--detach", str(worktree), p.head)
     try:
         try:
             diff_file.write_text(common.git(repo, "diff", "--no-textconv", "--no-ext-diff",
@@ -198,6 +199,11 @@ def remove_review_worktree(cfg: common.Config, pr: int) -> None:
     build left untracked files in is deleted as a directory instead — it is detached at a head that is already on
     GitHub and holds nothing the lane keeps.
     """
+    with common.checkout_lock():
+        _remove_review_worktree(cfg, pr)
+
+
+def _remove_review_worktree(cfg: common.Config, pr: int) -> None:
     worktree = common.inside_state(common.state_dir("reviews") / f"pr-{int(pr)}", "reviews")
     if (worktree / ".git").exists():
         try:
