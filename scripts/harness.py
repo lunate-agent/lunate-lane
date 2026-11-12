@@ -23,6 +23,7 @@ import pathlib
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import time
 from typing import Callable
@@ -52,9 +53,17 @@ class Outcome:
 
 
 def read_credential(cfg: common.Config) -> str:
-    """The model credential, from the dotenv file the config names. Its value is never reported."""
+    """The model credential, from the dotenv file the config names (`~/.config/lunate-lane/env`). A file whose
+    mode is not exactly 600 is refused (#11). Its value is never reported."""
     path = pathlib.Path(cfg.harness["credential_file"]).expanduser()
     key = cfg.harness["credential_key"]
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError as exc:
+        raise HarnessError(f"the credential file {path} could not be read ({exc.__class__.__name__})") from exc
+    if mode != 0o600:
+        raise HarnessError(f"the credential file {path} is mode {mode:o}, not 600 — refusing it; "
+                           f"`chmod 600 {path}`")
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError as exc:

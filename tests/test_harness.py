@@ -27,6 +27,7 @@ class HarnessCase(unittest.TestCase):
         root = self.state.root
         self.envfile = root / "worker.env"
         self.envfile.write_text(f"# comment\nOTHER=x\nexport OPENCODE_GO_API_KEY=\"{SECRET}\"\n")
+        self.envfile.chmod(0o600)
         self.fake = root / "pi"
         self.cfg = self.state.cfg
         self.cfg.harness.update(binary=str(self.fake), credential_file=str(self.envfile), stall_idle=2,
@@ -70,6 +71,25 @@ class CredentialAndEnvTests(HarnessCase):
         self.envfile.unlink()
         with self.assertRaises(harness.HarnessError):
             harness.read_credential(self.cfg)
+
+    def test_a_credential_file_that_is_not_mode_600_is_refused(self) -> None:
+        """#11: 644, 640, 400, 660 — anything but 600 — is a named refusal that shows no value."""
+        for mode in (0o644, 0o640, 0o400, 0o660, 0o700):
+            with self.subTest(mode=oct(mode)):
+                self.envfile.chmod(mode)
+                with self.assertRaises(harness.HarnessError) as caught:
+                    harness.read_credential(self.cfg)
+                self.assertIn(f"mode {mode:o}, not 600", str(caught.exception))
+                self.assertNotIn(SECRET, str(caught.exception))
+        self.envfile.chmod(0o600)
+        self.assertEqual(harness.read_credential(self.cfg), SECRET)
+
+    def test_the_checked_in_config_reads_the_lanes_own_env_file(self) -> None:
+        from scripts import common
+
+        cfg = common.load_config()
+        self.assertEqual(cfg.harness["credential_file"], "~/.config/lunate-lane/env")
+        self.assertEqual(cfg.harness["credential_key"], "OPENCODE_GO_API_KEY")
 
     def test_the_session_gets_no_github_credential(self) -> None:
         with mock.patch.dict(os.environ, {"GH_TOKEN": "ghs_x", "GITHUB_TOKEN": "ghs_y", "PATH": "/usr/bin"}):

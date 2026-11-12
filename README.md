@@ -30,7 +30,8 @@ main checkout; changes happen in worktrees and reach main only after Daniel has 
 ## Credentials
 
 `~/.config/lunate-lane/app.json` holds the App ids and key paths; the private keys are
-`lunate-worker.pem` and `lunate-reviewer.pem`, mode 600 in a directory mode 700. They are never printed,
+`lunate-worker.pem` and `lunate-reviewer.pem`, mode 600 in a directory mode 700. The model key is
+`~/.config/lunate-lane/env`, mode 600 (see Configuration). They are never printed,
 copied into a repository, or passed to a model. Installation tokens are minted per run and are short-lived.
 
 ## How the loop runs
@@ -129,8 +130,10 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
 - `~/.config/lunate-lane/app.json` — App and installation ids and key paths (see Credentials).
 - `~/.config/lunate-lane/pins.json` — optional, `{"cards": [812, 790]}`: these cards first, in this order. Pins
   change the order only, never the limits. Absent means no pins; a malformed file stops the feeder.
-- The model credential for Pi: `harness.credential_file` (a dotenv file) under `harness.credential_key`; it is
-  exported to the session as `harness.credential_env` and never logged or put in argv.
+- The model credential for Pi: `~/.config/lunate-lane/env` (`harness.credential_file`), a dotenv file holding
+  `OPENCODE_GO_API_KEY=…` (`harness.credential_key`). It must be mode 600 — any other mode is refused and the
+  session does not start. It is exported to the session as `harness.credential_env` and never logged or put in
+  argv. (The old lane's `~/.hermes/.env` is no longer read.)
 - State: `~/.local/state/lunate-lane/`: `locks/`, `logs/`, `workers/` (one pid file per running worker, with
   its session's process group), `attempts/` (idle-run counts; a parked card's file is deleted to unpark it),
   `worktrees/`, `reviews/`, `scratch/` (each session's TMPDIR and its own `home/`), `sessions/` (Pi event logs),

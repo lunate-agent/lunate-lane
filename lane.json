@@ -17,7 +17,7 @@
   },
   "harness": {
     "binary": "pi",
-    "credential_file": "~/.hermes/.env",
+    "credential_file": "~/.config/lunate-lane/env",
     "credential_key": "OPENCODE_GO_API_KEY",
     "credential_env": "OPENCODE_API_KEY",
     "session_timeout": 5400,
