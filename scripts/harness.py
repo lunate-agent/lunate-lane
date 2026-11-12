@@ -228,6 +228,7 @@ SECRET_SHAPES = (
     ("private key", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")),
     ("GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})")),
     ("API key", re.compile(r"\bsk-[A-Za-z0-9_-]{16,}")),
+    ("OpenCode key", re.compile(r"\boc_[A-Za-z0-9_-]{8,}")),  # the model key's prefix: a fragment is enough
     ("AWS access key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
     ("JWT", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
     ("credential assignment", re.compile(

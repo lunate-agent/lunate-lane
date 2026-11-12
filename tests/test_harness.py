@@ -127,6 +127,7 @@ class SecretShapeTests(unittest.TestCase):
         cases = {
             "GitHub token": ["ghs_" + "a" * 36, "ghp_" + "Ab1" * 12, "github_pat_" + "11ABC_" * 6],
             "API key": ["sk-proj-" + "x" * 30],
+            "OpenCode key": ["oc_" + "Zx9Qw8Er" + "7Ty6Ui5Op4As3Df2Gh1Jk0", "(oc_k3yfragm)", "key oc_abcdefgh."],
             "private key": ["-----BEGIN RSA PRIVATE KEY-----\nMIIE", "-----BEGIN PRIVATE KEY-----"],
             "AWS access key": ["AKIAIOSFODNN7EXAMPLE"],
             "JWT": ["eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOjEyMzR9.c2lnbmF0dXJlLXZhbHVl"],
@@ -146,7 +147,9 @@ class SecretShapeTests(unittest.TestCase):
         for text in ("1. met — src/Lunate.Tui/Shell.cs:42 (commit 3f9a2c1d4e5b6a7980f1e2d3c4b5a69788776655)",
                      "Tests: dotnet test --filter FullyQualifiedName~Lunate.Tui.ShellTests passed (12/12)",
                      "The token budget is described in docs/adr/0007-session-tokens.md",
-                     "Refactored ConfigurationLoaderServiceFactoryProvider into two classes"):
+                     "Refactored ConfigurationLoaderServiceFactoryProvider into two classes",
+                     "the doc_string_formatter helper and the proc_handles_list both pass",
+                     "short oc_abc is not a key"):
             with self.subTest(text=text):
                 self.assertIsNone(harness.secret_kind(text))
 
