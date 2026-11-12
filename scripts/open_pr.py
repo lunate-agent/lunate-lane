@@ -53,38 +53,62 @@ def _api(token: str, method: str, path: str, payload: dict | None = None) -> dic
 
 
 def push(repo: pathlib.Path, branch: str, token: str, host: str = "github.com") -> None:
-    """Push the branch with the worker's token. The token never reaches the report.
+    """Push the named local branch. The token never reaches the report, argv, a file, or the keychain.
 
-    The token is passed by git config rewrite rather than in argv, so it cannot show up in a process listing.
+    Three things are disabled so nothing durable can see the token: it rides in the URL prefix rewrite, every
+    credential helper is blanked (so no helper is consulted and nothing is stored in the login keychain), and
+    hooks are pointed at an empty directory.
     """
+    exists = subprocess.run(
+        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+        capture_output=True, text=True, cwd=str(repo), timeout=60,
+    )
+    if exists.returncode != 0:
+        raise OpenPrError(f"there is no local branch {branch!r} in {repo} to push")
+    hooks_dir = pathlib.Path(os.environ.get("TMPDIR", "/tmp")) / f"lane-hooks-{os.getpid()}"
+    hooks_dir.mkdir(parents=True, exist_ok=True)
     env = dict(os.environ)
     env.update(
         {
-            "GIT_ASKPASS": "echo",
+            "GIT_ASKPASS": "true",
             "GIT_TERMINAL_PROMPT": "0",
-            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_COUNT": "4",
             # a prefix rewrite: the token is in the config, not argv, so it cannot show in a process listing
             "GIT_CONFIG_KEY_0": f"url.https://x-access-token:{token}@{host}/.insteadOf",
             "GIT_CONFIG_VALUE_0": f"https://{host}/",
+            "GIT_CONFIG_KEY_1": "credential.helper",
+            "GIT_CONFIG_VALUE_1": "",
+            "GIT_CONFIG_KEY_2": "core.hooksPath",
+            "GIT_CONFIG_VALUE_2": str(hooks_dir),
+            "GIT_CONFIG_KEY_3": "credential.interactive",
+            "GIT_CONFIG_VALUE_3": "never",
         }
     )
     done = subprocess.run(
-        ["git", "push", "--force-with-lease", "origin", f"HEAD:refs/heads/{branch}"],
+        ["git", "push", "--force-with-lease", "origin", f"refs/heads/{branch}:refs/heads/{branch}"],
         capture_output=True,
         text=True,
         cwd=str(repo),
         env=env,
         timeout=180,
     )
+    try:
+        hooks_dir.rmdir()
+    except OSError:
+        pass
     if done.returncode != 0:
         tail = ((done.stderr or "") + (done.stdout or "")).replace(token, "[REDACTED]")
-        raise OpenPrError(f"the push was refused: {tail.strip()[:200]}")
+        raise OpenPrError(f"the push of {branch} was refused: {tail.strip()[:200]}")
 
 
-def arm_auto_merge(token: str, node_id: str | None, method: str = "SQUASH") -> str:
-    """Arm auto-merge through the merge queue. A failure here is reported, not swallowed."""
+def arm_auto_merge(token: str, node_id: str | None, method: str = "SQUASH") -> None:
+    """Arm auto-merge through the merge queue, or raise. A refused auto-merge is not a success.
+
+    Rule one applies to this file first: if auto-merge cannot be armed, the caller must exit non-zero
+    rather than report a pull request as delivered.
+    """
     if not node_id:
-        return "not armed — no node id was returned"
+        raise OpenPrError("auto-merge could not be armed — no node id was returned for the pull request")
     query = (
         "mutation($id:ID!,$method:PullRequestMergeMethod!)"
         "{enablePullRequestAutoMerge(input:{pullRequestId:$id,mergeMethod:$method})"
@@ -99,36 +123,92 @@ def arm_auto_merge(token: str, node_id: str | None, method: str = "SQUASH") -> s
     try:
         with urllib.request.urlopen(request, timeout=60) as response:
             payload = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        raise OpenPrError(f"the auto-merge call was refused ({exc.code})") from exc
     except Exception as exc:
-        return f"not armed — {exc.__class__.__name__}"
+        raise OpenPrError(f"GitHub could not be reached for the auto-merge call ({exc.__class__.__name__})") from exc
     if payload.get("errors"):
-        return f"not armed — {str(payload['errors'])[:120]}"
-    return "armed"
+        raise OpenPrError(f"auto-merge was refused: {str(payload['errors'])[:160]}")
+    armed = ((payload.get("data") or {}).get("enablePullRequestAutoMerge") or {}).get("pullRequest") or {}
+    if not armed.get("autoMergeRequest"):
+        raise OpenPrError("auto-merge reported no error but came back unarmed")
+
+
+def _worker_token() -> str:
+    """A named failure if the identity cannot mint, never a raw traceback."""
+    try:
+        return identity.installation_token("worker")
+    except identity.IdentityError as exc:
+        raise OpenPrError(f"the worker identity could not mint a token: {exc}") from exc
+
+
+def find_open_pr(branch: str, token: str) -> dict | None:
+    """The open pull request for this branch, if any. Reusing one beats failing with a 422."""
+    pulls = _api(token, "GET", f"/repos/{SLUG}/pulls?state=open&head=lunate-agent:{branch}")
+    if isinstance(pulls, list) and pulls:
+        return pulls[0]
+    return None
 
 
 def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = "main") -> dict:
-    """Mint, push, open, verify the author, arm auto-merge. Raises rather than half-succeeding."""
-    token = identity.installation_token("worker")
+    """Open or reuse the pull request for `branch`, as the worker identity, then arm auto-merge.
+
+    Raises on anything short of a pull request that exists, is authored by `lunate-worker[bot]`, and has
+    auto-merge armed.
+    """
+    token = _worker_token()
+
+    existing = find_open_pr(branch, token)
+    if existing:
+        number = existing.get("number")
+        author = (existing.get("user") or {}).get("login", "")
+        if author != WORKER_LOGIN:
+            raise OpenPrError(
+                f"#{number} is already open for {branch!r} but authored by {author!r}, not {WORKER_LOGIN}"
+            )
+        arm_auto_merge(token, existing.get("node_id"))
+        return {"number": number, "url": existing.get("html_url"), "author": author,
+                "auto_merge": "armed", "reused": True}
+
     push(repo, branch, token)
-    pull = _api(
-        token,
-        "POST",
-        f"/repos/{SLUG}/pulls",
-        {"title": title, "body": body, "head": branch, "base": base},
-    )
+    try:
+        pull = _api(
+            token,
+            "POST",
+            f"/repos/{SLUG}/pulls",
+            {"title": title, "body": body, "head": branch, "base": base},
+        )
+    except OpenPrError:
+        # a race: another run opened it between the check and this call
+        raced = find_open_pr(branch, token)
+        if raced:
+            arm_auto_merge(token, raced.get("node_id"))
+            return {"number": raced.get("number"), "url": raced.get("html_url"),
+                    "author": (raced.get("user") or {}).get("login", ""),
+                    "auto_merge": "armed", "reused": True}
+        raise
+
     number = pull.get("number")
     author = (pull.get("user") or {}).get("login", "")
     if not number:
         raise OpenPrError("the pull request was not returned with a number")
     if author != WORKER_LOGIN:
-        raise OpenPrError(f"the pull request came back authored by {author!r}, not {WORKER_LOGIN}")
-    armed = arm_auto_merge(token, pull.get("node_id"))
-    return {"number": number, "url": pull.get("html_url"), "author": author, "auto_merge": armed}
+        # never leave behind a pull request the reviewer identity cannot approve
+        try:
+            _api(token, "PATCH", f"/repos/{SLUG}/pulls/{number}", {"state": "closed"})
+            closed = " and closed again"
+        except OpenPrError:
+            closed = " and it could NOT be closed"
+        raise OpenPrError(f"the pull request came back authored by {author!r}, not {WORKER_LOGIN}{closed}")
+
+    arm_auto_merge(token, pull.get("node_id"))
+    return {"number": number, "url": pull.get("html_url"), "author": author,
+            "auto_merge": "armed", "reused": False}
 
 
 def close_pr(number: int, branch: str) -> str:
     """Close a pull request and delete its branch, as the worker identity. For self-tests."""
-    token = identity.installation_token("worker")
+    token = _worker_token()
     _api(token, "PATCH", f"/repos/{SLUG}/pulls/{number}", {"state": "closed"})
     try:
         _api(token, "DELETE", f"/repos/{SLUG}/git/refs/heads/{branch}")
