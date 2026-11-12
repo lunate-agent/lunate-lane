@@ -74,6 +74,10 @@ class PostTests(unittest.TestCase):
         self.patches = [mock.patch.object(common, "rest"), mock.patch("sys.stdout", new=io.StringIO()),
                         mock.patch.object(identity, "installation_token", return_value="ghs_reviewer")]
         self.rest, _, self.mint = [patch.start() for patch in self.patches]
+        self.author = "lunate-reviewer[bot]"
+        self.rest.side_effect = lambda token, method, path, payload=None: (
+            {"id": 31, "user": {"login": self.author}} if method == "POST" else
+            {"id": 31, "user": {"login": self.author}} if path.endswith("/reviews/31") else {})
 
     def tearDown(self) -> None:
         for patch in reversed(self.patches):
@@ -95,10 +99,32 @@ class PostTests(unittest.TestCase):
         with mock.patch.object(github, "pull", return_value=pull(5, 9, head="h1")):
             self.assertTrue(review.post(self.state.cfg, self.reviewed, "REQUEST_CHANGES", "fix x"))
         self.mint.assert_called_once_with("reviewer")
-        token, method, path, payload = self.rest.call_args.args
+        token, method, path, payload = self.rest.call_args_list[0].args
         self.assertEqual((token, method, path), ("ghs_reviewer", "POST", "/repos/lunate-agent/lunate/pulls/5/reviews"))
+        self.assertEqual(self.rest.call_args_list[1].args[1:3], ("GET", "/repos/lunate-agent/lunate/pulls/5/reviews/31"))
         self.assertEqual((payload["commit_id"], payload["event"]), ("h1", "REQUEST_CHANGES"))
         self.assertTrue(payload["body"].startswith("fix x"))
+
+    def test_a_review_that_reads_back_under_another_author_fails_the_run(self) -> None:
+        self.author = "lunate-worker[bot]"
+        with mock.patch.object(github, "pull", return_value=pull(5, 9, head="h1")):
+            with self.assertRaises(review.ReviewError) as caught:
+                review.post(self.state.cfg, self.reviewed, "APPROVE", "ok")
+        self.assertIn("authored by 'lunate-worker'", str(caught.exception))
+
+    def test_a_review_with_no_id_to_read_back_fails_the_run(self) -> None:
+        self.rest.side_effect = lambda *a, **k: {}
+        with mock.patch.object(github, "pull", return_value=pull(5, 9, head="h1")):
+            with self.assertRaises(review.ReviewError):
+                review.post(self.state.cfg, self.reviewed, "APPROVE", "ok")
+
+    def test_a_wrong_author_makes_the_job_exit_non_zero(self) -> None:
+        self.author = "someone"
+        with mock.patch.object(review, "due", return_value=[self.reviewed]), \
+                mock.patch.object(review, "run_review", return_value=("APPROVE", "ok")), \
+                mock.patch.object(github, "pull", return_value=pull(5, 9, head="h1")), \
+                mock.patch.object(sys, "argv", ["r"]):
+            self.assertEqual(review.main(), 1)
 
     def test_an_unreadable_state_before_posting_posts_nothing(self) -> None:
         with mock.patch.object(github, "pull", side_effect=common.GhError("#5 could not be read")):

@@ -6,7 +6,8 @@
 The review runs on the reviewer model (which the config keeps different from the worker's), in a detached
 worktree at the head, with the diff and the issue in its brief. It writes a JSON verdict; the lane re-reads the
 pull request and, only if it is still open at the same head, posts the verdict as a real GitHub review —
-APPROVE or REQUEST_CHANGES — as the `lunate-reviewer` identity. A missing or malformed verdict posts nothing.
+APPROVE or REQUEST_CHANGES — as the `lunate-reviewer` identity, then reads the review back and fails the run if
+GitHub does not name `lunate-reviewer` as its author. A missing or malformed verdict posts nothing.
 """
 
 from __future__ import annotations
@@ -93,8 +94,17 @@ def post(cfg: common.Config, p: github.Pull, event: str, body: str) -> bool:
     except identity.IdentityError as exc:
         raise ReviewError(f"the reviewer identity could not mint a token: {exc}") from exc
     footer = f"\n\n---\nReviewed at `{p.head[:9]}` on `{cfg.reviewer_model}`."
-    common.rest(token, "POST", f"/repos/{cfg.slug}/pulls/{p.number}/reviews",
-                {"commit_id": p.head, "event": event, "body": body + footer})
+    posted = common.rest(token, "POST", f"/repos/{cfg.slug}/pulls/{p.number}/reviews",
+                         {"commit_id": p.head, "event": event, "body": body + footer})
+    review_id = posted.get("id") if isinstance(posted, dict) else None
+    if not review_id:
+        raise ReviewError(f"#{p.number}: the review was sent but GitHub returned no id — its author is unchecked")
+    back = common.rest(token, "GET", f"/repos/{cfg.slug}/pulls/{p.number}/reviews/{review_id}")
+    author = github.login(back.get("user") if isinstance(back, dict) else None)
+    if author != cfg.reviewer_app:
+        raise ReviewError(f"#{p.number}: review {review_id} reads back as authored by {author or 'nobody'!r}, "
+                          f"not {cfg.reviewer_app} — check app.json; a submitted review cannot be deleted, "
+                          "dismiss it by hand")
     return True
 
 
