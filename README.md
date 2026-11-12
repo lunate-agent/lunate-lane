@@ -45,7 +45,8 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    - **rework first**: a worker pull request whose reviewer requested changes *on its current head* goes back to
      a worker on the same branch, with the review's findings in the brief. So does a **stuck** one — ready (not a
      draft) and red on a required check, `CONFLICTING` with main, or approved but removed from the merge queue
-     (neither queued nor armed, with the queue's removal on record) — with the failing check names and the tail
+     (neither queued nor armed, and the queue's latest removal was of the current head — one from before the last
+     push does not count; when a person turned auto-merge off last, that is their decision and not a rework) — with the failing check names and the tail
      of each failing job's log, the conflicting files, or the queue's reason in the brief. A failure that is the
      runner's fault — every failing run cancelled, timed out or failed to start with no failing step (the
      `ci-ok` roll-up failing only because such legs did counts too) — is not a rework: the feeder reruns the

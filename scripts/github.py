@@ -67,7 +67,8 @@ class Pull:
     checks: tuple = ()  # (name, status, conclusion)
     files: tuple | None = None  # changed paths; None means not read
     in_queue: bool = False  # in the merge queue now
-    queue_removal: str = ""  # why the merge queue last removed it, if it did
+    queue_removal: str = ""  # why the merge queue removed it — only a removal of the current head counts
+    disarmed_by: str = ""  # a person who turned auto-merge off last (the latest auto-merge event is theirs)
     runs: tuple = ()  # Run, for every check run on the head
 
     @property
@@ -210,8 +211,10 @@ def open_pulls(cfg: common.Config) -> list[Pull]:
 
 PULL = """query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){pullRequest(number:$n){
 number title state isDraft createdAt headRefName headRefOid mergeable author{login} autoMergeRequest{enabledAt}
-isInMergeQueue timelineItems(last:1,itemTypes:[REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{... on RemovedFromMergeQueueEvent{
-createdAt reason}}}
+isInMergeQueue queueRemoval:timelineItems(last:1,itemTypes:[REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{
+... on RemovedFromMergeQueueEvent{createdAt reason beforeCommit{oid}}}}
+autoMergeEvents:timelineItems(last:1,itemTypes:[AUTO_MERGE_ENABLED_EVENT,AUTO_MERGE_DISABLED_EVENT]){nodes{__typename
+... on AutoMergeDisabledEvent{actor{__typename login}}}}
 closingIssuesReferences(first:10){pageInfo{hasNextPage} nodes{number labels(first:50){pageInfo{hasNextPage} nodes{name}}}}
 reviews(last:100){pageInfo{hasPreviousPage} nodes{author{login} state body commit{oid}}}
 files(first:100){pageInfo{hasNextPage} nodes{path}}
@@ -246,8 +249,7 @@ def pull(cfg: common.Config, number: int) -> Pull:
                              str(r.get("body") or "")) for r in node["reviews"]["nodes"]),
         checks=checks, files=_files(cfg, int(number), node["files"]),
         in_queue=bool(node.get("isInMergeQueue")),
-        queue_removal=next((str(e.get("reason") or "removed") for e in
-                            ((node.get("timelineItems") or {}).get("nodes") or [])[-1:]), ""),
+        queue_removal=_queue_removal(node), disarmed_by=_disarmed_by(node, cfg.worker_app),
         runs=tuple(_run(c) for c in contexts if c["__typename"] == "CheckRun"),
     )
 
@@ -322,6 +324,25 @@ def _run(c: dict) -> Run:
                str(c.get("detailsUrl") or ""), int(run_id or 0), bool(failed))
 
 
+def _queue_removal(node: dict) -> str:
+    """The queue's reason for its latest removal — only when it removed the current head; one before the last
+    push is history, not a reason to rework (review of #17)."""
+    for event in ((node.get("queueRemoval") or {}).get("nodes") or [])[-1:]:
+        if ((event.get("beforeCommit") or {}).get("oid") or "") == node.get("headRefOid"):
+            return str(event.get("reason") or "removed")
+    return ""
+
+
+def _disarmed_by(node: dict, worker_app: str) -> str:
+    """The login of a person (a User, not an App) whose turning auto-merge off is the latest auto-merge event."""
+    for event in ((node.get("autoMergeEvents") or {}).get("nodes") or [])[-1:]:
+        actor = event.get("actor") or {}
+        if event.get("__typename") == "AutoMergeDisabledEvent" and actor.get("__typename") == "User" \
+                and login(actor) != worker_app:
+            return login(actor)
+    return ""
+
+
 def failure_kind(p: Pull, required: frozenset) -> str | None:
     """'infra' or 'real' for a head whose required checks are failing, else None (#1 of the review of #17).
 
@@ -369,6 +390,8 @@ def stuck_reason(p: Pull, required: frozenset, reviewer: str, reran: frozenset =
         if (p.number, p.head) in reran:  # `reran`: (pull request, head) pairs already rerun once
             return "required checks cancelled or timed out again after a rerun"
         return None  # the feeder reruns it once instead
+    if p.disarmed_by:
+        return None  # a person turned auto-merge off: their decision, not a rework (the digest says who)
     if reviewer_verdict(p, reviewer) == "APPROVED" and not p.in_queue and not p.auto_merge and p.queue_removal:
         return f"out of the merge queue after approval ({p.queue_removal.lower()})"
     return None

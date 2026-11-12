@@ -30,6 +30,8 @@ class StateTests(unittest.TestCase):
         self.assertEqual(state(pull(1, 1, auto_merge=True, reviews=[review("APPROVED")])), "approved, auto-merge armed")
         self.assertEqual(state(pull(1, 1, reviews=[review("APPROVED")])), "approved, auto-merge NOT armed")
         self.assertEqual(state(pull(1, 1, auto_merge=True)), "awaiting review")
+        self.assertEqual(state(pull(1, 1, reviews=[review("APPROVED")], disarmed_by="a-maintainer")),
+                         "approved, auto-merge turned off by @a-maintainer")
 
 
 class ComposeTests(unittest.TestCase):

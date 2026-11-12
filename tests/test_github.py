@@ -9,6 +9,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from scripts import common, github  # noqa: E402
 from scripts.common import GhError  # noqa: E402
 from tests.helpers import REQUIRED, pull, review  # noqa: E402
+from tests.helpers import review as helper_review  # noqa: E402
 
 CFG = common.load_config()
 
@@ -184,6 +185,39 @@ class WorkerReportTests(unittest.TestCase):
         with mock.patch.object(common, "graphql", return_value={"repository": {"pullRequest": {"comments": {
                 "nodes": comments[1:3]}}}}):
             self.assertEqual(github.worker_report(CFG, 5), "")
+
+
+class QueueAndDisarmTests(unittest.TestCase):
+    """Review of #17: only a queue removal of the current head counts; a person disarming is not a rework."""
+
+    def read(self, removal_oid=None, disarm=None):
+        over = {}
+        if removal_oid is not None:
+            over["queueRemoval"] = {"nodes": [{"reason": "FAILED_CHECKS", "beforeCommit": {"oid": removal_oid}}]}
+        if disarm is not None:
+            over["autoMergeEvents"] = {"nodes": [{"__typename": "AutoMergeDisabledEvent", "actor": disarm}]}
+        with mock.patch.object(common, "graphql", return_value=PullTests().node(**over)):
+            return github.pull(CFG, 5)
+
+    def test_a_removal_of_the_current_head_counts_and_an_older_one_does_not(self) -> None:
+        self.assertEqual(self.read("abc").queue_removal, "FAILED_CHECKS")
+        self.assertEqual(self.read("older").queue_removal, "")
+        self.assertEqual(self.read().queue_removal, "")
+
+    def test_a_person_disarming_is_recorded_and_an_app_or_the_lane_is_not(self) -> None:
+        self.assertEqual(self.read(disarm={"__typename": "User", "login": "a-maintainer"}).disarmed_by, "a-maintainer")
+        self.assertEqual(self.read(disarm={"__typename": "Bot", "login": "github-merge-queue"}).disarmed_by, "")
+        self.assertEqual(self.read(disarm={"__typename": "User", "login": "lunate-worker"}).disarmed_by, "")
+
+    def test_neither_a_person_disarming_nor_an_old_removal_is_a_rework(self) -> None:
+        approved = [helper_review("APPROVED")]
+        for p, expected in ((pull(5, 9, reviews=approved, queue_removal="FAILED_CHECKS"),
+                             "out of the merge queue after approval (failed_checks)"),
+                            (pull(5, 9, reviews=approved, queue_removal="FAILED_CHECKS", disarmed_by="a-maintainer"), None),
+                            (pull(5, 9, reviews=approved, disarmed_by="a-maintainer"), None),
+                            (pull(5, 9, reviews=approved), None)):
+            with self.subTest(p=(p.queue_removal, p.disarmed_by)):
+                self.assertEqual(github.stuck_reason(p, frozenset({"ci-ok"}), "lunate-reviewer"), expected)
 
 
 class FailureKindTests(unittest.TestCase):

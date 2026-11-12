@@ -38,6 +38,8 @@ def pull_state(p: github.Pull, required: frozenset, reviewer: str) -> str:
     if verdict == "CHANGES_REQUESTED":
         return "changes requested"
     if verdict == "APPROVED":
+        if p.disarmed_by:
+            return f"approved, auto-merge turned off by @{p.disarmed_by}"
         return "approved, auto-merge armed" if p.auto_merge else "approved, auto-merge NOT armed"
     return "awaiting review" + ("" if p.auto_merge else " (auto-merge not armed)")
 
