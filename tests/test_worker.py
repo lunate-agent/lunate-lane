@@ -317,14 +317,14 @@ class DriveTests(RepoCase):
         harness.record_worker(3, os.getpid(), frozenset(), None)
 
         def run(cfg, *, on_start, log_path, **_):
-            on_start(4242)
+            on_start(4242, "issue-3-20261112-120000-1")
             log_path.write_text("")
             return harness.Outcome(0, False, 1, False)
 
         with mock.patch.object(harness, "run_session", side_effect=run):
             worker.drive(self.cfg, 3, None)
         record = json.loads((self.cfg.state / "workers" / "3.json").read_text())
-        self.assertEqual(record["session_pgid"], 4242)
+        self.assertEqual((record["session_pgid"], record["session_id"]), (4242, "issue-3-20261112-120000-1"))
 
     def test_a_closed_issue_is_never_worked(self) -> None:
         dispatch_card.card.side_effect = dispatch_card.CardError("issue #3 is CLOSED, not open")

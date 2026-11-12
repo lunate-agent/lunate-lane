@@ -139,10 +139,11 @@ def argv(cfg: common.Config, model: str, session_dir: pathlib.Path, session_id: 
 
 def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, prompt: str, scratch: pathlib.Path,
                 log_path: pathlib.Path, extra_env: dict | None = None, on_tick: Callable[[], None] | None = None,
-                on_start: Callable[[int], None] | None = None, tick: float = 30.0) -> Outcome:
+                on_start: Callable[[int, str], None] | None = None, tick: float = 30.0) -> Outcome:
     """Run Pi to completion in `worktree`, killing it when its event stream stalls or it passes the hard cap.
 
-    Pi runs in a process group of its own; `on_start` gets its id, so a record can name it for clean-up if this
+    Pi runs in a process group of its own; `on_start` gets that group and the session id, so a record can name
+    exactly this session for clean-up if this
     driver is killed outright. Any exception here — including the SystemExit `exit_on_signals` raises on
     SIGTERM — kills that group before it propagates.
     """
@@ -161,7 +162,7 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
         size, stalled = -1, False
         try:
             if on_start is not None:
-                on_start(proc.pid)
+                on_start(proc.pid, session_id)
             while proc.poll() is None:
                 time.sleep(tick)
                 now = time.monotonic()
@@ -278,7 +279,7 @@ def _write_record(path: pathlib.Path, data: dict) -> None:
         raise StateError(f"the worker record {path} could not be written: {exc}") from exc
 
 
-def note_session(card: int, pid: int, session_pgid: int) -> None:
+def note_session(card: int, pid: int, session_pgid: int, session_id: str) -> None:
     """Add the running session's process group to this driver's own record (another driver's is left alone)."""
     path = _record(card)
     try:
@@ -288,6 +289,7 @@ def note_session(card: int, pid: int, session_pgid: int) -> None:
     if data.get("pid") != pid:
         raise StateError(f"the worker record {path} belongs to pid {data.get('pid')}, not {pid}")
     data["session_pgid"] = int(session_pgid)
+    data["session_id"] = str(session_id)
     _write_record(path, data)
 
 
@@ -304,13 +306,15 @@ def _command(pid: int) -> str | None:
     return done.stdout.strip()
 
 
-def reap_session(card: int, session_pgid: int | None, grace: float = 10.0) -> bool:
-    """Kill the Pi session a dead driver left behind. Only a group whose leader is still this card's session is
-    touched — a recycled pid running something else is not. Returns whether a session was killed."""
-    if not session_pgid:
+def reap_session(card: int, session: tuple | None, grace: float = 10.0) -> bool:
+    """Kill the Pi session a dead driver left behind. `session` is the recorded (process group, session id); only
+    a group whose leader still runs with exactly that session id is touched — a recycled pid, or another session
+    of the same card, is not. A record without both is never acted on. Returns whether a session was killed."""
+    if not session:
         return False
+    session_pgid, session_id = session
     command = _command(session_pgid)
-    if command is None or f"--session-id issue-{int(card)}-" not in command:
+    if command is None or not re.search(rf"--session-id {re.escape(session_id)}(\s|$)", command):
         return False
     try:
         for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, grace)):
@@ -331,8 +335,8 @@ def reap_session(card: int, session_pgid: int | None, grace: float = 10.0) -> bo
     raise StateError(f"the orphaned session of card #{card} (group {session_pgid}) survived SIGKILL")
 
 
-def _clear_dead(path: pathlib.Path, card: int, session_pgid: int | None) -> None:
-    reap_session(card, session_pgid)
+def _clear_dead(path: pathlib.Path, card: int, session: tuple | None) -> None:
+    reap_session(card, session)
     path.unlink(missing_ok=True)
 
 
@@ -368,8 +372,9 @@ def worker_alive(pid: int, card: int) -> bool:
 def _read_record(path: pathlib.Path) -> tuple:
     try:
         data = json.loads(path.read_text())
-        pgid = data.get("session_pgid")
-        return int(data["card"]), int(data["pid"]), frozenset(data["areas"]), int(pgid) if pgid else None
+        pgid, session_id = data.get("session_pgid"), data.get("session_id")
+        session = (int(pgid), str(session_id)) if pgid and session_id else None
+        return int(data["card"]), int(data["pid"]), frozenset(data["areas"]), session
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise StateError(f"the worker record {path} could not be read: {exc}") from exc
 
@@ -380,10 +385,10 @@ def live_pid(card: int) -> int | None:
     path = _record(card)
     if not path.exists():
         return None
-    _, pid, _, session_pgid = _read_record(path)
+    _, pid, _, session = _read_record(path)
     if worker_alive(pid, card):
         return pid
-    _clear_dead(path, card, session_pgid)
+    _clear_dead(path, card, session)
     return None
 
 
@@ -401,11 +406,11 @@ def running_workers() -> dict:
     session its driver left running is killed first."""
     found = {}
     for path in _listing(common.state_dir("workers")):
-        card, pid, areas, session_pgid = _read_record(path)
+        card, pid, areas, session = _read_record(path)
         if worker_alive(pid, card):
             found[card] = areas
         else:
-            _clear_dead(path, card, session_pgid)
+            _clear_dead(path, card, session)
     return found
 
 

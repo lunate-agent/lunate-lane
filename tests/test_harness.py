@@ -228,8 +228,12 @@ class SessionTests(HarnessCase):
     def test_on_start_gets_the_session_group(self) -> None:
         self.fake_pi("echo $$ > \"$TMPDIR/pid\"\necho done\n")
         seen = []
-        self.run_fake(on_start=seen.append)
-        self.assertEqual(seen, [int((self.state.root / "scratch" / "pid").read_text())])
+        self.fake_pi("echo $$ > \"$TMPDIR/pid\"\necho \"$@\" > \"$TMPDIR/args\"\necho done\n")
+        self.run_fake(on_start=lambda pgid, sid: seen.append((pgid, sid)))
+        scratch = self.state.root / "scratch"
+        pgid, sid = seen[0]
+        self.assertEqual(pgid, int((scratch / "pid").read_text()))
+        self.assertIn(f"--session-id {sid} ", (scratch / "args").read_text())
 
     def test_an_unreadable_log_is_a_named_failure_not_an_empty_message(self) -> None:
         with self.assertRaises(harness.HarnessError):
@@ -262,7 +266,8 @@ class WorkerRecordTests(HarnessCase):
         pi = self.orphan("issue-5-20261112-120000-1")
         harness.record_worker(5, 999999, frozenset(), None)
         record = self.cfg.state / "workers" / "5.json"
-        record.write_text(json.dumps({**json.loads(record.read_text()), "session_pgid": pi.pid}))
+        record.write_text(json.dumps({**json.loads(record.read_text()), "session_pgid": pi.pid,
+                                      "session_id": "issue-5-20261112-120000-1"}))
         self.assertEqual(harness.running_workers(), {})
         self.assertIsNotNone(pi.wait(timeout=5), "the orphaned session must be gone")
         self.assertFalse(record.exists())
@@ -270,21 +275,38 @@ class WorkerRecordTests(HarnessCase):
     def test_live_pid_also_clears_an_orphaned_session(self) -> None:
         pi = self.orphan("issue-6-x")
         harness.record_worker(6, 999999, frozenset(), None)
-        harness.note_session(6, 999999, pi.pid)
+        harness.note_session(6, 999999, pi.pid, "issue-6-x")
         self.assertIsNone(harness.live_pid(6))
         self.assertIsNotNone(pi.wait(timeout=5))
 
     def test_a_recycled_session_pgid_running_something_else_is_left_alone(self) -> None:
         other = self.orphan("issue-55-x")  # card 5's record must not touch card 55's session
         harness.record_worker(5, 999999, frozenset(), None)
-        harness.note_session(5, 999999, other.pid)
+        harness.note_session(5, 999999, other.pid, "issue-5-x")
         self.assertEqual(harness.running_workers(), {})
         self.assertIsNone(other.poll())
+
+    def test_another_session_of_the_same_card_is_left_alone(self) -> None:
+        """Same card, same `issue-5-` prefix, different session id: not the session this record names."""
+        newer = self.orphan("issue-5-20261112-130000-2")
+        harness.record_worker(5, 999999, frozenset(), None)
+        harness.note_session(5, 999999, newer.pid, "issue-5-20261112-120000-1")
+        self.assertEqual(harness.running_workers(), {})
+        self.assertIsNone(newer.poll())
+        self.assertFalse((self.cfg.state / "workers" / "5.json").exists())
+
+    def test_a_record_without_a_session_id_is_never_reaped(self) -> None:
+        pi = self.orphan("issue-7-x")
+        harness.record_worker(7, 999999, frozenset(), None)
+        record = self.cfg.state / "workers" / "7.json"
+        record.write_text(json.dumps({**json.loads(record.read_text()), "session_pgid": pi.pid}))
+        self.assertEqual(harness.running_workers(), {})
+        self.assertIsNone(pi.poll())
 
     def test_a_session_is_noted_only_on_the_drivers_own_record(self) -> None:
         harness.record_worker(5, 111, frozenset(), None)
         with self.assertRaises(StateError):
-            harness.note_session(5, 222, 333)
+            harness.note_session(5, 222, 333, "issue-5-x")
 
     def test_an_unreadable_attempts_record_raises_rather_than_reading_as_not_parked(self) -> None:
         (self.cfg.state / "attempts").mkdir(parents=True, exist_ok=True)
