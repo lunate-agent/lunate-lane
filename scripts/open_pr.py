@@ -19,7 +19,10 @@ import subprocess
 import urllib.error
 import urllib.request
 
-import identity
+try:  # imported as scripts.open_pr by the tests, or run as a script
+    from . import identity
+except ImportError:  # pragma: no cover - the script path
+    import identity
 
 SLUG = "lunate-agent/lunate"
 API = "https://api.github.com"
