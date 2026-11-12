@@ -90,6 +90,22 @@ class FailurePathTests(unittest.TestCase):
         self.assertEqual(armed, ["N42"])
         self.assertEqual(len(pushes), 1, "reuse must still push the branch, or new commits never arrive")
 
+    def test_a_wrong_author_existing_pr_is_refused_without_pushing(self) -> None:
+        """The regression guard: a foreign branch must not be force-pushed before the refusal."""
+        pushes = []
+
+        def api(token, method, path, payload=None):
+            if method == "GET":
+                return [{"number": 9, "html_url": "u", "user": {"login": "someone-else"}, "node_id": "N9"}]
+            raise AssertionError(f"must not call {method} on a foreign pull request")
+
+        open_pr._api = api
+        open_pr.push = lambda *a, **k: pushes.append(a)
+        with self.assertRaises(open_pr.OpenPrError) as caught:
+            open_pr.open_pr(self.repo, "lane/x", "t", "b")
+        self.assertIn("authored by 'someone-else'", str(caught.exception))
+        self.assertEqual(pushes, [], "the branch must not be touched when the PR belongs to someone else")
+
     def test_a_branch_that_does_not_exist_is_refused_before_pushing(self) -> None:
         with self.assertRaises(open_pr.OpenPrError) as caught:
             open_pr.push(self.repo, "lane/never-created", "token-for-tests")

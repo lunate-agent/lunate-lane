@@ -188,6 +188,11 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
         # a race: another run opened it between the check and this call
         raced = find_open_pr(branch, token)
         if raced:
+            raced_author = (raced.get("user") or {}).get("login", "")
+            if raced_author != WORKER_LOGIN:
+                raise OpenPrError(
+                    f"#{raced.get('number')} already exists for {branch!r} but is authored by {raced_author!r}"
+                )
             arm_auto_merge(token, raced.get("node_id"))
             return {"number": raced.get("number"), "url": raced.get("html_url"),
                     "author": (raced.get("user") or {}).get("login", ""),

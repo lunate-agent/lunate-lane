@@ -126,6 +126,13 @@ class AheadAndBodyTests(unittest.TestCase):
         self.assertIn("Closes #1", body)
         self.assertIn("a normal #8 mention", body)
 
+    def test_the_colon_and_url_forms_are_defused_too(self) -> None:
+        text = "Fixes: #3 and Fixes https://github.com/lunate-agent/lunate/issues/4, plus a link with no keyword"
+        body = dispatch_card.body_for({"number": 1, "body": text, "milestone": None})
+        self.assertNotIn("Fixes: #3", body)
+        self.assertNotIn("Fixes https://github.com/lunate-agent/lunate/issues/4", body)
+        self.assertIn("link with no keyword", body)
+
     def test_a_long_issue_body_is_truncated(self) -> None:
         body = dispatch_card.body_for({"number": 1, "body": "x" * 9000, "milestone": None})
         self.assertLess(len(body), 8300)

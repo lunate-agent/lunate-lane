@@ -105,8 +105,12 @@ def _count(repo: pathlib.Path, name: str) -> int:
     return int(raw)
 
 
-CLOSING_KEYWORDS = re.compile(r"\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b(\s+)([\w.-]+/[\w.-]+)?#(\d+)",
-                              re.IGNORECASE)
+# closing keywords, their colon form, owner/repo#N, and the full issue URL form
+CLOSING_KEYWORDS = re.compile(
+    r"\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b(\s*:?\s*)([\w.-]+/[\w.-]+)?#(\d+)"
+    r"|\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b(\s*:?\s*)(https?://\S*?/issues/\d+)",
+    re.IGNORECASE,
+)
 
 
 def body_for(data: dict) -> str:
@@ -118,8 +122,12 @@ def body_for(data: dict) -> str:
     closes = f"Closes #{data['number']}"
     milestone = (data.get("milestone") or {}).get("title")
     head = closes + (f" · milestone {milestone}" if milestone else "")
-    issue_text = CLOSING_KEYWORDS.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(3) or ''}\\#{m.group(4)}",
-                                      data.get("body") or "(the issue states no body)")
+    def escape(match: "re.Match[str]") -> str:
+        if match.group(4):  # keyword #N, optionally owner/repo#N
+            return f"{match.group(1)}{match.group(2)}{match.group(3) or ''}\\#{match.group(4)}"
+        return f"{match.group(5)}{match.group(6)}\\{match.group(7)}"  # the URL form
+
+    issue_text = CLOSING_KEYWORDS.sub(escape, data.get("body") or "(the issue states no body)")
     if len(issue_text) > 8000:
         issue_text = issue_text[:8000] + "\n…truncated; the issue holds the rest."
     return f"{head}\n\n{issue_text}\n"
