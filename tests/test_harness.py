@@ -27,6 +27,7 @@ class HarnessCase(unittest.TestCase):
         root = self.state.root
         self.envfile = root / "worker.env"
         self.envfile.write_text(f"# comment\nOTHER=x\nexport OPENCODE_GO_API_KEY=\"{SECRET}\"\n")
+        self.envfile.chmod(0o600)
         self.fake = root / "pi"
         self.cfg = self.state.cfg
         self.cfg.harness.update(binary=str(self.fake), credential_file=str(self.envfile), stall_idle=2,
@@ -71,6 +72,25 @@ class CredentialAndEnvTests(HarnessCase):
         with self.assertRaises(harness.HarnessError):
             harness.read_credential(self.cfg)
 
+    def test_a_credential_file_that_is_not_mode_600_is_refused(self) -> None:
+        """#11: 644, 640, 400, 660 — anything but 600 — is a named refusal that shows no value."""
+        for mode in (0o644, 0o640, 0o400, 0o660, 0o700):
+            with self.subTest(mode=oct(mode)):
+                self.envfile.chmod(mode)
+                with self.assertRaises(harness.HarnessError) as caught:
+                    harness.read_credential(self.cfg)
+                self.assertIn(f"mode {mode:o}, not 600", str(caught.exception))
+                self.assertNotIn(SECRET, str(caught.exception))
+        self.envfile.chmod(0o600)
+        self.assertEqual(harness.read_credential(self.cfg), SECRET)
+
+    def test_the_checked_in_config_reads_the_lanes_own_env_file(self) -> None:
+        from scripts import common
+
+        cfg = common.load_config()
+        self.assertEqual(cfg.harness["credential_file"], "~/.config/lunate-lane/env")
+        self.assertEqual(cfg.harness["credential_key"], "OPENCODE_GO_API_KEY")
+
     def test_the_session_gets_no_github_credential(self) -> None:
         with mock.patch.dict(os.environ, {"GH_TOKEN": "ghs_x", "GITHUB_TOKEN": "ghs_y", "PATH": "/usr/bin"}):
             env = harness.session_env(self.cfg, self.state.root / "scratch")
@@ -80,6 +100,23 @@ class CredentialAndEnvTests(HarnessCase):
         self.assertEqual(env["GIT_CONFIG_VALUE_0"], "")
         self.assertEqual(list(pathlib.Path(env["GH_CONFIG_DIR"]).iterdir()), [])
         self.assertEqual(env["OPENCODE_API_KEY"], SECRET)
+
+    def test_the_sessions_git_has_no_credential_helper_from_any_config(self) -> None:
+        """Review of #17: not the system's osxkeychain, not the user's gh helper — checked with the real git."""
+        system = self.state.root / "system.gitconfig"
+        system.write_text("[credential]\n\thelper = osxkeychain\n")
+        (self.real_home / ".gitconfig").write_text('[credential "https://github.com"]\n\thelper = !gh auth git-credential\n')
+        env = harness.session_env(self.cfg, self.state.root / "scratch", real_home=self.real_home)
+        env["GIT_CONFIG_SYSTEM"] = str(system)  # where a system helper would come from, if system config were read
+        listed = subprocess.run(["git", "config", "--show-origin", "--get-regexp", "^credential"], env=env,
+                                capture_output=True, text=True, cwd=str(self.worktree))
+        helpers = [line for line in listed.stdout.splitlines() if not line.rstrip().endswith("credential.helper")]
+        self.assertEqual(helpers, [], listed.stdout)
+        self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertTrue(env["GIT_CONFIG_GLOBAL"].startswith(str(self.state.root / "scratch")))
+        name = subprocess.run(["git", "config", "user.name"], env=env, capture_output=True, text=True,
+                              cwd=str(self.worktree))
+        self.assertEqual(name.stdout.strip(), "Lane Test", "the session still has its identity")
 
     def test_the_session_gets_a_home_of_its_own_with_only_what_pi_needs(self) -> None:
         scratch = self.state.root / "scratch"
@@ -120,6 +157,217 @@ class CredentialAndEnvTests(HarnessCase):
     def test_a_model_without_a_provider_is_refused(self) -> None:
         with self.assertRaises(harness.HarnessError):
             harness.argv(self.cfg, "bare-model", self.state.root, "s1", "p")
+
+
+class SandboxTests(HarnessCase):
+    """#10: every session runs under sandbox-exec with the lane's profile."""
+
+    def profile(self):
+        scratch = self.state.root / "scratch"
+        scratch.mkdir(exist_ok=True)
+        return harness.write_profile(self.cfg, scratch, self.real_home, worktree=self.worktree)
+
+    def run_in(self, command, profile=None):
+        return subprocess.run(harness.sandboxed(command, profile or self.profile()), capture_output=True, text=True,
+                              timeout=60)
+
+    def test_a_sandboxed_child_cannot_read_or_write_any_denied_directory(self) -> None:
+        allowed = self.state.root / "allowed.txt"
+        allowed.write_text("fine\n")
+        self.assertEqual(self.run_in(["/bin/cat", str(allowed)]).stdout, "fine\n", "the profile is not deny-all")
+        profile = self.profile()
+        for denied in harness.SANDBOX_DENY:
+            secret = self.real_home / denied / "secret"
+            secret.parent.mkdir(parents=True, exist_ok=True)
+            secret.write_text("key material\n")
+            with self.subTest(directory=denied):
+                read = self.run_in(["/bin/cat", str(secret)], profile)
+                self.assertNotEqual(read.returncode, 0)
+                self.assertNotIn("key material", read.stdout)
+                self.assertIn("Operation not permitted", read.stderr)
+                wrote = self.run_in(["/usr/bin/touch", str(secret.parent / "planted")], profile)
+                self.assertNotEqual(wrote.returncode, 0)
+                self.assertFalse((secret.parent / "planted").exists())
+
+    def test_the_app_config_directory_is_denied_wherever_it_lives(self) -> None:
+        key = self.cfg.app_config.parent / "lunate-reviewer.pem"
+        key.parent.mkdir(parents=True, exist_ok=True)
+        key.write_text("-----BEGIN PRIVATE KEY-----\n")
+        self.assertNotEqual(self.run_in(["/bin/cat", str(key)]).returncode, 0)
+
+    def test_a_sandboxed_child_cannot_read_another_processs_info_but_can_read_its_own(self) -> None:
+        probe = ("import ctypes, os, sys; lib = ctypes.CDLL('/usr/lib/libproc.dylib'); "
+                 "buf = ctypes.create_string_buffer(4096); "
+                 "print(lib.proc_pidpath(int(sys.argv[1]), buf, 4096) > 0, lib.proc_pidpath(os.getpid(), buf, 4096) > 0)")
+        done = self.run_in(["/usr/bin/python3", "-c", probe, str(os.getpid())])
+        self.assertEqual(done.stdout.split(), ["False", "True"], done.stderr)
+        plain = subprocess.run(["/usr/bin/python3", "-c", probe, str(os.getpid())], capture_output=True, text=True)
+        self.assertEqual(plain.stdout.split(), ["True", "True"], "outside the sandbox the same probe can read it")
+
+    def test_the_real_pi_still_starts_under_the_profile(self) -> None:
+        import shutil
+
+        pi = shutil.which("pi")
+        if pi is None:
+            self.skipTest("pi is not installed on this host")
+        done = self.run_in([pi, "--version"])
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertRegex(done.stdout.strip(), r"^\d+\.\d+")
+
+    def test_run_session_launches_pi_inside_the_sandbox(self) -> None:
+        secret = self.real_home / ".ssh" / "id_ed25519"
+        self.fake_pi(f'cat "{secret}" 2>&1; echo work > "$PWD/out.txt"\n')
+        log = self.state.root / "s.log"
+        outcome = harness.run_session(self.cfg, model="p/m", worktree=self.worktree, prompt="x",
+                                      scratch=self.state.root / "scratch", log_path=log, tick=0.2)
+        self.assertEqual(outcome.rc, 0)
+        text = log.read_text()
+        self.assertIn("Operation not permitted", text)
+        self.assertNotIn("key\n", text.replace("Operation not permitted", ""))
+        self.assertEqual((self.worktree / "out.txt").read_text(), "work\n", "the worktree stays writable")
+
+
+REAL_HOME = pathlib.Path(os.path.expanduser("~"))  # HarnessCase patches Path.home(); these attacks need the real one
+PROBE = """
+import os, sys
+path = sys.argv[1]
+try:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    open(path, "a").close()
+    print("WROTE")
+except PermissionError:
+    print("DENIED")
+except OSError as exc:
+    print("OTHER", exc)
+"""
+
+
+class WriteSandboxTests(HarnessCase):
+    """Review of #17, round two, item 1: writes are denied by default; the attacks are run for real."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        import dataclasses
+        from tests.helpers import origin_and_clone
+
+        _, clone = origin_and_clone(self.state.root / "repos")
+        self.cfg = dataclasses.replace(self.cfg, checkout=clone)
+        self.wt = self.cfg.state / "worktrees" / "issue-3"
+        self.scratch = self.cfg.state / "scratch" / "issue-3"
+        self.scratch.mkdir(parents=True)
+        subprocess.run(["git", "-C", str(clone), "worktree", "add", "-q", "-b", "wt/issue-3", str(self.wt)], check=True)
+        subprocess.run(["git", "-C", str(clone), "branch", "-q", "other"], check=True)
+        self.git_dir = clone / ".git"
+        self.sb = harness.write_profile(self.cfg, self.scratch, self.real_home, worktree=self.wt, branch="wt/issue-3")
+
+    def probe(self, path, profile=None) -> str:
+        existed = path.exists()
+        before = path.read_bytes() if existed and path.is_file() else None
+        done = subprocess.run(harness.sandboxed(["/usr/bin/python3", "-c", PROBE, str(path)], profile or self.sb),
+                              capture_output=True, text=True, timeout=60)
+        if not existed and path.exists():  # an escape: undo it before failing
+            path.unlink()
+        if before is not None:
+            self.assertEqual(path.read_bytes(), before)
+        return done.stdout.strip() or done.stderr.strip()
+
+    def test_the_session_writes_its_scratch_and_worktree_and_commits_on_its_branch(self) -> None:
+        for path in (self.scratch / "home" / "ok", self.scratch / "tmp" / "ok", self.wt / "src" / "ok.cs"):
+            with self.subTest(path=str(path)):
+                self.assertEqual(self.probe(path), "WROTE")
+        script = (f'cd "{self.wt}" && echo y > f && git add f && '
+                  'git -c user.name=w -c user.email=w@x -c gc.auto=0 commit -qm w && git log --oneline -1')
+        done = subprocess.run(harness.sandboxed(["/bin/sh", "-c", script], self.sb), capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_everything_else_is_denied_lane_state_git_pointers_refs_homebrew_and_shell_startup(self) -> None:
+        from scripts import common
+
+        admin = self.git_dir / "worktrees" / "issue-3"
+        blocked = {
+            "lane code": common.ROOT / "scripts" / "planted.py",
+            "lane state record": self.cfg.state / "workers" / "9.json",
+            "push mirror": self.cfg.state / "push-mirror.git" / "config",
+            "another session's scratch": self.cfg.state / "scratch" / "issue-4" / "x",
+            "checkout config": self.git_dir / "config",
+            "checkout hook": self.git_dir / "hooks" / "pre-commit",
+            "worktree .git pointer": self.wt / ".git",
+            "gitdir record": admin / "gitdir",
+            "commondir": admin / "commondir",
+            "config.worktree": admin / "config.worktree",
+            "origin ref": self.git_dir / "refs" / "remotes" / "origin" / "main",
+            "another branch": self.git_dir / "refs" / "heads" / "other",
+            "packed-refs": self.git_dir / "packed-refs",
+            "user git config": self.real_home / ".gitconfig",
+            "Homebrew prefix": pathlib.Path("/opt/homebrew/bin/lane-sandbox-probe"),
+            "~/.zshrc": REAL_HOME / ".zshrc",
+            "LaunchAgents": REAL_HOME / "Library" / "LaunchAgents" / "lane.sandbox.probe.plist",
+        }
+        sb = harness.write_profile(self.cfg, self.scratch, REAL_HOME, worktree=self.wt, branch="wt/issue-3")
+        for name, path in blocked.items():
+            with self.subTest(target=name):
+                self.assertEqual(self.probe(path, sb), "DENIED", path)
+
+    def test_a_session_cannot_redirect_its_pointer_or_move_another_ref_with_git_itself(self) -> None:
+        script = (f'cd "{self.wt}" && echo "gitdir: /tmp/evil" > .git; '
+                  f'git update-ref refs/remotes/origin/main HEAD; git branch -f other HEAD; exit 0')
+        subprocess.run(harness.sandboxed(["/bin/sh", "-c", script], self.sb), capture_output=True, text=True)
+        self.assertTrue((self.wt / ".git").read_text().startswith(f"gitdir: {self.git_dir.resolve()}"))
+        origin = subprocess.run(["git", "-C", str(self.cfg.checkout), "rev-parse", "origin/main", "other",
+                                 "main"], capture_output=True, text=True).stdout.split()
+        self.assertEqual(len(set(origin)), 1, "neither origin/main nor another branch moved")
+
+    def test_launchctl_crontab_at_osascript_and_open_cannot_be_run_or_copied(self) -> None:
+        """Review of #17, round two, item 3, run for real: a launchd job submitted from the session would outlive it
+        and run unsandboxed."""
+        label = f"lane.sandbox.probe.{os.getpid()}"
+        marker = self.scratch / "launched"
+        self.addCleanup(subprocess.run, ["/bin/launchctl", "remove", label], capture_output=True)
+        attempts = {
+            "launchctl submit": ["/bin/launchctl", "submit", "-l", label, "--", "/usr/bin/touch", str(marker)],
+            "crontab": ["/usr/bin/crontab", "-l"],
+            "at": ["/bin/sh", "-c", f'echo "touch {marker}" | /usr/bin/at now'],
+            "batch": ["/bin/sh", "-c", f'echo "touch {marker}" | /usr/bin/batch'],
+            "osascript": ["/usr/bin/osascript", "-e", "return 1"],
+            "open": ["/usr/bin/open", "-a", "Calculator"],
+            "a copy of launchctl": ["/bin/sh", "-c", f'cp /bin/launchctl "{self.scratch}/lc" && "{self.scratch}/lc" '
+                                                     f'submit -l {label} -- /usr/bin/touch "{marker}"'],
+        }
+        for name, command in attempts.items():
+            with self.subTest(tool=name):
+                done = subprocess.run(harness.sandboxed(command, self.sb), capture_output=True, text=True, timeout=60)
+                self.assertNotEqual(done.returncode, 0, done.stdout)
+                self.assertIn("Operation not permitted", done.stderr + done.stdout)
+        listed = subprocess.run(["/bin/launchctl", "list", label], capture_output=True, text=True)
+        self.assertNotEqual(listed.returncode, 0, "a launchd job from the session exists")
+        self.assertFalse((self.scratch / "lc").exists())
+        self.assertFalse(marker.exists())
+
+    def test_dotnet_build_and_test_and_pi_still_work_under_the_profile(self) -> None:
+        import shutil
+
+        home = REAL_HOME
+        dotnet, pi = home / ".dotnet" / "dotnet", shutil.which("pi", path="/opt/homebrew/bin:/usr/local/bin:/usr/bin")
+        if not dotnet.exists() or pi is None:
+            self.skipTest("dotnet or pi is not installed on this host")
+        sb = harness.write_profile(self.cfg, self.scratch, home, worktree=self.wt, branch="wt/issue-3")
+        (self.scratch / "home").mkdir(exist_ok=True)
+        (self.scratch / "tmp").mkdir(exist_ok=True)
+        env = {"PATH": f"{dotnet.parent}:/opt/homebrew/bin:/usr/bin:/bin", "HOME": str(self.scratch / "home"),
+               "TMPDIR": str(self.scratch / "tmp"), "DOTNET_ROOT": str(dotnet.parent),
+               "DOTNET_CLI_HOME": str(self.scratch / "home"), "NUGET_PACKAGES": str(home / ".nuget" / "packages"),
+               "DOTNET_CLI_TELEMETRY_OPTOUT": "1", "DOTNET_NOLOGO": "1", "DOTNET_SKIP_FIRST_TIME_EXPERIENCE": "1"}
+        project = self.wt / "probe"
+        for command in (["dotnet", "new", "xunit", "-o", str(project)],
+                        ["dotnet", "build", str(project), "-c", "Release", "-nodeReuse:false"],
+                        ["dotnet", "test", str(project), "-c", "Release", "-nodeReuse:false", "--no-build"],
+                        [pi, "--version"]):
+            with self.subTest(command=command[:2]):
+                done = subprocess.run(harness.sandboxed(command, sb), env=env, capture_output=True, text=True,
+                                      timeout=600, cwd=str(self.wt))
+                self.assertEqual(done.returncode, 0, (done.stdout + done.stderr)[-1500:])
+            if command[1] == "test":
+                self.assertIn("Passed!", done.stdout)
 
 
 class SecretShapeTests(unittest.TestCase):
@@ -310,6 +558,30 @@ class WorkerRecordTests(HarnessCase):
         harness.record_worker(5, 111, frozenset(), None)
         with self.assertRaises(StateError):
             harness.note_session(5, 222, 333, "issue-5-x")
+
+    def test_rework_rounds_are_counted_per_pull_request_and_survive_a_new_commit(self) -> None:
+        self.assertEqual([harness.note_rework(3, 77) for _ in range(2)], [1, 2])
+        harness.note_rework(3, 78)
+        harness.note_run(3, True)
+        self.assertEqual((harness.rework_rounds(3, 77), harness.rework_rounds(3, 78)), (2, 1))
+
+    def test_a_rework_park_holds_through_a_new_commit_and_an_idle_park_does_not(self) -> None:
+        self.assertTrue(harness.park(3, "reworks"))
+        self.assertFalse(harness.park(3, "reworks"), "parked once, not again")
+        harness.note_run(3, True)
+        self.assertEqual(harness.parked_details(), {3: "reworks"})
+        for _ in range(3):
+            harness.note_attempt(4)
+            harness.note_run(4, False)
+        self.assertEqual(harness.parked_details(), {3: "reworks", 4: "idle"})
+        harness.note_run(4, True)
+        self.assertEqual(harness.parked_details(), {3: "reworks"})
+
+    def test_deleting_the_attempts_record_unparks_and_clears_the_counts(self) -> None:
+        harness.note_rework(3, 77)
+        harness.park(3, "reworks")
+        (self.cfg.state / "attempts" / "3.json").unlink()
+        self.assertEqual((harness.parked_cards(), harness.rework_rounds(3, 77)), (frozenset(), 0))
 
     def test_an_unreadable_attempts_record_raises_rather_than_reading_as_not_parked(self) -> None:
         (self.cfg.state / "attempts").mkdir(parents=True, exist_ok=True)

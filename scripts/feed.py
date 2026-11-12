@@ -17,7 +17,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from scripts import cards, common, github, harness  # noqa: E402
+from scripts import cards, cleanup, common, github, harness, open_pr, worker  # noqa: E402
 from scripts.common import LaneError  # noqa: E402
 
 JOB = "feed"
@@ -29,13 +29,42 @@ def rules(cfg: common.Config) -> cards.Rules:
 
 def decide(cfg: common.Config) -> tuple[list[cards.Launch], list[str]]:
     """Read everything the decision needs, then decide. Every read raises on failure."""
+    launches, notes, _, _ = decide_all(cfg)
+    return launches, notes
+
+
+def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[github.Pull], list[github.Pull]]:
+    """The launches and notes, and the worker pull requests whose required checks failed for infra reasons and
+    have not been rerun on their head yet: those are rerun once, not reworked."""
     milestone = github.milestone_cards(cfg)
     pulls = github.open_pulls(cfg)
     worker_pulls = [github.pull(cfg, p.number) for p in pulls if p.author == cfg.worker_app]
     running = harness.running_workers()
     pins = cards.load_pins(cfg.pins)
-    return cards.plan(cards=milestone, open_pulls=pulls, worker_pulls=worker_pulls, running=running,
-                      rules=rules(cfg), pins=pins, parked=harness.parked_cards())
+    required = github.required_checks(cfg)
+    reran, parked = harness.reran(), harness.parked_cards()
+    launches, notes = cards.plan(cards=milestone, open_pulls=pulls, worker_pulls=worker_pulls, running=running,
+                                 rules=rules(cfg), pins=pins, parked=parked, required=required, reran=reran)
+    rerun = [p for p in worker_pulls if p.state == "OPEN" and not p.draft and p.card not in running
+             and p.card not in parked and (p.number, p.head) not in reran
+             and github.failure_kind(p, required) == "infra"]
+    rearm = [p for p in worker_pulls if p.card not in running and p.card not in parked
+             and github.needs_rearm(p, required, cfg.reviewer_app)]
+    return launches, notes, rerun, rearm
+
+
+def rerun(cfg: common.Config, p: github.Pull, dry_run: bool) -> None:
+    """Rerun the failed jobs of an infra failure, once per head, and record it before anything else can fail."""
+    runs = github.infra_runs(p)
+    what = f"#{p.number}'s required checks were cancelled or timed out at {p.head[:8]}"
+    if dry_run:
+        common.log(JOB, f"would rerun the failed jobs of run(s) {', '.join(map(str, runs))} — {what}")
+        return
+    harness.note_rerun(p.number, p.head, runs)
+    for run_id in runs:
+        common.gh("run", "rerun", str(run_id), "--failed", "-R", cfg.slug)
+    common.log(JOB, f"reran the failed jobs of run(s) {', '.join(map(str, runs))} — {what}; a second such failure "
+                    "on this head is a rework")
 
 
 def start(cfg: common.Config, launch: cards.Launch) -> int:
@@ -56,18 +85,58 @@ def start(cfg: common.Config, launch: cards.Launch) -> int:
 
 def tick(dry_run: bool = False) -> None:
     cfg = common.config()
-    launches, notes = decide(cfg)
-    for note in notes:
-        common.log(JOB, note)
-    if not launches:
-        common.log(JOB, "nothing to start")
+    if not dry_run:
+        swept = open_pr.sweep_secret_dir()
+        if swept:
+            common.log(JOB, f"removed {swept} token file(s) a killed push left behind")
+    launches, notes, reruns, rearms = decide_all(cfg)
+    for p in reruns:
+        rerun(cfg, p, dry_run)
+    # the launches first, in the order they were chosen, then the notes on why nothing else was (#3)
     for launch in launches:
-        what = f"rework of #{launch.rework_pr} for card #{launch.card}" if launch.rework_pr else f"card #{launch.card}"
+        what = (f"rework of #{launch.rework_pr} for card #{launch.card} ({launch.reason})" if launch.rework_pr
+                else f"card #{launch.card}")
+        rounds = harness.rework_rounds(launch.card, launch.rework_pr) if launch.rework_pr else 0
+        if rounds >= harness.REWORK_LIMIT:  # the cap holds whatever the cause (#9)
+            if dry_run:
+                common.log(JOB, f"would park card #{launch.card} instead of a {what} — {rounds} rework rounds")
+                continue
+            if harness.park(launch.card, "reworks"):
+                worker.park(cfg, launch.card, launch.rework_pr, "reworks", rounds)
+            common.log(JOB, f"parked card #{launch.card} after {rounds} rework rounds on #{launch.rework_pr}")
+            continue
+        idle = harness.idle_runs(launch.card)
+        if idle >= harness.IDLE_RUN_LIMIT:  # runs that never got far enough to finish count too
+            if dry_run:
+                common.log(JOB, f"would park card #{launch.card} instead of {what} — {idle} runs with no new commit")
+                continue
+            if harness.park(launch.card, "idle"):
+                worker.park(cfg, launch.card, launch.rework_pr or launch.card, "idle", idle)
+            common.log(JOB, f"parked card #{launch.card} after {idle} runs with no new commit")
+            continue
         if dry_run:
             common.log(JOB, f"would start {what}")
             continue
+        harness.note_attempt(launch.card)  # before anything that can fail, as for rework rounds
+        if launch.rework_pr:
+            # counted before anything that can fail — the worker's own setup included — so a rework that keeps
+            # failing early still reaches the cap and is parked, instead of relaunching every tick
+            harness.note_rework(launch.card, launch.rework_pr)
         pid = start(cfg, launch)
         common.log(JOB, f"started {what} (pid {pid})")
+    if not launches:
+        common.log(JOB, "nothing to start")
+    for note in notes:
+        common.log(JOB, note)
+    for p in rearms:  # approved and clean, but its arming failed or never happened
+        if dry_run:
+            common.log(JOB, f"would re-arm #{p.number}: ready, approved at {p.head[:8]}, green, not armed")
+            continue
+        result = open_pr.rearm(p.number, p.node_id, cfg.base)
+        common.log(JOB, f"re-armed #{p.number}: approved at {p.head[:8]} but not armed — auto-merge {result['auto_merge']}"
+                        f" (queue {result['queue_method']}, GitHub records {result['merge_method'] or 'none'})")
+    # after the launches, so a cleanup that fails never holds work back — it still fails the tick, by name
+    cleanup.tidy(cfg, JOB, github.open_pulls(cfg), harness.running_workers(), dry_run)
 
 
 def main() -> int:

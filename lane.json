@@ -2,14 +2,21 @@
   "repo": "lunate-agent/lunate",
   "milestone": "0.4.0",
   "base": "main",
-  "wip_limit": 5,
+  "wip_limit": 3,
   "apps": {
     "worker": "lunate-worker",
     "reviewer": "lunate-reviewer"
   },
   "models": {
     "worker": "opencode-go/deepseek-v4.1-flash",
-    "reviewer": "opencode-go/glm-5.3-flash"
+    "reviewer": {
+      "full": "opencode-go/gpt-6-luna",
+      "light": "opencode-go/glm-5.3-flash"
+    }
+  },
+  "checks": {
+    "aggregate": "ci-ok",
+    "aggregate_step": "Every required job succeeded"
   },
   "labels": {
     "bug": "kind/bug",
@@ -17,7 +24,7 @@
   },
   "harness": {
     "binary": "pi",
-    "credential_file": "~/.hermes/.env",
+    "credential_file": "~/.config/lunate-lane/env",
     "credential_key": "OPENCODE_GO_API_KEY",
     "credential_env": "OPENCODE_API_KEY",
     "session_timeout": 5400,

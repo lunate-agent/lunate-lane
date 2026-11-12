@@ -14,6 +14,7 @@ import os
 import pathlib
 import re
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -61,9 +62,12 @@ class Config:
     worker_app: str
     reviewer_app: str
     worker_model: str
-    reviewer_model: str
+    reviewer_full: str  # any pull request touching code, tests, specs or CI (#15)
+    reviewer_light: str  # docs-only pull requests
     bug_label: str
     area_prefix: str
+    aggregate_check: str  # the required check that rolls up the CI jobs (`ci-ok`)
+    aggregate_step: str  # its step that fails when an aggregated job did not succeed
     harness: dict
     checkout: pathlib.Path
     state: pathlib.Path
@@ -100,8 +104,12 @@ def load_config(path: pathlib.Path | None = None) -> Config:
         slug=str(_need(data, "repo")), milestone=str(_need(data, "milestone")), base=str(_need(data, "base")),
         wip_limit=int(_need(data, "wip_limit")),
         worker_app=str(_need(data, "apps", "worker")), reviewer_app=str(_need(data, "apps", "reviewer")),
-        worker_model=str(_need(data, "models", "worker")), reviewer_model=str(_need(data, "models", "reviewer")),
+        worker_model=str(_need(data, "models", "worker")),
+        reviewer_full=str(_need(data, "models", "reviewer", "full")),
+        reviewer_light=str(_need(data, "models", "reviewer", "light")),
         bug_label=str(_need(data, "labels", "bug")), area_prefix=str(_need(data, "labels", "area_prefix")),
+        aggregate_check=str(_need(data, "checks", "aggregate")),
+        aggregate_step=str(_need(data, "checks", "aggregate_step")),
         harness=dict(_need(data, "harness")),
         checkout=expand("paths", "checkout"), state=expand("paths", "state"),
         app_config=expand("paths", "app_config"), pins=expand("paths", "pins"),
@@ -110,8 +118,9 @@ def load_config(path: pathlib.Path | None = None) -> Config:
         raise ConfigError(f"repo must be owner/name, not {cfg.slug!r}")
     if cfg.wip_limit < 1:
         raise ConfigError("wip_limit must be at least 1")
-    if cfg.worker_model == cfg.reviewer_model:
-        raise ConfigError("the reviewer model must differ from the worker model")
+    for kind, model in (("full", cfg.reviewer_full), ("light", cfg.reviewer_light)):
+        if model == cfg.worker_model:
+            raise ConfigError(f"the {kind} reviewer model must differ from the worker model ({model})")
     for key in ("binary", "credential_file", "credential_key", "credential_env", "session_timeout", "stall_idle"):
         _need(data, "harness", key)
     return cfg
@@ -167,8 +176,94 @@ def graphql(query: str, **variables: Any) -> dict:
     return payload["data"]
 
 
+# Every git the lane runs (review of #17, item 3): a session can write a worktree's files, so nothing git would
+# execute on the lane's behalf may come from config — no fsmonitor, no hooks, no credential helper — and neither
+# system nor global config (a filter or merge driver there plus a .gitattributes in the branch would run
+# unsandboxed). The product repository is public: fetching needs no credential.
+SAFE_GIT = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=")
+
+
+def empty_gitconfig() -> pathlib.Path:
+    """`<state>/git/empty.gitconfig`: the lane's global git config, kept empty. Sessions cannot write the state
+    directory; the lane truncates the file if anything ever appears in it."""
+    path = state_dir("git") / "empty.gitconfig"
+    try:
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise StateError(f"{path} is not a plain file — refusing to use it as git's global config")
+        if not path.exists() or path.stat().st_size:
+            path.write_text("")
+    except OSError as exc:
+        raise StateError(f"the lane's empty git config {path} could not be prepared: {exc}") from exc
+    return path
+
+
+def git_env(extra: dict | None = None) -> dict:
+    """The environment for the lane's own git: no inherited GIT_*/GH_* settings, no system config, and a global
+    config that is an empty lane-owned file."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("GIT_", "GH_", "GITHUB_"))}
+    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": str(empty_gitconfig()), "GIT_TERMINAL_PROMPT": "0"})
+    env.update(extra or {})
+    return env
+
+
+def checkout_git(cfg: Config) -> pathlib.Path:
+    """The checkout's own `.git` directory, resolved. A `.git` that is a file or a symlink is refused: the lane
+    never takes a repository's location from a pointer file."""
+    path = cfg.checkout / ".git"
+    if path.is_symlink() or not path.is_dir():
+        raise GitError(f"{path} is not a plain directory — refusing to read where the repository is from it")
+    return path.resolve()
+
+
+def worktree_admin(cfg: Config, worktree: pathlib.Path) -> pathlib.Path:
+    """`<checkout>/.git/worktrees/<name>` for a lane worktree, computed by the lane — never read from the
+    worktree's `.git` pointer file — and checked against the admin directory's own `gitdir` record."""
+    admin = checkout_git(cfg) / "worktrees" / worktree.name
+    try:
+        recorded = (admin / "gitdir").read_text().strip()
+    except OSError as exc:
+        raise GitError(f"{worktree} is not a registered worktree of {cfg.checkout} ({exc.__class__.__name__})") from exc
+    if os.path.realpath(recorded) != os.path.realpath(worktree / ".git"):
+        raise GitError(f"{admin} belongs to {recorded}, not {worktree} — refusing to use it")
+    # git follows <admin>/commondir even with GIT_COMMON_DIR set and --git-dir given, so it is checked too
+    try:
+        common = (admin / "commondir").read_text().strip()
+    except OSError as exc:
+        raise GitError(f"{admin}/commondir could not be read ({exc.__class__.__name__})") from exc
+    if pathlib.Path(os.path.realpath(admin / common)) != checkout_git(cfg):
+        raise GitError(f"{admin}/commondir points at {common}, not {checkout_git(cfg)} — refusing to use it")
+    return admin
+
+
+def wt_git(cfg: Config, worktree: pathlib.Path, *args: str, timeout: int = 300) -> str:
+    """git in a lane worktree with --git-dir and --work-tree computed by the lane and GIT_COMMON_DIR pinned, so a
+    rewritten `.git` pointer or `commondir` file cannot point it elsewhere (review of #17, round two)."""
+    admin = worktree_admin(cfg, worktree)
+    argv = ["git", *SAFE_GIT, f"--git-dir={admin}", f"--work-tree={worktree}", *args]
+    return run(argv, error=GitError, timeout=timeout, cwd=worktree,
+               env=git_env({"GIT_COMMON_DIR": str(checkout_git(cfg))})).strip()
+
+
+def git_argv(repo: pathlib.Path, *args: str) -> list:
+    return ["git", *SAFE_GIT, "-C", str(repo), *args]
+
+
 def git(repo: pathlib.Path, *args: str, timeout: int = 300, env: dict | None = None) -> str:
-    return run(["git", "-C", str(repo), *args], error=GitError, timeout=timeout, env=env).strip()
+    return run(git_argv(repo, *args), error=GitError, timeout=timeout, env=git_env(env)).strip()
+
+
+def inside_state(path: pathlib.Path, under: str = "") -> pathlib.Path:
+    """`path`, resolved, if it lies strictly inside the state directory (or its `under` folder): no `..` in it, not
+    itself a symlink. Anything else — a forged record, a symlink a session planted — is a StateError, never a path
+    to delete (review of #17, item 3)."""
+    root = (config().state / under).resolve() if under else config().state.resolve()
+    given = pathlib.Path(path)
+    if ".." in given.parts or given.is_symlink():
+        raise StateError(f"{path} has a '..' or is a symlink — refusing to touch it")
+    resolved = given.resolve()
+    if resolved == root or root not in resolved.parents:
+        raise StateError(f"{path} resolves to {resolved}, outside {root} — refusing to touch it")
+    return resolved
 
 
 def rest(token: str, method: str, path: str, payload: dict | None = None) -> Any:
@@ -215,15 +310,23 @@ def log(job: str, message: str) -> None:
     """One timestamped line to the job's log under the state directory, and to stdout for cron."""
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {job}: {message}"
     print(line, flush=True)
-    with (state_dir("logs") / f"{job}.log").open("a", encoding="utf-8") as handle:
-        handle.write(line + "\n")
+    path = state_dir("logs") / f"{job}.log"
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError as exc:
+        raise StateError(f"the log {path} could not be written: {exc}") from exc
 
 
 @contextlib.contextmanager
 def job_lock(job: str) -> Iterator[None]:
     """An exclusive, non-blocking flock per job. Released by the kernel even if the process dies."""
     path = state_dir("locks") / f"{job}.lock"
-    with path.open("a") as handle:
+    try:
+        handle = path.open("a")
+    except OSError as exc:
+        raise StateError(f"the lock {path} could not be opened: {exc}") from exc
+    with handle:
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
@@ -240,9 +343,17 @@ def run_job(job: str, body: Callable[[], None]) -> int:
         with job_lock(job):
             body()
     except LockBusy as exc:
-        log(job, f"skipped — {exc}")
+        _last_word(job, f"skipped — {exc}")
         return 0
     except LaneError as exc:
-        log(job, f"FAILED — {exc}")
+        _last_word(job, f"FAILED — {exc}")
         return 1
     return 0
+
+
+def _last_word(job: str, message: str) -> None:
+    """Log the job's outcome; if even the log cannot be written, say both on stderr rather than a traceback."""
+    try:
+        log(job, message)
+    except LaneError as exc:
+        print(f"{job}: {message} (and the log could not be written: {exc})", file=sys.stderr, flush=True)

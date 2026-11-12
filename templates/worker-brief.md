@@ -27,6 +27,14 @@ the code is done and verified — nothing follows it, not a formatting run, not 
 If the card does not change behaviour (a cleanup, docs or CI change), it needs no OpenSpec change: say why in
 your final report.
 
+**A conflict in `openspec/specs/**` is never resolved by hand.** Revert the archive commit (`git revert
+<archive commit>`), merge `origin/{{BASE}}` (`git merge origin/{{BASE}}`), then re-archive
+(`openspec archive <change> --yes`) as the last commit again.
+
+**Intent first.** Before you write code, run the grill-me skill (`.agents/skills/grill-me`) against the card on
+your own: list the questions it would ask about the card's intent, and answer each yourself from the issue, the
+specs and the code — nobody will answer them for you.
+
 ## The changelog
 
 {{FRAGMENT_RULE}}
@@ -46,7 +54,9 @@ your last code edit, and before the archive commit.
 
 Your final message is posted on the pull request as the record of this session. Make it a short report:
 what you changed; the tests you ran with their counts; every acceptance check in the issue, by number, as
-**met** / **not met** with evidence (a `file:line` or a test name); and anything you could not finish. A wrong
+**met** / **not met** with evidence (a `file:line` or a test name); anything you could not finish; and a section
+headed **Intent decisions** listing each grill-me question with the answer you chose and why. The reviewer
+checks those answers. A wrong
 "done" is worse than an honest "blocked": if you cannot finish, commit what you have and say what is missing.
 
 ## The card (verbatim)

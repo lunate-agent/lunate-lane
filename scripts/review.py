@@ -13,7 +13,9 @@ GitHub does not name `lunate-reviewer` as its author. A missing or malformed ver
 from __future__ import annotations
 
 import json
+import os
 import pathlib
+import shutil
 import sys
 
 if __package__ in (None, ""):
@@ -30,8 +32,9 @@ class ReviewError(LaneError):
     """The review could not be run, or produced no usable verdict."""
 
 
-def skip_reason(p: github.Pull, required: frozenset, running: dict, reviewer: str) -> str | None:
-    """Why this pull request is not reviewed now, or None if it is due."""
+def skip_reason(p: github.Pull, required: frozenset, running: dict, reviewer: str, others=()) -> str | None:
+    """Why this pull request is not reviewed now, or None if it is due. `others` are the open pull requests (any
+    author, with their files): one that is older and touches the same OpenSpec capability holds this one back."""
     if p.state != "OPEN":
         return f"is {p.state.lower()}"
     if p.draft:
@@ -40,23 +43,41 @@ def skip_reason(p: github.Pull, required: frozenset, running: dict, reviewer: st
         return f"its worker on #{p.card} is still running"
     if p.card is None:
         return "carries no card to review against"
+    if p.mergeable == "CONFLICTING":
+        return "conflicts with the base branch — it goes back to a worker first"
     checks = github.check_state(p, required)
     if checks != "green":
         return f"required checks are {checks}"
     if github.reviewer_verdict(p, reviewer) is not None:
         return f"already reviewed at {p.head[:8]}"
+    overlap = github.spec_overlap(p, [o for o in others if o.number != p.number])
+    if overlap:
+        older, shared = overlap
+        return f"older #{older} also changes the OpenSpec capability {', '.join(sorted(shared))} — it lands first"
     return None
+
+
+FULL_REVIEW = ("src/", "tests/", "openspec/", ".github/")
+
+
+def reviewer_model(cfg: common.Config, p: github.Pull) -> str:
+    """The full model for anything touching code, tests, specs or CI; the light one for docs-only (#15). A file
+    list that was not read, or is empty, gets the full model — never the lighter review by default."""
+    if not p.files or any(path.startswith(FULL_REVIEW) for path in p.files):
+        return cfg.reviewer_full
+    return cfg.reviewer_light
 
 
 def due(cfg: common.Config) -> list[github.Pull]:
     required = github.required_checks(cfg)
     running = harness.running_workers()
     found = []
-    for summary in github.open_pulls(cfg):
+    pulls = github.open_pulls(cfg)
+    for summary in pulls:
         if summary.author != cfg.worker_app:
             continue
         p = github.pull(cfg, summary.number)
-        reason = skip_reason(p, required, running, cfg.reviewer_app)
+        reason = skip_reason(p, required, running, cfg.reviewer_app, pulls)
         if reason:
             common.log(JOB, f"#{p.number} skipped — {reason}")
         else:
@@ -80,7 +101,7 @@ def read_verdict(path: pathlib.Path) -> tuple[str, str]:
     return data["event"], body.strip()
 
 
-def post(cfg: common.Config, p: github.Pull, event: str, body: str) -> bool:
+def post(cfg: common.Config, p: github.Pull, event: str, body: str, model: str) -> bool:
     """Post the review as the reviewer identity — only if the pull request is still open at the reviewed head."""
     now = github.pull(cfg, p.number)
     if now.state != "OPEN":
@@ -93,7 +114,7 @@ def post(cfg: common.Config, p: github.Pull, event: str, body: str) -> bool:
         token = identity.installation_token("reviewer")
     except identity.IdentityError as exc:
         raise ReviewError(f"the reviewer identity could not mint a token: {exc}") from exc
-    footer = f"\n\n---\nReviewed at `{p.head[:9]}` on `{cfg.reviewer_model}`."
+    footer = f"\n\n---\nReviewed at `{p.head[:9]}` on `{model}`."
     posted = common.rest(token, "POST", f"/repos/{cfg.slug}/pulls/{p.number}/reviews",
                          {"commit_id": p.head, "event": event, "body": body + footer})
     review_id = posted.get("id") if isinstance(posted, dict) else None
@@ -108,50 +129,110 @@ def post(cfg: common.Config, p: github.Pull, event: str, body: str) -> bool:
     return True
 
 
-def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str]:
-    """Run the reviewer session at the head and return its verdict."""
+def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str, str]:
+    """Run the reviewer session at the head and return its verdict and the model it ran on."""
+    model = reviewer_model(cfg, p)
     repo, worktree = cfg.checkout, common.state_dir("reviews") / f"pr-{p.number}"
     scratch = common.state_dir("scratch", f"review-{p.number}")
     verdict_file, diff_file = scratch / "verdict.json", scratch / "diff.patch"
-    verdict_file.unlink(missing_ok=True)
+    try:
+        verdict_file.unlink(missing_ok=True)
+    except OSError as exc:
+        raise ReviewError(f"the old verdict {verdict_file} could not be removed: {exc}") from exc
     common.git(repo, "fetch", "-q", "origin", p.head)
-    if worktree.exists():
-        common.git(repo, "worktree", "remove", "--force", str(worktree))
+    if worktree.exists() or worktree.is_symlink():
+        remove_review_worktree(cfg, p.number)
+    driver = os.getpid()
+    harness.record_review(p.number, driver, worktree)  # so a SIGKILLed run's session and worktree get cleared
     common.git(repo, "worktree", "add", "--detach", str(worktree), p.head)
     try:
-        diff_file.write_text(common.git(worktree, "diff", f"origin/{cfg.base}...HEAD"))
-        issue = dispatch_card.card(worktree, p.card)
+        try:
+            diff_file.write_text(common.git(repo, "diff", "--no-textconv", "--no-ext-diff",
+                                            f"origin/{cfg.base}...{p.head}"))
+        except OSError as exc:
+            raise ReviewError(f"the diff {diff_file} could not be written: {exc}") from exc
+        issue = dispatch_card.card(repo, p.card)
         fragments = ("never edit `CHANGELOG.md`; the PR must add `changes/" + str(p.number) + ".md`."
                      if common.git(repo, "ls-tree", "--name-only", f"origin/{cfg.base}", "--", "changes")
                      else "the `changes/` convention is not on main yet; `CHANGELOG.md` must not be edited.")
+        report = github.worker_report(cfg, p.number) or "(the worker posted no session report on this pull request)"
         prompt = common.render("review-brief.md", PR=str(p.number), REPO=cfg.slug, TITLE=p.title, HEAD=p.head[:9],
                                WORKTREE=str(worktree), BASE=cfg.base, DIFF_FILE=str(diff_file),
                                FRAGMENT_CHECK=fragments, VERDICT_FILE=str(verdict_file), CARD=str(p.card),
+                               SPEC_NEIGHBOURS=spec_neighbours(p, github.open_pulls(cfg)), WORKER_REPORT=report,
                                BODY=(issue.get("body") or "").strip())
         log_path = common.state_dir("sessions") / f"review-{p.number}-{p.head[:8]}.jsonl"
-        outcome = harness.run_session(cfg, model=cfg.reviewer_model, worktree=worktree, prompt=prompt,
-                                      scratch=scratch, log_path=log_path)
+        outcome = harness.run_session(cfg, model=model, worktree=worktree, prompt=prompt,
+                                      scratch=scratch, log_path=log_path,
+                                      on_start=lambda pgid, sid: harness.note_review_session(p.number, driver, pgid, sid))
         if outcome.stalled or outcome.rc != 0:
             raise ReviewError(f"the review session did not finish cleanly (rc {outcome.rc}, stalled {outcome.stalled})")
-        return read_verdict(verdict_file)
+        return (*read_verdict(verdict_file), model)
     finally:
-        common.git(repo, "worktree", "remove", "--force", str(worktree))
+        remove_review_worktree(cfg, p.number)
+        harness.clear_review(p.number, driver)
+
+
+def spec_neighbours(p: github.Pull, others) -> str:
+    """The other open pull requests that change one of `p`'s OpenSpec capabilities, for the review brief."""
+    mine = p.capabilities
+    if not mine:
+        return "This pull request changes no OpenSpec capability."
+    lines = [f"This pull request changes: {', '.join(sorted(mine))}."]
+    for other in sorted(others, key=lambda o: o.number):
+        shared = mine & other.capabilities
+        if other.number != p.number and shared:
+            paths = [f for f in other.files or () if github.capabilities([f]) & shared]
+            lines.append(f"- #{other.number} \"{other.title}\" also changes {', '.join(sorted(shared))}: "
+                         + ", ".join(f"`{f}`" for f in paths[:20]) + (" …" if len(paths) > 20 else ""))
+    if len(lines) == 1:
+        lines.append("No other open pull request changes these capabilities.")
+    return "\n".join(lines)
+
+
+def remove_review_worktree(cfg: common.Config, pr: int) -> None:
+    """Remove the review worktree of `pr`, and prune its registration. The path is derived from the number and
+    resolved; a symlink or anything outside <state>/reviews is refused.
+
+    No --force (review of #17, item 4): a clean worktree goes through `git worktree remove`. One the reviewer's
+    build left untracked files in is deleted as a directory instead — it is detached at a head that is already on
+    GitHub and holds nothing the lane keeps.
+    """
+    worktree = common.inside_state(common.state_dir("reviews") / f"pr-{int(pr)}", "reviews")
+    if (worktree / ".git").exists():
+        try:
+            common.git(cfg.checkout, "worktree", "remove", str(worktree))
+        except common.GitError:
+            pass  # untracked build output: removed as a directory below
+    if worktree.exists():
+        try:
+            shutil.rmtree(worktree)
+        except OSError as exc:
+            raise common.StateError(f"the review worktree {worktree} could not be removed: {exc}") from exc
+    common.git(cfg.checkout, "worktree", "prune")
+
+
+def reap(cfg: common.Config, job: str) -> None:
+    for pr in harness.reap_reviews(lambda number: remove_review_worktree(cfg, number)):
+        common.log(job, f"cleared the review of #{pr} that a dead run left behind (session and worktree)")
 
 
 def tick(dry_run: bool = False) -> None:
     cfg = common.config()
     failed = []
+    if not dry_run:
+        reap(cfg, JOB)
     pulls = due(cfg)
     if not pulls:
         common.log(JOB, "nothing due for review")
     for p in pulls:
         if dry_run:
-            common.log(JOB, f"#{p.number} would be reviewed at {p.head[:8]}")
+            common.log(JOB, f"#{p.number} would be reviewed at {p.head[:8]} on {reviewer_model(cfg, p)}")
             continue
         try:
-            event, body = run_review(cfg, p)
-            if post(cfg, p, event, body):
-                common.log(JOB, f"#{p.number} reviewed at {p.head[:8]}: {event}")
+            event, body, model = run_review(cfg, p)
+            if post(cfg, p, event, body, model):
+                common.log(JOB, f"#{p.number} reviewed at {p.head[:8]} on {model}: {event}")
         except LaneError as exc:
             common.log(JOB, f"#{p.number} FAILED — {exc}")
             failed.append(p.number)
@@ -161,6 +242,7 @@ def tick(dry_run: bool = False) -> None:
 
 def main() -> int:
     dry_run = "--dry-run" in sys.argv[1:]
+    harness.exit_on_signals()  # a killed run still kills its session and removes its worktree
     return common.run_job(JOB, lambda: tick(dry_run))
 
 

@@ -9,12 +9,27 @@ from __future__ import annotations
 
 import dataclasses
 import re
+import typing
 
 from scripts import common
 from scripts.common import GhError
 
 BRANCH = re.compile(r"^wt/issue-(\d+)$")
 PASSED = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+
+
+class Run(typing.NamedTuple):
+    """One check run on a head. `failed_step` is True when a step failed, or the steps could not all be read."""
+    name: str
+    conclusion: str
+    job: int = 0  # the Actions job id, 0 for another app's check
+    url: str = ""
+    run_id: int = 0  # the workflow run it belongs to, for a rerun
+    failed_step: bool = False
+    failed_steps: tuple = ()  # names of the steps that failed ("<steps unread>" when they could not all be read)
+
+
+INFRA = frozenset({"CANCELLED", "TIMED_OUT", "STARTUP_FAILURE"})
 
 
 @dataclasses.dataclass(frozen=True)
@@ -51,6 +66,17 @@ class Pull:
     labels: frozenset = frozenset()  # labels of the issues it closes
     reviews: tuple = ()  # Review, oldest first
     checks: tuple = ()  # (name, status, conclusion)
+    files: tuple | None = None  # changed paths; None means not read
+    in_queue: bool = False  # in the merge queue now
+    queue_removal: str = ""  # why the merge queue removed it — only a removal of the current head counts
+    disarmed_by: str = ""  # a person who turned auto-merge off last (the latest auto-merge event is theirs)
+    node_id: str = ""
+    runs: tuple = ()  # Run, for every check run on the head
+
+    @property
+    def capabilities(self) -> frozenset:
+        """The OpenSpec capabilities this pull request touches (see `capabilities`)."""
+        return capabilities(self.files or ())
 
     @property
     def card(self) -> int | None:
@@ -59,6 +85,54 @@ class Pull:
         if match:
             return int(match.group(1))
         return self.cards[0] if self.cards else None
+
+
+# openspec/specs/<cap>/… and a change's delta, openspec/changes/[archive/]<change>/specs/<cap>/…
+SPEC_PATH = re.compile(r"^openspec/(?:specs|changes/(?:archive/)?[^/]+/specs)/([^/]+)/")
+FILES_LIMIT = 3000  # GitHub lists at most this many files of one pull request
+
+
+def capabilities(paths) -> frozenset:
+    return frozenset(m.group(1) for m in map(SPEC_PATH.match, paths) if m)
+
+
+def spec_overlap(p: Pull, others) -> tuple[int, frozenset] | None:
+    """The oldest *older*, ready (not draft) open pull request touching one of `p`'s OpenSpec capabilities, and
+    the shared ones. A draft does not hold anything back: it may stay unfinished for days (review of #17).
+
+    A pull request whose files were not read cannot be cleared: that is a refusal, not 'no overlap'.
+    """
+    if p.files is None:
+        raise GhError(f"#{p.number}'s files were not read — cannot tell whether it overlaps an older spec change")
+    mine = p.capabilities
+    if not mine:
+        return None
+    for other in sorted(others, key=lambda o: o.number):
+        if other.number >= p.number:
+            break
+        if other.draft:
+            continue
+        if other.files is None:
+            raise GhError(f"#{other.number}'s files were not read — cannot clear #{p.number} of a spec overlap")
+        shared = mine & other.capabilities
+        if shared:
+            return other.number, shared
+    return None
+
+
+def _files(cfg: common.Config, number: int, connection: dict) -> tuple:
+    """Every changed path of a pull request: the first page from GraphQL, the rest from the REST listing."""
+    nodes = connection.get("nodes") or []
+    if not (connection.get("pageInfo") or {}).get("hasNextPage"):
+        return tuple(str(n["path"]) for n in nodes)
+    raw = common.gh("api", "--paginate", f"repos/{cfg.slug}/pulls/{int(number)}/files?per_page=100",
+                    "--jq", ".[].filename")
+    paths = tuple(line for line in raw.splitlines() if line)
+    if len(paths) >= FILES_LIMIT:
+        raise GhError(f"#{number} changes {FILES_LIMIT} files or more — GitHub's listing may be cut off")
+    if len(paths) <= len(nodes):
+        raise GhError(f"#{number}'s file listing came back shorter than its first page")
+    return paths
 
 
 def login(raw: dict | None) -> str:
@@ -125,24 +199,34 @@ def milestone_cards(cfg: common.Config) -> list[Card]:
 
 OPEN_PULLS = """query($owner:String!,$name:String!,$cursor:String){repository(owner:$owner,name:$name){
 pullRequests(first:50,after:$cursor,states:OPEN){pageInfo{hasNextPage endCursor}
-nodes{number author{login} headRefName closingIssuesReferences(first:10){pageInfo{hasNextPage} nodes{number}}}}}}"""
+nodes{number title isDraft author{login} headRefName closingIssuesReferences(first:10){pageInfo{hasNextPage} nodes{number}}
+files(first:100){pageInfo{hasNextPage} nodes{path}}}}}}"""
 
 
 def open_pulls(cfg: common.Config) -> list[Pull]:
-    """Every open pull request, any author, light: number, author, branch and the issues it closes."""
+    """Every open pull request, any author, light: number, title, author, branch, the issues it closes, its files."""
     nodes = _paged(OPEN_PULLS, ("repository", "pullRequests"), "the open pull requests",
                    owner=cfg.owner, name=cfg.name)
-    return [Pull(number=int(n["number"]), author=login(n.get("author")), branch=str(n.get("headRefName") or ""),
-                 cards=tuple(i["number"] for i in _complete(n["closingIssuesReferences"], f"#{n['number']}'s issues")))
+    return [Pull(number=int(n["number"]), title=str(n.get("title") or ""), author=login(n.get("author")),
+                 draft=bool(n.get("isDraft")),
+                 branch=str(n.get("headRefName") or ""),
+                 cards=tuple(i["number"] for i in _complete(n["closingIssuesReferences"], f"#{n['number']}'s issues")),
+                 files=_files(cfg, int(n["number"]), n["files"]))
             for n in nodes]
 
 
 PULL = """query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){pullRequest(number:$n){
-number title state isDraft createdAt headRefName headRefOid mergeable author{login} autoMergeRequest{enabledAt}
+id number title state isDraft createdAt headRefName headRefOid mergeable author{login} autoMergeRequest{enabledAt}
+isInMergeQueue queueRemoval:timelineItems(last:1,itemTypes:[REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{
+... on RemovedFromMergeQueueEvent{createdAt reason beforeCommit{oid}}}}
+autoMergeEvents:timelineItems(last:1,itemTypes:[AUTO_MERGE_ENABLED_EVENT,AUTO_MERGE_DISABLED_EVENT]){nodes{__typename
+... on AutoMergeDisabledEvent{actor{__typename login}}}}
 closingIssuesReferences(first:10){pageInfo{hasNextPage} nodes{number labels(first:50){pageInfo{hasNextPage} nodes{name}}}}
 reviews(last:100){pageInfo{hasPreviousPage} nodes{author{login} state body commit{oid}}}
+files(first:100){pageInfo{hasNextPage} nodes{path}}
 commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:100){pageInfo{hasNextPage}
-nodes{__typename ... on CheckRun{name status conclusion} ... on StatusContext{context state}}}}}}}}}}"""
+nodes{__typename ... on CheckRun{name status conclusion databaseId detailsUrl checkSuite{workflowRun{databaseId}}
+steps(first:100){pageInfo{hasNextPage} nodes{name conclusion}}} ... on StatusContext{context state}}}}}}}}}}"""
 
 
 def pull(cfg: common.Config, number: int) -> Pull:
@@ -169,7 +253,11 @@ def pull(cfg: common.Config, number: int) -> Pull:
                          for label in _complete(i["labels"], f"#{number}'s issue #{i['number']}'s labels")),
         reviews=tuple(Review(login(r.get("author")), str(r["state"]), str((r.get("commit") or {}).get("oid") or ""),
                              str(r.get("body") or "")) for r in node["reviews"]["nodes"]),
-        checks=checks,
+        checks=checks, files=_files(cfg, int(number), node["files"]),
+        in_queue=bool(node.get("isInMergeQueue")),
+        queue_removal=_queue_removal(node), disarmed_by=_disarmed_by(node, cfg.worker_app),
+        node_id=str(node.get("id") or ""),
+        runs=tuple(_run(c) for c in contexts if c["__typename"] == "CheckRun"),
     )
 
 
@@ -205,3 +293,137 @@ def reviewer_verdict(p: Pull, reviewer: str) -> str | None:
     states = [r.state for r in p.reviews if r.author == reviewer and r.commit == p.head
               and r.state not in ("DISMISSED", "PENDING")]
     return states[-1] if states else None
+
+
+def landed_parents(cfg: common.Config, number: int) -> tuple[str, int]:
+    """(merge commit, its parent count) of a merged pull request: 1 is a squash, 2 a merge commit (#6)."""
+    data = common.graphql("""query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){
+pullRequest(number:$n){state mergeCommit{oid parents(first:3){totalCount}}}}}""", owner=cfg.owner, name=cfg.name,
+                          n=int(number))
+    node = (data.get("repository") or {}).get("pullRequest") or {}
+    commit = node.get("mergeCommit")
+    if node.get("state") != "MERGED" or not isinstance(commit, dict):
+        raise GhError(f"#{number} is {str(node.get('state') or 'unreadable').lower()}, not merged with a commit")
+    return str(commit["oid"]), int(commit["parents"]["totalCount"])
+
+
+REPORT = """query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){pullRequest(number:$n){
+comments(last:50){nodes{author{login} body}}}}}"""
+
+
+def worker_report(cfg: common.Config, number: int) -> str:
+    """The worker identity's latest session report on the pull request, or '' when it has posted none."""
+    data = common.graphql(REPORT, owner=cfg.owner, name=cfg.name, n=int(number))
+    node = (data.get("repository") or {}).get("pullRequest")
+    if not node:
+        raise GhError(f"pull request #{number} was not found in {cfg.slug}")
+    found = [c["body"] for c in node["comments"]["nodes"]
+             if login(c.get("author")) == cfg.worker_app and str(c.get("body") or "").startswith("**Worker session**")]
+    return found[-1] if found else ""
+
+
+def _run(c: dict) -> Run:
+    steps = c.get("steps") or {}
+    unread = (steps.get("pageInfo") or {}).get("hasNextPage") or "nodes" not in steps
+    names = tuple(str((s or {}).get("name") or "") for s in steps.get("nodes") or []
+                  if (s or {}).get("conclusion") == "FAILURE")
+    if unread:
+        names += ("<steps unread>",)
+    run_id = ((c.get("checkSuite") or {}).get("workflowRun") or {}).get("databaseId")
+    return Run(str(c["name"]), str(c.get("conclusion") or ""), int(c.get("databaseId") or 0),
+               str(c.get("detailsUrl") or ""), int(run_id or 0), bool(names), names)
+
+
+def _queue_removal(node: dict) -> str:
+    """The queue's reason for its latest removal — only when it removed the current head; one before the last
+    push is history, not a reason to rework (review of #17)."""
+    for event in ((node.get("queueRemoval") or {}).get("nodes") or [])[-1:]:
+        if ((event.get("beforeCommit") or {}).get("oid") or "") == node.get("headRefOid"):
+            return str(event.get("reason") or "removed")
+    return ""
+
+
+def _disarmed_by(node: dict, worker_app: str) -> str:
+    """The login of a person (a User, not an App) whose turning auto-merge off is the latest auto-merge event."""
+    for event in ((node.get("autoMergeEvents") or {}).get("nodes") or [])[-1:]:
+        actor = event.get("actor") or {}
+        if event.get("__typename") == "AutoMergeDisabledEvent" and actor.get("__typename") == "User" \
+                and login(actor) != worker_app:
+            return login(actor)
+    return ""
+
+
+def failure_kind(p: Pull, required: frozenset, aggregate: tuple | None = None) -> str | None:
+    """'infra' or 'real' for a head whose required checks are failing, else None.
+
+    A run is infra when it was cancelled, timed out or failed to start with no failing step. The required
+    aggregate check (`ci-ok`, `aggregate` = (check name, its aggregating step), from lane.json) is judged by the
+    jobs it rolls up — the other check runs of its workflow run: its failure is infra when the only step that
+    failed is the aggregating one and every job beside it that did not succeed is infra; it is real when any
+    aggregated job has a failing step, when ci-ok fails at another step, or when it fails with nothing beneath
+    it failing. Any other required check that failed for real is real, whatever its legs did. A failure the
+    lane cannot attribute (a status context, unread steps, no workflow run) is real: a rerun is only for what
+    is plainly the runner's fault.
+    """
+    if check_state(p, required) != "failing":
+        return None
+    if aggregate is None:
+        cfg = common.config()
+        aggregate = (cfg.aggregate_check, cfg.aggregate_step)
+    name, step = aggregate
+    failing = [r for r in p.runs if r.conclusion and r.conclusion not in PASSED]
+    if any(c[0] in required and c[0] not in {r.name for r in p.runs} for c in p.checks if c[2] not in PASSED):
+        return "real"  # a required status context, not a check run: nothing to rerun
+
+    def infra(r: Run) -> bool:
+        return r.conclusion in INFRA and not r.failed_step and r.run_id > 0
+
+    if not failing:
+        return "real"
+    for r in failing:
+        if r.name == name and r.name in required and not infra(r):
+            if r.run_id == 0 or set(r.failed_steps) != {step}:
+                return "real"  # ci-ok failed somewhere other than its aggregating step
+            jobs = [j for j in p.runs if j.run_id == r.run_id and j.name != name and j.conclusion not in PASSED]
+            if not jobs or not all(infra(j) for j in jobs):
+                return "real"  # an aggregated job failed for real, or ci-ok failed with nothing beneath it
+        elif not infra(r):
+            return "real"
+    return "infra"
+
+
+def infra_runs(p: Pull) -> tuple:
+    """The workflow runs to rerun for an infra failure: those of the failing check runs, each once."""
+    return tuple(sorted({r.run_id for r in p.runs if r.conclusion and r.conclusion not in PASSED and r.run_id}))
+
+
+def needs_rearm(p: Pull, required: frozenset, reviewer: str) -> bool:
+    """A clean, ready, approved pull request that is not armed and not queued — the state a clean finish leaves
+    when arming fails after `mark_ready` (review of #17). Not when a person turned auto-merge off, and not when it
+    is stuck (that is a rework) or its checks are not green."""
+    return (p.state == "OPEN" and not p.draft and not p.auto_merge and not p.in_queue and not p.disarmed_by
+            and p.mergeable != "CONFLICTING" and not p.queue_removal and check_state(p, required) == "green"
+            and reviewer_verdict(p, reviewer) == "APPROVED")
+
+
+def stuck_reason(p: Pull, required: frozenset, reviewer: str, reran: frozenset = frozenset()) -> str | None:
+    """Why an open, ready pull request is stuck and goes back to a worker (#8), or None.
+
+    Red on a required check, CONFLICTING with the base, or approved at its head but neither in the merge queue nor
+    armed, with a removal by the queue on record (approved and unarmed without one is a person's choice). A draft is unfinished work, not stuck; UNKNOWN mergeability is not a conflict.
+    """
+    if p.state != "OPEN" or p.draft:
+        return None
+    if p.mergeable == "CONFLICTING":
+        return "conflicts with the base branch"
+    if check_state(p, required) == "failing":
+        if failure_kind(p, required) == "real":
+            return "required checks failing"
+        if (p.number, p.head) in reran:  # `reran`: (pull request, head) pairs already rerun once
+            return "required checks cancelled or timed out again after a rerun"
+        return None  # the feeder reruns it once instead
+    if p.disarmed_by:
+        return None  # a person turned auto-merge off: their decision, not a rework (the digest says who)
+    if reviewer_verdict(p, reviewer) == "APPROVED" and not p.in_queue and not p.auto_merge and p.queue_removal:
+        return f"out of the merge queue after approval ({p.queue_removal.lower()})"
+    return None

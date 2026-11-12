@@ -4,17 +4,20 @@
     .venv/bin/python scripts/worker.py --issue 794 --rework 812 # the reviewer requested changes on #812
 
 The feeder starts this detached. It cuts (or continues) the card's worktree on `wt/issue-<n>`, writes the
-brief, and runs the session. The pull request is opened, without auto-merge, as soon as the branch has its
-first commit, so the worker can name its changelog fragment after it. When the session ends with commits the
-branch is pushed again and auto-merge is armed — only if the run was clean. A stalled, failed or dirty run
-leaves the pull request unarmed with a comment saying why; the orchestrator takes it from there.
+brief, and runs the session. The pull request is opened as a draft, without auto-merge, as soon as the branch
+has its first commit, so the worker can name its changelog fragment after it. When the session ends with commits
+the branch is pushed again and — only if the run was clean — marked ready, then armed. A stalled, failed or dirty
+run leaves it a draft and unarmed with a comment saying why; the orchestrator takes it from there. A rework
+returns its pull request to draft before the session.
 """
 
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import os
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -32,8 +35,8 @@ WITHHELD = ("(Output withheld: the session's final message contained something s
 def ref_exists(repo: pathlib.Path, ref: str) -> bool:
     """Whether a ref exists. git's 'no' (exit 1) is an answer; any other failure raises."""
     try:
-        done = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", ref],
-                              capture_output=True, text=True, timeout=60)
+        done = subprocess.run(common.git_argv(repo, "rev-parse", "--verify", "--quiet", ref),
+                              capture_output=True, text=True, timeout=60, env=common.git_env())
     except (OSError, subprocess.SubprocessError) as exc:
         raise GitError(f"git could not check {ref} in {repo} ({exc.__class__.__name__})") from exc
     if done.returncode not in (0, 1):
@@ -41,24 +44,53 @@ def ref_exists(repo: pathlib.Path, ref: str) -> bool:
     return done.returncode == 0
 
 
+class WorktreeError(GitError):
+    """The card's worktree cannot be cut or reused, and the reason — which worktree is in the way — is named."""
+
+
+def worktrees(repo: pathlib.Path) -> dict:
+    """branch -> worktree path for every worktree of `repo` that has a branch checked out. Stale registrations
+    (their directory is gone) are pruned first, so a deleted worktree does not hold its branch."""
+    common.git(repo, "worktree", "prune")
+    found, path = {}, None
+    for line in common.git(repo, "worktree", "list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            path = pathlib.Path(line[len("worktree "):])
+        elif line.startswith("branch refs/heads/") and path is not None:
+            found[line[len("branch refs/heads/"):]] = path
+    return found
+
+
 def prepare_worktree(cfg: common.Config, number: int) -> pathlib.Path:
-    """The card's worktree on `wt/issue-<n>`: reused, continued from the local or remote branch, or cut from base."""
+    """The card's worktree on `wt/issue-<n>`: reused, continued from the local or remote branch, or cut from base.
+
+    A branch git would refuse to check out because another worktree holds it (the old lane kept its worktrees at
+    `<checkout>/.worktrees/<card>`) is a named `WorktreeError` saying which one, never git's bare exit 128 (#4).
+    """
     repo, branch = cfg.checkout, f"wt/issue-{number}"
     path = common.state_dir("worktrees") / f"issue-{number}"
     common.git(repo, "fetch", "-q", "origin")
     remote = ref_exists(repo, f"refs/remotes/origin/{branch}")
     if (path / ".git").exists():
-        current = common.git(path, "rev-parse", "--abbrev-ref", "HEAD")
+        current = common.wt_git(cfg, path, "rev-parse", "--abbrev-ref", "HEAD")
         if current != branch:
-            raise GitError(f"the worktree {path} is on {current!r}, not {branch!r}")
-    elif ref_exists(repo, f"refs/heads/{branch}"):
-        common.git(repo, "worktree", "add", str(path), branch)
-    elif remote:
-        common.git(repo, "worktree", "add", "-b", branch, str(path), f"origin/{branch}")
+            raise WorktreeError(f"the worktree {path} is on {current!r}, not {branch!r}")
+    elif path.exists():
+        raise WorktreeError(f"{path} exists but is not a worktree — move it aside and the next run cuts the card")
     else:
-        common.git(repo, "worktree", "add", "-b", branch, str(path), f"origin/{cfg.base}")
+        holder = worktrees(repo).get(branch)
+        if holder is not None and holder.resolve() != path.resolve():
+            raise WorktreeError(f"{branch!r} is already checked out in the worktree {holder}; remove that worktree "
+                                f"(`git -C {repo} worktree remove {holder}`) or switch it to another branch, and "
+                                "the next run continues the card here")
+        if ref_exists(repo, f"refs/heads/{branch}"):
+            common.git(repo, "worktree", "add", str(path), branch)
+        elif remote:
+            common.git(repo, "worktree", "add", "-b", branch, str(path), f"origin/{branch}")
+        else:
+            common.git(repo, "worktree", "add", "-b", branch, str(path), f"origin/{cfg.base}")
     if remote:
-        common.git(path, "merge", "--ff-only", "-q", f"origin/{branch}")
+        common.wt_git(cfg, path, "merge", "--ff-only", "-q", f"origin/{branch}")
     return path
 
 
@@ -67,16 +99,79 @@ def has_fragments(cfg: common.Config, repo: pathlib.Path) -> bool:
     return bool(common.git(repo, "ls-tree", "--name-only", f"origin/{cfg.base}", "--", "changes"))
 
 
-def rework_findings(cfg: common.Config, pr: int) -> str:
-    """The reviewer's request for changes on the pull request's current head. None is a refusal to rework."""
+LOG_TAIL_LINES = 60
+LOG_TAIL_CHARS = 6000
+MAX_FAILING_LOGS = 5
+
+
+def log_tail(cfg: common.Config, job_id: int) -> str:
+    """The last lines of a GitHub Actions job's log. Supporting material for a brief: a log that cannot be read
+    is said so in the brief (the decision to rework was made on readable state), never left out silently."""
+    if not job_id:
+        return "(not a GitHub Actions job — no log to fetch; see the check's page)"
+    try:
+        raw = common.gh("api", f"repos/{cfg.slug}/actions/jobs/{int(job_id)}/logs", timeout=120)
+    except LaneError as exc:
+        return f"(the log could not be read: {exc})"
+    lines = [re.sub(r"^\d{4}-\d\d-\d\dT[\d:.]+Z ", "", line) for line in raw.splitlines()]
+    return "\n".join(lines[-LOG_TAIL_LINES:])[-LOG_TAIL_CHARS:]
+
+
+def conflicts(cfg: common.Config, worktree: pathlib.Path) -> list[str]:
+    """The files that conflict when origin/<base> is merged into the branch, without touching the worktree."""
+    try:
+        head = common.wt_git(cfg, worktree, "rev-parse", "HEAD")  # the worktree's HEAD, via the lane's git-dir
+        done = subprocess.run(common.git_argv(cfg.checkout, "merge-tree", "--write-tree", "--name-only",
+                                              "--no-messages", f"origin/{cfg.base}", head),
+                              capture_output=True, text=True, timeout=120, env=common.git_env())
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GitError(f"git merge-tree could not be run in {worktree} ({exc.__class__.__name__})") from exc
+    if done.returncode not in (0, 1):
+        raise GitError(f"git merge-tree failed in {worktree}: {done.stderr.strip()[:160]}")
+    return [line for line in done.stdout.splitlines()[1:] if line.strip()] if done.returncode == 1 else []
+
+
+def rework_findings(cfg: common.Config, pr: int, worktree: pathlib.Path | None = None) -> str:
+    """Everything that sends this pull request back, read now: the reviewer's request for changes on the head,
+    the failing checks with their log tails, the conflicting files, the merge queue's removal (#8). None of them
+    is a refusal to rework."""
     p = github.pull(cfg, pr)
     if p.state != "OPEN":
         raise LaneError(f"#{pr} is {p.state.lower()} — nothing to rework")
+    required = github.required_checks(cfg)
+    sections = []
     found = [r.body for r in p.reviews if r.author == cfg.reviewer_app and r.commit == p.head
              and r.state == "CHANGES_REQUESTED"]
-    if not found:
-        raise LaneError(f"#{pr} has no request for changes on its head {p.head[:8]} — nothing to rework")
-    return found[-1]
+    if found:
+        sections.append("### The reviewer requested changes\n\n" + found[-1].strip())
+    stuck = github.stuck_reason(p, required, cfg.reviewer_app, harness.reran())
+    if stuck and stuck.startswith("required checks"):
+        failing = [r for r in p.runs if r[1] not in github.PASSED and r[1]]
+        failing.sort(key=lambda r: (r[0] in required, r[0]))  # the jobs first, the required roll-up last
+        parts = [f"Required checks failing on `{p.head[:9]}`: "
+                 + ", ".join(sorted(n for n in required if github.check_state(
+                     dataclasses.replace(p, checks=tuple(c for c in p.checks if c[0] == n)), frozenset({n})) == "failing"))
+                 + ". Failing check runs: " + ", ".join(f"`{r[0]}` ({r[1].lower()})" for r in failing) + "."]
+        for name, conclusion, job, url, *_ in failing[:MAX_FAILING_LOGS]:
+            parts.append(f"#### `{name}` — {conclusion.lower()}\n{url}\n\n```\n{log_tail(cfg, job)}\n```")
+        if stuck != "required checks failing":
+            parts.insert(0, "They were cancelled or timed out, were rerun once on this head, and failed the same "
+                            "way again: look for what makes them hang or run out of time (a test that never ends, "
+                            "a step that waits on input), not only for a failing assertion.")
+        sections.append("### Checks are failing\n\n" + "\n\n".join(parts))
+    elif stuck == "conflicts with the base branch":
+        files = conflicts(cfg, worktree) if worktree is not None else []
+        sections.append(f"### The branch conflicts with `{cfg.base}`\n\n"
+                        + ("Conflicting files when `origin/" + cfg.base + "` is merged in:\n"
+                           + "\n".join(f"- `{f}`" for f in files) if files else
+                           "GitHub reports a conflict; merge `origin/" + cfg.base + "` to see it."))
+    elif stuck:
+        sections.append(f"### It is {stuck}\n\nThe merge queue tests the branch together with what lands before "
+                        f"it. Merge `origin/{cfg.base}`, find what breaks in combination, and fix it.")
+    if not sections:
+        raise LaneError(f"#{pr} has no request for changes on its head {p.head[:8]} and is not stuck — nothing "
+                        "to rework")
+    return "\n\n".join(sections)
 
 
 def brief(cfg: common.Config, issue: dict, worktree: pathlib.Path, pr: int | None, findings: str,
@@ -96,15 +191,20 @@ def brief(cfg: common.Config, issue: dict, worktree: pathlib.Path, pr: int | Non
         fragment = "The `changes/` fragment convention is not on main yet: do not edit `CHANGELOG.md`, add nothing."
     rework = ""
     if findings:
-        rework = ("\n## This is a rework\n\nThe reviewer requested changes on this pull request. Address every "
-                  "finding on this same branch, then finish as below (the archive stays the last commit — "
-                  "redo it if your fixes land after it).\n\n" + findings.strip() + "\n")
+        rework = ("\n## This is a rework\n\nThis pull request went back to a worker for what follows. Address all of "
+                  "it on this same branch, then finish as below (the archive stays the last commit — redo it if your "
+                  f"fixes land after it).\n\n**Bring the branch up to date by merging, never by rebasing:** "
+                  f"`git merge origin/{cfg.base}` (the lane has fetched it), resolve every conflict in the files, and "
+                  "commit the merge. Never `git rebase`, never rewrite a pushed commit — the lane pushes without "
+                  "force, so rewritten history is refused. A conflict in `openspec/specs/**` is resolved by reverting "
+                  "the archive commit, merging, and re-archiving, never by hand. Then run the named tests again.\n\n"
+                  + findings.strip() + "\n")
     return common.render("worker-brief.md", NUMBER=str(number), REPO=cfg.slug, TITLE=issue["title"],
                          WORKTREE=str(worktree), BRANCH=f"wt/issue-{number}", BASE=cfg.base, PR_LINE=pr_line,
                          FRAGMENT_RULE=fragment, REWORK=rework, BODY=(issue.get("body") or "").strip())
 
 
-def problems(outcome: harness.Outcome, worktree: pathlib.Path, start_head: str) -> list[str]:
+def problems(cfg: common.Config, outcome: harness.Outcome, worktree: pathlib.Path, start_head: str) -> list[str]:
     """Why a finished session is not clean. rc=0 only says the process exited."""
     found = []
     if outcome.stalled:
@@ -113,9 +213,9 @@ def problems(outcome: harness.Outcome, worktree: pathlib.Path, start_head: str) 
         found.append(f"the session exited with {outcome.rc}")
     if outcome.leaked_markup:
         found.append("the session's last message is tool-call markup, not a report")
-    if common.git(worktree, "status", "--porcelain"):
+    if common.wt_git(cfg, worktree, "status", "--porcelain"):
         found.append("the session left uncommitted changes in the worktree")
-    if common.git(worktree, "rev-parse", "HEAD") == start_head:
+    if common.wt_git(cfg, worktree, "rev-parse", "HEAD") == start_head:
         found.append("the session made no new commit")
     return found
 
@@ -123,26 +223,39 @@ def problems(outcome: harness.Outcome, worktree: pathlib.Path, start_head: str) 
 def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
     job = f"worker-{number}"
     worktree = prepare_worktree(cfg, number)
-    issue = dispatch_card.card(worktree, number)
-    findings = rework_findings(cfg, rework_pr) if rework_pr else ""
+    issue = dispatch_card.card(cfg.checkout, number)
+    findings = rework_findings(cfg, rework_pr, worktree) if rework_pr else ""
+    if rework_pr:
+        # back to draft before the session: CI's heavy legs and the reviewer wait for the clean finish (#5)
+        open_pr.return_to_draft(f"wt/issue-{number}", rework_pr)
+        rounds = harness.rework_rounds(number, rework_pr)  # counted before this run started (feed, main)
+        common.log(job, f"#{rework_pr} is a draft again for rework round {rounds} of {harness.REWORK_LIMIT}, "
+                        "auto-merge off")
     scratch = common.state_dir("scratch", f"issue-{number}")
     pr_file = scratch / "pr-number"
-    pr_file.unlink(missing_ok=True)
-    if rework_pr:
-        pr_file.write_text(str(rework_pr))
-    text = brief(cfg, issue, worktree, rework_pr, findings, has_fragments(cfg, worktree))
-    start_head = common.git(worktree, "rev-parse", "HEAD")
+    try:
+        pr_file.unlink(missing_ok=True)
+        if rework_pr:
+            pr_file.write_text(str(rework_pr))
+    except OSError as exc:
+        raise common.StateError(f"the pull request number file {pr_file} could not be written: {exc}") from exc
+    text = brief(cfg, issue, worktree, rework_pr, findings, has_fragments(cfg, cfg.checkout))
+    start_head = common.wt_git(cfg, worktree, "rev-parse", "HEAD")
     opened: dict = {"pr": rework_pr, "tried": False}
 
     def open_early() -> None:
         if opened["pr"] is not None or opened["tried"]:
             return
         try:
-            if common.git(worktree, "rev-parse", "HEAD") == start_head:
+            if common.wt_git(cfg, worktree, "rev-parse", "HEAD") == start_head:
                 return
             opened["tried"] = True  # one attempt; the end of the session tries again and fails loudly
-            opened["pr"] = dispatch_card.dispatch(worktree, number, arm=False)["number"]
-            pr_file.write_text(str(opened["pr"]))
+            opened["pr"] = dispatch_card.dispatch(cfg.checkout, number, arm=False,
+                                                  known=(harness.read_credential(cfg),))["number"]
+            try:
+                pr_file.write_text(str(opened["pr"]))
+            except OSError as exc:
+                raise common.StateError(f"#{opened['pr']} opened, but {pr_file} could not be written: {exc}") from exc
             common.log(job, f"opened #{opened['pr']} at the first commit, auto-merge not armed yet")
         except LaneError as exc:
             common.log(job, f"could not open the pull request at the first commit — {exc}")
@@ -152,6 +265,7 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
     driver = os.getpid()
     outcome = harness.run_session(cfg, model=cfg.worker_model, worktree=worktree, prompt=text, scratch=scratch,
                                   log_path=session_log, extra_env={"LANE_PR_FILE": str(pr_file)}, on_tick=open_early,
+                                  branch=f"wt/issue-{number}",
                                   on_start=lambda pgid, sid: harness.note_session(number, driver, pgid, sid))
     return finish(cfg, number, worktree, outcome, start_head, session_log)
 
@@ -159,20 +273,30 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
 def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: harness.Outcome, start_head: str,
            session_log: pathlib.Path) -> int:
     job = f"worker-{number}"
-    found = problems(outcome, worktree, start_head)
-    idle, parked_now = harness.note_run(number, common.git(worktree, "rev-parse", "HEAD") != start_head)
+    found = problems(cfg, outcome, worktree, start_head)
+    idle, parked_now = harness.note_run(number, common.wt_git(cfg, worktree, "rev-parse", "HEAD") != start_head)
     if idle:
         common.log(job, f"no new commit — idle run {idle} of {harness.IDLE_RUN_LIMIT}")
-    if dispatch_card._count(worktree, f"wt/issue-{number}") == 0:
+    if dispatch_card._count(cfg.checkout, f"wt/issue-{number}") == 0:
         common.log(job, "the session ended with no commits — no pull request. " + "; ".join(found))
         if parked_now:
-            park(cfg, number, number, idle)
+            park(cfg, number, number, "idle", idle)
         return 1
-    result = dispatch_card.dispatch(worktree, number, arm=not found)
-    head = common.git(worktree, "rev-parse", "HEAD")[:9]
+    try:
+        result = dispatch_card.dispatch(cfg.checkout, number, arm=not found, known=(harness.read_credential(cfg),))
+    except open_pr.SecretFound as exc:
+        # nothing was pushed; the card stops here until a person looks (#12). The kind, never the value.
+        common.log(job, f"secret scan: {exc}")
+        if harness.park(number, "secret"):
+            park(cfg, number, rework_pr_of(cfg, number) or number, "secret",
+                 detail=f"the secret scan before the push found something shaped like a {exc.kind} in the "
+                        f"{exc.where}; nothing was pushed")
+        return 1
+    head = common.wt_git(cfg, worktree, "rev-parse", "HEAD")[:9]
     lines = [f"**Worker session** on `{cfg.worker_model}` at `{head}`, {outcome.elapsed // 60} min."]
     if found:
-        lines.append(f"**Incomplete — auto-merge is {result['auto_merge']}:** " + "; ".join(found) + ".")
+        lines.append(f"**Incomplete — the pull request stays a draft and auto-merge is {result['auto_merge']}:** "
+                     + "; ".join(found) + ".")
     report = harness.last_text(session_log).strip() or "(the session left no final message)"
     kind = harness.secret_kind(report, (harness.read_credential(cfg),))
     if kind:
@@ -181,21 +305,42 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
         report = WITHHELD.format(kind=kind)
     lines.append("\n" + report)
     open_pr.comment(result["number"], "\n".join(lines)[:COMMENT_LIMIT])
-    common.log(job, f"#{result['number']} pushed at {head}, auto-merge {result['auto_merge']}"
+    method = (f" (queue {result['queue_method']}, GitHub records {result.get('merge_method') or 'none'})"
+              if result.get("queue_method") else "")
+    common.log(job, f"#{result['number']} pushed at {head}, auto-merge {result['auto_merge']}{method}"
                + (f" — {'; '.join(found)}" if found else ""))
     if parked_now:
-        park(cfg, number, result["number"], idle)
+        park(cfg, number, result["number"], "idle", idle)
     return 1 if found else 0
 
 
-def park(cfg: common.Config, card: int, target: int, idle: int) -> None:
-    """Say, on the pull request (or the issue when there is none), that the lane stops relaunching this card."""
+PARK_WHY = {
+    "idle": "{n} worker runs in a row ended with no new commit (cap: {cap})",
+    "reworks": "it went back to a worker {n} times (cap: {cap}) and is still not ready",
+}
+
+
+def rework_pr_of(cfg: common.Config, card: int) -> int | None:
+    """The card's open pull request, from the worker record or the pr-number file the run wrote, if any."""
+    path = cfg.state / "scratch" / f"issue-{card}" / "pr-number"
+    try:
+        text = path.read_text().strip() if path.exists() else ""
+    except OSError as exc:
+        raise common.StateError(f"{path} could not be read: {exc}") from exc
+    return int(text) if text.isdigit() else None
+
+
+def park(cfg: common.Config, card: int, target: int, why: str, n: int = 0, detail: str = "") -> None:
+    """Say, once, on the pull request (or the issue when there is none), that the lane stops working this card."""
     record = cfg.state / "attempts" / f"{card}.json"
+    cap = harness.IDLE_RUN_LIMIT if why == "idle" else harness.REWORK_LIMIT
+    reason = PARK_WHY[why].format(n=n, cap=cap) if why in PARK_WHY else detail
     open_pr.comment(target, (
-        f"**Lane: card #{card} is parked.** {idle} worker runs in a row ended with no new commit, so the feeder "
-        f"will not start it again (cap: {harness.IDLE_RUN_LIMIT}). It needs a person: split or clarify the card, "
-        f"or push a fix. To let the lane pick it up again, delete `{record}` on the lane host."))
-    common.log(f"worker-{card}", f"parked after {idle} idle runs — commented on #{target}")
+        f"**Lane: card #{card} is parked.** {reason[:1].upper() + reason[1:]}, so the feeder will not start or "
+        f"rework it again. It needs a person: split or clarify the card, or push a fix. To let the lane pick it up "
+        f"again, delete `{record}` on the lane host."))
+    label = {"idle": f"after {n} idle runs", "reworks": f"after {n} rework rounds"}.get(why, f"({why})")
+    common.log(f"worker-{card}", f"parked {label} — commented on #{target}")
 
 
 def main() -> int:
@@ -212,6 +357,9 @@ def main() -> int:
             common.log(job, f"worker {live} is already running this card — leaving")
             return 1
         if live is None:  # started by hand rather than by the feeder, which records the worker itself
+            harness.note_attempt(args.issue)  # the feeder counts its own launches; a hand-started one counts here
+            if args.rework:
+                harness.note_rework(args.issue, args.rework)
             labels = [label["name"] for label in dispatch_card.card(cfg.checkout, args.issue).get("labels") or []]
             harness.record_worker(args.issue, pid, cards.areas_of(labels, cfg.area_prefix), args.rework)
         try:

@@ -6,9 +6,12 @@ tool-markup check) and `lunate-claims.py` (a pid file per running worker), cut d
 A session gets a minimal environment: PATH (with the pinned .NET SDK first when it exists), a HOME of its own
 under its scratch directory (seeded with only what Pi needs), a private TMPDIR, and the model credential. It is
 handed no GitHub credential: `gh` points at an empty config directory and git's credential helpers are blanked,
-so the lane, not the session, pushes and opens pull requests as the worker identity. This is not a sandbox: the
-session runs as the same macOS user and could still read files outside its HOME by absolute path (README,
-"Known limitations").
+so the lane, not the session, pushes and opens pull requests as the worker identity.
+
+Every session — worker and reviewer — runs under `sandbox-exec` (#10): its profile denies reading or writing the
+lane's credentials (`~/.config/lunate-lane`), the old lane's (`~/.hermes`), `~/.ssh`, `~/.config/gh` and
+`~/Library/Keychains`, and denies process-info calls on other processes. It is the v1 boundary; the session still
+runs as the lane's macOS user (README, "Known limitations").
 """
 
 from __future__ import annotations
@@ -20,17 +23,25 @@ import pathlib
 import re
 import shutil
 import signal
+import stat
 import subprocess
 import time
 from typing import Callable
 
-from scripts import common
+from scripts import common, secret_scan
 from scripts.common import LaneError, StateError
 
 DEFAULT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 TOOL_MARKUP = ("</arg_value>", "</arg_key>", "<arg_value>", "<arg_key>")
 # What Pi needs from the real home, copied into the session's own. Not auth.json: the credential is in the env.
 HOME_SEED = (".pi/agent/settings.json", ".pi/agent/models-store.json", ".pi/agent/bin/fd")
+# Under the real home: what a session may neither read nor write.
+SANDBOX_DENY = (".config/lunate-lane", ".hermes", ".ssh", ".config/gh", "Library/Keychains")
+SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+# Tools that schedule or start work outside the session (review of #17, round two, item 3). Exec is denied, and so
+# is reading them, so a session cannot copy one into its scratch and run the copy.
+NO_EXEC = ("/bin/launchctl", "/usr/bin/crontab", "/usr/bin/at", "/usr/bin/atq", "/usr/bin/atrm", "/usr/bin/batch",
+           "/usr/bin/osascript", "/usr/bin/open")
 
 
 class HarnessError(LaneError):
@@ -46,9 +57,17 @@ class Outcome:
 
 
 def read_credential(cfg: common.Config) -> str:
-    """The model credential, from the dotenv file the config names. Its value is never reported."""
+    """The model credential, from the dotenv file the config names (`~/.config/lunate-lane/env`). A file whose
+    mode is not exactly 600 is refused (#11). Its value is never reported."""
     path = pathlib.Path(cfg.harness["credential_file"]).expanduser()
     key = cfg.harness["credential_key"]
+    try:
+        mode = stat.S_IMODE(path.stat().st_mode)
+    except OSError as exc:
+        raise HarnessError(f"the credential file {path} could not be read ({exc.__class__.__name__})") from exc
+    if mode != 0o600:
+        raise HarnessError(f"the credential file {path} is mode {mode:o}, not 600 — refusing it; "
+                           f"`chmod 600 {path}`")
     try:
         lines = path.read_text(encoding="utf-8").splitlines()
     except OSError as exc:
@@ -69,8 +88,8 @@ def _git_identity(cfg: common.Config) -> dict:
     found = {}
     for key in ("user.name", "user.email"):
         try:
-            done = subprocess.run(["git", "-C", str(cfg.checkout), "config", "--get", key],
-                                  capture_output=True, text=True, timeout=30)
+            done = subprocess.run(["git", *common.SAFE_GIT, "-C", str(cfg.checkout), "config", "--get", key],
+                                  capture_output=True, text=True, timeout=30)  # a config read: nothing runs
         except (OSError, subprocess.SubprocessError) as exc:
             raise HarnessError(f"git could not read {key} in {cfg.checkout} ({exc.__class__.__name__})") from exc
         if done.returncode not in (0, 1):
@@ -89,6 +108,8 @@ def session_home(cfg: common.Config, scratch: pathlib.Path, real_home: pathlib.P
     real_home = real_home or pathlib.Path.home()
     home = scratch / "home"
     try:
+        if home.is_symlink():  # a session could leave one; rmtree never follows the ones inside
+            raise HarnessError(f"the session home {home} is a symlink — refusing to clear it")
         if home.exists():
             shutil.rmtree(home)
         home.mkdir(parents=True)
@@ -102,7 +123,10 @@ def session_home(cfg: common.Config, scratch: pathlib.Path, real_home: pathlib.P
     identity = _git_identity(cfg)
     if identity:
         lines = ["[user]"] + [f"\t{key} = {value}" for key, value in identity.items()]
-        (home / ".gitconfig").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        try:
+            (home / ".gitconfig").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except OSError as exc:
+            raise HarnessError(f"the session's git identity could not be written in {home}: {exc}") from exc
     return home
 
 
@@ -111,11 +135,22 @@ def session_env(cfg: common.Config, scratch: pathlib.Path, extra: dict | None = 
     """The whole environment a session gets — nothing inherited beyond PATH, and a HOME of its own."""
     real_home = real_home or pathlib.Path.home()
     nogh = scratch / "gh-config"
-    nogh.mkdir(parents=True, exist_ok=True)
+    try:
+        nogh.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise HarnessError(f"the session's scratch {scratch} could not be prepared: {exc}") from exc
     path = os.environ.get("PATH") or DEFAULT_PATH
-    env = {"PATH": path, "HOME": str(session_home(cfg, scratch, real_home)), "TMPDIR": str(scratch),
+    home = session_home(cfg, scratch, real_home)
+    # no git credential helper of any kind (review of #17): Homebrew's system config names osxkeychain and the
+    # user's global config names `gh auth git-credential`; the session reads neither, only its own identity
+    env = {"PATH": path, "HOME": str(home), "TMPDIR": str(scratch),
            "GH_CONFIG_DIR": str(nogh), "GIT_TERMINAL_PROMPT": "0",
-           "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "",
+           "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"),
+           # no credential helper; no automatic gc or maintenance, which would write outside what the sandbox
+           # allows a session (packed-refs, gc.log)
+           "GIT_CONFIG_COUNT": "3", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "",
+           "GIT_CONFIG_KEY_1": "gc.auto", "GIT_CONFIG_VALUE_1": "0",
+           "GIT_CONFIG_KEY_2": "maintenance.auto", "GIT_CONFIG_VALUE_2": "false",
            cfg.harness["credential_env"]: read_credential(cfg)}
     dotnet = real_home / ".dotnet"
     if (dotnet / "dotnet").exists():
@@ -126,6 +161,85 @@ def session_env(cfg: common.Config, scratch: pathlib.Path, extra: dict | None = 
         env["NUGET_PACKAGES"] = str(packages)  # a package cache, no credentials: spares a full restore per run
     env.update(extra or {})
     return env
+
+
+def _sbpl(path: str) -> str:
+    return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
+
+
+def _forms(paths) -> list[str]:
+    found: list[str] = []
+    for path in paths:
+        for form in (os.path.abspath(path), os.path.realpath(path)):
+            if form not in found:
+                found.append(form)
+    return found
+
+
+def denied_paths(cfg: common.Config, real_home: pathlib.Path | None = None) -> list[str]:
+    """The directories a session may neither read nor write, each as given and as resolved."""
+    real_home = real_home or pathlib.Path.home()
+    return _forms([real_home / d for d in SANDBOX_DENY] + [cfg.app_config.parent])
+
+
+def _rx(path: str, tail: str = "") -> str:
+    """An SBPL regex matching exactly `path` (and `path` + `tail`)."""
+    return '(regex #"^' + re.escape(path).replace('"', '\\"') + tail + '$")'
+
+
+def sandbox_profile(cfg: common.Config, real_home: pathlib.Path | None = None, *, scratch: pathlib.Path,
+                    worktree: pathlib.Path, branch: str | None = None) -> str:
+    """The session's sandbox (review of #17, round two, item 1). Writes are denied by default; allowed only:
+
+        the session's scratch (its HOME and TMPDIR) and its worktree;
+        what git needs to commit there — `.git/objects`, the worktree's own `.git/worktrees/<name>`, and for a
+        worker its own branch ref and that ref's log (not other refs: cleanup trusts `refs/remotes/origin`);
+        the NuGet package cache the lane points sessions at; /dev/null and /dev/tty.
+
+    Inside those, the worktree's `.git` pointer and the admin directory's `gitdir`, `commondir` and
+    `config.worktree` stay denied. Reads of the lane's and the user's secrets are denied; process-info only on
+    the session's own processes. `sysctl(KERN_PROCARGS2)` is not mediated by the sandbox on this macOS, so
+    another process's argv and environment stay readable — the lane keeps tokens out of both (open_pr.push).
+    """
+    real_home = real_home or pathlib.Path.home()
+    git_dir = common.checkout_git(cfg)
+    admin = git_dir / "worktrees" / worktree.name
+    allowed = [f"(subpath {_sbpl(p)})" for p in _forms([scratch, worktree, git_dir / "objects", admin])]
+    if branch:
+        for ref in (git_dir / "refs" / "heads" / branch, git_dir / "logs" / "refs" / "heads" / branch):
+            allowed += [_rx(form, r"(\.lock)?") for form in _forms([ref])]
+    packages = real_home / ".nuget" / "packages"
+    if packages.is_dir():
+        allowed += [f"(subpath {_sbpl(p)})" for p in _forms([packages])]
+    allowed += ['(literal "/dev/null")', '(literal "/dev/tty")']
+    pinned = [_rx(form, r"(\.lock)?") for form in _forms([worktree / ".git", admin / "gitdir", admin / "commondir",
+                                                            admin / "config.worktree"])]
+    deny = " ".join(f"(subpath {_sbpl(p)})" for p in denied_paths(cfg, real_home))
+    return ("(version 1)\n(allow default)\n"
+            "(deny file-write*)\n"
+            f"(allow file-write* {' '.join(allowed)})\n"
+            f"(deny file-write* {' '.join(pinned)})\n"
+            f"(deny file-read* file-write* {deny})\n"
+            f"(deny process-exec* file-read-data {' '.join(f'(literal {_sbpl(b)})' for b in NO_EXEC)})\n"
+            # deny, then allow the session's own sandbox: `(target others)` alone is not enforced on this macOS
+            # (a probe still read the lane's pids); this form is, and it keeps a session's own children readable
+            # (dotnet's test host watches them)
+            "(deny process-info*)\n(allow process-info* (target same-sandbox))\n")
+
+
+def sandboxed(command: list, profile: pathlib.Path) -> list:
+    return [SANDBOX_EXEC, "-f", str(profile), *command]
+
+
+def write_profile(cfg: common.Config, scratch: pathlib.Path, real_home: pathlib.Path | None = None, *,
+                  worktree: pathlib.Path, branch: str | None = None) -> pathlib.Path:
+    path = scratch / "session.sb"
+    try:
+        path.write_text(sandbox_profile(cfg, real_home, scratch=scratch, worktree=worktree, branch=branch),
+                        encoding="utf-8")
+    except OSError as exc:
+        raise HarnessError(f"the sandbox profile {path} could not be written ({exc.__class__.__name__}: {exc})") from exc
+    return path
 
 
 def argv(cfg: common.Config, model: str, session_dir: pathlib.Path, session_id: str, prompt: str) -> list:
@@ -139,6 +253,7 @@ def argv(cfg: common.Config, model: str, session_dir: pathlib.Path, session_id: 
 
 def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, prompt: str, scratch: pathlib.Path,
                 log_path: pathlib.Path, extra_env: dict | None = None, on_tick: Callable[[], None] | None = None,
+                branch: str | None = None,
                 on_start: Callable[[int, str], None] | None = None, tick: float = 30.0) -> Outcome:
     """Run Pi to completion in `worktree`, killing it when its event stream stalls or it passes the hard cap.
 
@@ -149,10 +264,15 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
     """
     timeout, idle = int(cfg.harness["session_timeout"]), int(cfg.harness["stall_idle"])
     session_id = f"{worktree.name}-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
-    command = argv(cfg, model, scratch / "sessions", session_id, prompt)
     env = session_env(cfg, scratch, extra_env)
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("ab") as out:
+    command = sandboxed(argv(cfg, model, scratch / "sessions", session_id, prompt),
+                        write_profile(cfg, scratch, worktree=worktree, branch=branch))
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        out_file = log_path.open("ab")
+    except OSError as exc:
+        raise HarnessError(f"the session log {log_path} could not be opened: {exc}") from exc
+    with out_file as out:
         try:
             proc = subprocess.Popen(command, cwd=str(worktree), env=env, stdin=subprocess.DEVNULL, stdout=out,
                                     stderr=subprocess.STDOUT, start_new_session=True)
@@ -166,7 +286,10 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
             while proc.poll() is None:
                 time.sleep(tick)
                 now = time.monotonic()
-                current = log_path.stat().st_size
+                try:
+                    current = log_path.stat().st_size
+                except OSError as exc:
+                    raise HarnessError(f"the session log {log_path} could not be read: {exc}") from exc
                 if current != size:
                     size, last_activity = current, now
                 if now - started > timeout or now - last_activity > idle:
@@ -197,6 +320,10 @@ def _kill_group(proc: subprocess.Popen) -> None:
             os.killpg(proc.pid, sig)
         except ProcessLookupError:
             return
+        except PermissionError:  # macOS answers EPERM for a group whose only member has exited unreaped
+            if proc.poll() is not None:
+                return
+            raise HarnessError(f"the session group {proc.pid} could not be signalled") from None
         try:
             proc.wait(timeout=20)
             return
@@ -223,36 +350,8 @@ def last_text(log_path: pathlib.Path) -> str:
     return last
 
 
-# Shapes of things that must never be posted. Checked in order; the first match names the kind.
-SECRET_SHAPES = (
-    ("private key", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")),
-    ("GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})")),
-    ("API key", re.compile(r"\bsk-[A-Za-z0-9_-]{16,}")),
-    ("OpenCode key", re.compile(r"\boc_[A-Za-z0-9_-]{8,}")),  # the model key's prefix: a fragment is enough
-    ("AWS access key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
-    ("JWT", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
-    ("credential assignment", re.compile(
-        r"(?i)\b[\w-]*(?:api[_-]?key|token|secret|passw(?:or)?d)[\w-]*[\"']?\s*[:=]\s*[\"']?[^\s\"']{12,}")),
-)
-_OPAQUE = re.compile(r"[A-Za-z0-9+/_=-]{32,}")
-
-
-def _opaque(run: str) -> bool:
-    """A long run that mixes upper case, lower case and digits — key-shaped. Hex (commit SHAs) and words are not."""
-    return any(c.isupper() for c in run) and any(c.islower() for c in run) and any(c.isdigit() for c in run)
-
-
-def secret_kind(text: str, known: tuple = ()) -> str | None:
-    """The kind of token- or key-shaped thing in `text`, or None. Never returns the match itself."""
-    for value in known:
-        if value and value in text:
-            return "configured credential"
-    for kind, pattern in SECRET_SHAPES:
-        if pattern.search(text):
-            return kind
-    if any(_opaque(match.group(0)) for match in _OPAQUE.finditer(text)):
-        return "opaque key-like string"
-    return None
+# The secret shapes live in scripts/secret_scan.py, shared with open_pr's scan before every push.
+SECRET_SHAPES, secret_kind = secret_scan.SECRET_SHAPES, secret_scan.secret_kind
 
 
 def leaked_markup(log_path: pathlib.Path) -> bool:
@@ -338,7 +437,10 @@ def reap_session(card: int, session: tuple | None, grace: float = 10.0) -> bool:
 
 def _clear_dead(path: pathlib.Path, card: int, session: tuple | None) -> None:
     reap_session(card, session)
-    path.unlink(missing_ok=True)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise StateError(f"the dead worker's record {path} could not be removed: {exc}") from exc
 
 
 def clear_worker(card: int, pid: int) -> None:
@@ -415,9 +517,116 @@ def running_workers() -> dict:
     return found
 
 
-# --- idle runs: a card whose runs leave no new commit is parked after IDLE_RUN_LIMIT of them ---
+# --- running reviews: one record per pull request under <state>/reviewing (#13) ---
+#     The review driver is the cron run of review.py; if it is SIGKILLed its Pi session and worktree outlive it.
+
+def _review_record(pr: int) -> pathlib.Path:
+    return common.state_dir("reviewing") / f"{int(pr)}.json"
+
+
+def record_review(pr: int, pid: int, worktree: pathlib.Path) -> None:
+    _write_record(_review_record(pr), {"pr": int(pr), "pid": pid, "worktree": str(worktree), "started": time.time()})
+
+
+def note_review_session(pr: int, pid: int, session_pgid: int, session_id: str) -> None:
+    path = _review_record(pr)
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise StateError(f"the review record {path} could not be read: {exc}") from exc
+    if data.get("pid") != pid:
+        raise StateError(f"the review record {path} belongs to pid {data.get('pid')}, not {pid}")
+    data["session_pgid"], data["session_id"] = int(session_pgid), str(session_id)
+    _write_record(path, data)
+
+
+def clear_review(pr: int, pid: int) -> None:
+    path = _review_record(pr)
+    try:
+        if path.exists() and json.loads(path.read_text()).get("pid") == pid:
+            path.unlink()
+    except (OSError, ValueError) as exc:
+        raise StateError(f"the review record {path} could not be cleared: {exc}") from exc
+
+
+def review_alive(pid: int) -> bool:
+    """The pid is alive and is a review.py run (a recycled pid is not)."""
+    command = _command(pid)
+    return command is not None and "review.py" in command
+
+
+def reap_reviews(remove_worktree: Callable[[int], None]) -> list[int]:
+    """Clear every review whose driver is dead: kill the session it left (only that exact session id), remove its
+    worktree, drop the record. Returns the pull requests cleared. An unreadable record raises."""
+    cleared = []
+    for path in _listing(common.state_dir("reviewing")):
+        try:
+            data = json.loads(path.read_text())
+            pr, pid, worktree = int(data["pr"]), int(data["pid"]), pathlib.Path(str(data["worktree"]))
+            pgid, session_id = data.get("session_pgid"), data.get("session_id")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise StateError(f"the review record {path} could not be read: {exc}") from exc
+        if review_alive(pid):
+            continue
+        expected = common.state_dir("reviews") / f"pr-{pr}"
+        if os.path.abspath(worktree) != os.path.abspath(expected):
+            raise StateError(f"the review record {path} names {worktree}, not {expected} — a forged record; "
+                             "nothing was touched")
+        reap_session(pr, (int(pgid), str(session_id)) if pgid and session_id else None)
+        remove_worktree(pr)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise StateError(f"the review record {path} could not be removed: {exc}") from exc
+        cleared.append(pr)
+    return cleared
+
+
+# --- reruns: an infra failure is rerun once per head; <state>/reruns/<pr>.json names the head it was for ---
+
+def _rerun_record(pr: int) -> pathlib.Path:
+    return common.state_dir("reruns") / f"{int(pr)}.json"
+
+
+def note_rerun(pr: int, head: str, runs: tuple) -> None:
+    _write_record(_rerun_record(pr), {"pr": int(pr), "head": str(head), "runs": list(runs), "at": time.time()})
+
+
+def reran() -> frozenset:
+    """(pull request, head) for every head whose infra failure was already rerun once."""
+    found = set()
+    for path in _listing(common.state_dir("reruns")):
+        try:
+            data = json.loads(path.read_text())
+            found.add((int(data["pr"]), str(data["head"])))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise StateError(f"the rerun record {path} could not be read: {exc}") from exc
+    return frozenset(found)
+
+
+def prune_reruns(open_prs) -> int:
+    """Remove the rerun records of pull requests that are no longer open (review of #17, round two, item 5).
+    An unreadable record raises, like every other state read. Returns how many went."""
+    keep, gone = {int(n) for n in open_prs}, 0
+    for path in _listing(common.state_dir("reruns")):
+        try:
+            pr = int(json.loads(path.read_text())["pr"])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise StateError(f"the rerun record {path} could not be read: {exc}") from exc
+        if pr not in keep:
+            try:
+                path.unlink()
+            except OSError as exc:
+                raise StateError(f"the rerun record {path} could not be removed: {exc}") from exc
+            gone += 1
+    return gone
+
+
+# --- attempts: a card is parked after IDLE_RUN_LIMIT runs with no new commit, or after REWORK_LIMIT rework rounds
+#     on one pull request (#9). Deleting <state>/attempts/<card>.json unparks it and clears both counts.
 
 IDLE_RUN_LIMIT = 3
+REWORK_LIMIT = 3
 
 
 def _attempts(card: int) -> pathlib.Path:
@@ -426,36 +635,99 @@ def _attempts(card: int) -> pathlib.Path:
 
 def _read_attempts(path: pathlib.Path) -> dict:
     if not path.exists():
-        return {"idle_runs": 0, "parked": False}
+        return {"idle_runs": 0, "parked": False, "reason": "", "reworks": {}}
     try:
         data = json.loads(path.read_text())
-        return {"idle_runs": int(data["idle_runs"]), "parked": bool(data["parked"])}
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return {"idle_runs": int(data["idle_runs"]), "parked": bool(data["parked"]),
+                "reason": str(data.get("reason") or ""),
+                "reworks": {str(int(k)): int(v) for k, v in (data.get("reworks") or {}).items()}}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise StateError(f"the attempts record {path} could not be read: {exc}") from exc
 
 
-def note_run(card: int, new_commit: bool) -> tuple[int, bool]:
-    """Count a finished run: a new commit resets the count, none adds one. Returns (idle runs, parked just now)."""
-    path = _attempts(card)
-    data = _read_attempts(path)
-    if new_commit:
-        path.unlink(missing_ok=True)
-        return 0, False
-    idle = data["idle_runs"] + 1
-    parked = idle >= IDLE_RUN_LIMIT
+def _write_attempts(path: pathlib.Path, data: dict) -> None:
+    if not data["idle_runs"] and not data["parked"] and not data["reworks"]:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise StateError(f"the attempts record {path} could not be removed: {exc}") from exc
+        return
     tmp = path.with_suffix(".tmp")
     try:
-        tmp.write_text(json.dumps({"idle_runs": idle, "parked": parked, "updated": time.time()}))
+        tmp.write_text(json.dumps({**data, "updated": time.time()}))
         os.replace(tmp, path)
     except OSError as exc:
         raise StateError(f"the attempts record {path} could not be written: {exc}") from exc
-    return idle, parked and not data["parked"]
+
+
+def note_attempt(card: int) -> int:
+    """Count a worker run as idle *before* it starts — by the feeder, or by a hand-started worker — so a run whose
+    setup keeps failing (and never reaches its finish) still reaches the cap. A run that ends with a new commit
+    resets the count (note_run). Returns the idle runs so far, this one included."""
+    path = _attempts(card)
+    data = _read_attempts(path)
+    data["idle_runs"] += 1
+    _write_attempts(path, data)
+    return data["idle_runs"]
+
+
+def idle_runs(card: int) -> int:
+    return _read_attempts(_attempts(card))["idle_runs"]
+
+
+def note_run(card: int, new_commit: bool) -> tuple[int, bool]:
+    """A finished run: a new commit resets the idle count (and lifts an idle park); none leaves the count as
+    note_attempt already set it and parks the card once it is at the cap. Rework rounds are kept.
+    Returns (idle runs, parked just now)."""
+    path = _attempts(card)
+    data = _read_attempts(path)
+    if new_commit:
+        data["idle_runs"] = 0
+        if data["parked"] and data["reason"] == "idle":
+            data["parked"], data["reason"] = False, ""
+        _write_attempts(path, data)
+        return 0, False
+    parked_now = data["idle_runs"] >= IDLE_RUN_LIMIT and not data["parked"]
+    if parked_now:
+        data["parked"], data["reason"] = True, "idle"
+    _write_attempts(path, data)
+    return data["idle_runs"], parked_now
+
+
+def note_rework(card: int, pr: int) -> int:
+    """Count one rework round started on this pull request; returns the rounds so far, this one included."""
+    path = _attempts(card)
+    data = _read_attempts(path)
+    data["reworks"][str(int(pr))] = data["reworks"].get(str(int(pr)), 0) + 1
+    _write_attempts(path, data)
+    return data["reworks"][str(int(pr))]
+
+
+def rework_rounds(card: int, pr: int) -> int:
+    return _read_attempts(_attempts(card))["reworks"].get(str(int(pr)), 0)
+
+
+def park(card: int, reason: str) -> bool:
+    """Park the card for `reason` ('idle', 'reworks', 'secret'). Returns whether it was parked just now."""
+    path = _attempts(card)
+    data = _read_attempts(path)
+    if data["parked"]:
+        return False
+    data["parked"], data["reason"] = True, reason
+    _write_attempts(path, data)
+    return True
+
+
+def parked_details() -> dict:
+    """card -> why it is parked, for every parked card."""
+    found = {}
+    for path in _listing(common.state_dir("attempts")):
+        data = _read_attempts(path)
+        if data["parked"]:
+            found[int(path.stem)] = data["reason"] or "idle"
+    return found
 
 
 def parked_cards() -> frozenset:
     """Cards the feeder must not start again until a person deletes their attempts record."""
-    found = set()
-    for path in _listing(common.state_dir("attempts")):
-        if _read_attempts(path)["parked"]:
-            found.add(int(path.stem))
-    return frozenset(found)
+    return frozenset(parked_details())

@@ -9,6 +9,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from scripts import common, github  # noqa: E402
 from scripts.common import GhError  # noqa: E402
 from tests.helpers import REQUIRED, pull, review  # noqa: E402
+from tests.helpers import review as helper_review  # noqa: E402
 
 CFG = common.load_config()
 
@@ -61,6 +62,7 @@ class PullTests(unittest.TestCase):
         node = {"number": 5, "title": "t", "state": "OPEN", "isDraft": False, "createdAt": "2026-11-12T00:00:00Z",
                 "headRefName": "wt/issue-9", "headRefOid": "abc", "mergeable": "MERGEABLE",
                 "author": {"login": "lunate-worker"}, "autoMergeRequest": None,
+                "files": page([{"path": "src/A.cs"}, {"path": "openspec/specs/agent-loop/spec.md"}]),
                 "closingIssuesReferences": page([{"number": 9, "labels": page([{"name": "area/tui"}])}]),
                 "reviews": {"pageInfo": {"hasPreviousPage": False},
                             "nodes": [{"author": {"login": "lunate-reviewer"}, "state": "APPROVED", "body": "ok",
@@ -78,6 +80,12 @@ class PullTests(unittest.TestCase):
         self.assertEqual(p.reviews[0].state, "APPROVED")
         self.assertIn(("legacy", "PENDING", "PENDING"), p.checks)
         self.assertEqual(github.check_state(p, REQUIRED), "green")
+
+    def test_its_files_are_read(self) -> None:
+        with mock.patch.object(common, "graphql", return_value=self.node()):
+            got = github.pull(CFG, 5)
+        self.assertEqual(got.files, ("src/A.cs", "openspec/specs/agent-loop/spec.md"))
+        self.assertEqual(got.capabilities, frozenset({"agent-loop"}))
 
     def test_more_reviews_than_one_page_is_refused(self) -> None:
         many = self.node(reviews={"pageInfo": {"hasPreviousPage": True}, "nodes": []})
@@ -106,6 +114,257 @@ class PullTests(unittest.TestCase):
     def test_bot_logins_compare_in_their_bare_form(self) -> None:
         self.assertEqual(github.login({"login": "lunate-worker[bot]"}), "lunate-worker")
         self.assertEqual(github.login({"login": "lunate-worker"}), "lunate-worker")
+
+
+class SpecOverlapTests(unittest.TestCase):
+    def test_capabilities_come_from_specs_and_change_deltas_including_archived_ones(self) -> None:
+        self.assertEqual(github.capabilities([
+            "openspec/specs/agent-loop/spec.md",
+            "openspec/changes/add-x/specs/agent-tools/spec.md",
+            "openspec/changes/archive/2026-11-12-add-y/specs/print-mode/spec.md",
+            "openspec/changes/add-x/proposal.md", "src/Lunate/Loop.cs", "docs/openspec/specs/nope/spec.md"]),
+            frozenset({"agent-loop", "agent-tools", "print-mode"}))
+
+    def overlap(self, number, others):
+        files = {1: ("openspec/specs/agent-loop/spec.md",), 2: ("src/A.cs",),
+                 3: ("openspec/changes/x/specs/agent-loop/spec.md",), 4: ("openspec/specs/agent-tools/spec.md",)}
+        pulls = {n: pull(n, n, files=f) for n, f in files.items()}
+        return github.spec_overlap(pulls[number], [pulls[n] for n in others])
+
+    def test_an_older_open_pull_request_on_the_same_capability_is_named(self) -> None:
+        self.assertEqual(self.overlap(3, [1, 2, 4]), (1, frozenset({"agent-loop"})))
+
+    def test_a_newer_or_unrelated_pull_request_does_not_hold_one_back(self) -> None:
+        self.assertIsNone(self.overlap(1, [3]))
+        self.assertIsNone(self.overlap(4, [1, 2, 3]))
+        self.assertIsNone(self.overlap(2, [1, 3, 4]))
+
+    def test_an_older_draft_does_not_hold_a_newer_one_back_but_an_older_ready_one_does(self) -> None:
+        mine = pull(3, 3, files=("openspec/changes/x/specs/agent-loop/spec.md",))
+        draft = pull(1, 1, files=("openspec/specs/agent-loop/spec.md",), draft=True)
+        ready = pull(2, 2, files=("openspec/specs/agent-loop/spec.md",))
+        self.assertIsNone(github.spec_overlap(mine, [draft]))
+        self.assertEqual(github.spec_overlap(mine, [draft, ready]), (2, frozenset({"agent-loop"})))
+
+    def test_open_pulls_read_their_draft_state(self) -> None:
+        node = {"number": 7, "title": "T", "isDraft": True, "author": {"login": "x"}, "headRefName": "b",
+                "closingIssuesReferences": page([]), "files": page([])}
+        with mock.patch.object(common, "graphql", return_value={"repository": {"pullRequests": page([node])}}):
+            self.assertTrue(github.open_pulls(CFG)[0].draft)
+
+    def test_files_that_were_not_read_are_a_refusal_not_no_overlap(self) -> None:
+        with self.assertRaises(GhError):
+            github.spec_overlap(pull(3, 3, files=None), [])
+        with self.assertRaises(GhError):
+            github.spec_overlap(pull(3, 3, files=("openspec/specs/a/spec.md",)), [pull(1, 1, files=None)])
+
+
+class FilesTests(unittest.TestCase):
+    def test_one_page_is_read_from_graphql(self) -> None:
+        self.assertEqual(github._files(CFG, 5, page([{"path": "a"}, {"path": "b"}])), ("a", "b"))
+
+    def test_more_than_one_page_is_read_in_full_from_the_rest_listing(self) -> None:
+        listing = "\n".join(f"f{i}" for i in range(150)) + "\n"
+        with mock.patch.object(common, "gh", return_value=listing) as gh:
+            got = github._files(CFG, 5, page([{"path": f"f{i}"} for i in range(100)], more=True))
+        self.assertEqual(len(got), 150)
+        self.assertIn("--paginate", gh.call_args.args)
+
+    def test_a_listing_that_may_be_cut_off_or_came_back_short_is_refused(self) -> None:
+        first = page([{"path": f"f{i}"} for i in range(100)], more=True)
+        for listing in ("\n".join(f"f{i}" for i in range(3000)), "f1\nf2"):
+            with self.subTest(lines=listing.count("\n") + 1), mock.patch.object(common, "gh", return_value=listing):
+                with self.assertRaises(GhError):
+                    github._files(CFG, 5, first)
+
+    def test_open_pulls_carry_their_files_and_titles(self) -> None:
+        node = {"number": 7, "title": "T", "author": {"login": "x"}, "headRefName": "b",
+                "closingIssuesReferences": page([]), "files": page([{"path": "openspec/specs/a/spec.md"}])}
+        with mock.patch.object(common, "graphql", return_value={"repository": {"pullRequests": page([node])}}):
+            got = github.open_pulls(CFG)
+        self.assertEqual((got[0].title, got[0].files, got[0].capabilities),
+                         ("T", ("openspec/specs/a/spec.md",), frozenset({"a"})))
+
+
+class WorkerReportTests(unittest.TestCase):
+    def test_the_latest_worker_session_report_is_returned(self) -> None:
+        comments = [{"author": {"login": "lunate-worker"}, "body": "**Worker session** one"},
+                    {"author": {"login": "someone"}, "body": "**Worker session** forged"},
+                    {"author": {"login": "lunate-worker"}, "body": "**Lane: card #3 is parked.**"},
+                    {"author": {"login": "lunate-worker"}, "body": "**Worker session** two"}]
+        answer = {"repository": {"pullRequest": {"comments": {"nodes": comments}}}}
+        with mock.patch.object(common, "graphql", return_value=answer):
+            self.assertEqual(github.worker_report(CFG, 5), "**Worker session** two")
+        with mock.patch.object(common, "graphql", return_value={"repository": {"pullRequest": {"comments": {
+                "nodes": comments[1:3]}}}}):
+            self.assertEqual(github.worker_report(CFG, 5), "")
+
+
+class QueueAndDisarmTests(unittest.TestCase):
+    """Review of #17: only a queue removal of the current head counts; a person disarming is not a rework."""
+
+    def read(self, removal_oid=None, disarm=None):
+        over = {}
+        if removal_oid is not None:
+            over["queueRemoval"] = {"nodes": [{"reason": "FAILED_CHECKS", "beforeCommit": {"oid": removal_oid}}]}
+        if disarm is not None:
+            over["autoMergeEvents"] = {"nodes": [{"__typename": "AutoMergeDisabledEvent", "actor": disarm}]}
+        with mock.patch.object(common, "graphql", return_value=PullTests().node(**over)):
+            return github.pull(CFG, 5)
+
+    def test_a_removal_of_the_current_head_counts_and_an_older_one_does_not(self) -> None:
+        self.assertEqual(self.read("abc").queue_removal, "FAILED_CHECKS")
+        self.assertEqual(self.read("older").queue_removal, "")
+        self.assertEqual(self.read().queue_removal, "")
+
+    def test_a_person_disarming_is_recorded_and_an_app_or_the_lane_is_not(self) -> None:
+        self.assertEqual(self.read(disarm={"__typename": "User", "login": "a-maintainer"}).disarmed_by, "a-maintainer")
+        self.assertEqual(self.read(disarm={"__typename": "Bot", "login": "github-merge-queue"}).disarmed_by, "")
+        self.assertEqual(self.read(disarm={"__typename": "User", "login": "lunate-worker"}).disarmed_by, "")
+
+    def test_neither_a_person_disarming_nor_an_old_removal_is_a_rework(self) -> None:
+        approved = [helper_review("APPROVED")]
+        for p, expected in ((pull(5, 9, reviews=approved, queue_removal="FAILED_CHECKS"),
+                             "out of the merge queue after approval (failed_checks)"),
+                            (pull(5, 9, reviews=approved, queue_removal="FAILED_CHECKS", disarmed_by="a-maintainer"), None),
+                            (pull(5, 9, reviews=approved, disarmed_by="a-maintainer"), None),
+                            (pull(5, 9, reviews=approved), None)):
+            with self.subTest(p=(p.queue_removal, p.disarmed_by)):
+                self.assertEqual(github.stuck_reason(p, frozenset({"ci-ok"}), "lunate-reviewer"), expected)
+
+
+class RearmTests(unittest.TestCase):
+    def test_only_a_ready_approved_green_unarmed_unqueued_pull_request_is_rearmed(self) -> None:
+        ok = dict(reviews=[helper_review("APPROVED")])
+        cases = ((pull(5, 9, **ok), True), (pull(5, 9, **ok, auto_merge=True), False),
+                 (pull(5, 9, **ok, in_queue=True), False), (pull(5, 9, **ok, draft=True), False),
+                 (pull(5, 9, **ok, disarmed_by="a-maintainer"), False),
+                 (pull(5, 9, **ok, mergeable="CONFLICTING"), False), (pull(5, 9, **ok, queue_removal="X"), False),
+                 (pull(5, 9, **ok, checks=[("ci-ok", "IN_PROGRESS", "")]), False), (pull(5, 9), False),
+                 (pull(5, 9, reviews=[helper_review("APPROVED", commit="old")]), False))
+        for p, expected in cases:
+            with self.subTest(p=p):
+                self.assertIs(github.needs_rearm(p, frozenset({"ci-ok"}), "lunate-reviewer"), expected)
+
+
+class FailureKindTests(unittest.TestCase):
+    """Review of #17, item 1: what is the runner's fault (rerun once) and what is a real failure (rework)."""
+
+    def run_node(self, name, conclusion, *, steps=("SUCCESS",), more=False, run_id=77):
+        """`steps`: conclusions, or (name, conclusion) pairs."""
+        nodes = [{"name": s[0], "conclusion": s[1]} if isinstance(s, tuple) else {"name": "step", "conclusion": s}
+                 for s in steps]
+        return {"__typename": "CheckRun", "name": name, "status": "COMPLETED", "conclusion": conclusion,
+                "databaseId": 5, "detailsUrl": "u", "checkSuite": {"workflowRun": {"databaseId": run_id}},
+                "steps": {"pageInfo": {"hasNextPage": more}, "nodes": nodes}}
+
+    def ci_ok(self, failing_step="Every required job succeeded", conclusion="FAILURE", run_id=77):
+        steps = [("Set up job", "SUCCESS"), ("Checkout", "SUCCESS"), ("Every required job succeeded", "SUCCESS"),
+                 ("Post Checkout", "SUCCESS"), ("Complete job", "SUCCESS")]
+        steps = [(n, "FAILURE" if n == failing_step else c) for n, c in steps]
+        return self.run_node("ci-ok", conclusion, steps=tuple(steps), run_id=run_id)
+
+    def leg(self, name, conclusion, failing=None, run_id=77):
+        steps = [("Set up job", "SUCCESS"), ("Checkout", "SUCCESS"), ("Restore", "SUCCESS"),
+                 ("Test slice", failing or ("CANCELLED" if conclusion == "CANCELLED" else "SUCCESS")),
+                 ("Complete job", "SKIPPED" if conclusion == "CANCELLED" else "SUCCESS")]
+        return self.run_node(name, conclusion, steps=tuple(steps), run_id=run_id)
+
+    def shape_813(self, *extra):
+        return (self.run_node("plan", "SUCCESS"), self.run_node("changes", "SUCCESS"),
+                self.leg("verify (macos-latest, 1/4)", "SUCCESS"), self.leg("verify (macos-latest, 2/4)", "CANCELLED"),
+                self.leg("verify (macos-latest, 3/4)", "CANCELLED"), self.leg("verify (macos-latest, 4/4)", "SUCCESS"),
+                self.leg("verify (ubuntu-latest, 1/4)", "SUCCESS"), self.run_node("verify-docs", "SKIPPED"),
+                *extra, self.ci_ok())
+
+    def test_813s_exact_shape_is_infra_and_names_its_run(self) -> None:
+        """Two cancelled macOS legs, ci-ok red on its aggregate step and nothing else: the runner's fault."""
+        kind, p = self.kind(*self.shape_813())
+        self.assertEqual(kind, "infra")
+        self.assertEqual(github.infra_runs(p), (77,))
+
+    def test_a_real_failing_leg_next_to_cancelled_ones_is_real(self) -> None:
+        self.assertEqual(self.kind(*self.shape_813(self.leg("verify (ubuntu-latest, 2/4)", "FAILURE",
+                                                            failing="FAILURE")))[0], "real")
+
+    def test_ci_ok_failing_anywhere_but_its_aggregate_step_or_over_green_jobs_is_real(self) -> None:
+        cases = {
+            "ci-ok fails at checkout": (self.leg("verify (macos, 2/4)", "CANCELLED"), self.ci_ok("Checkout")),
+            "ci-ok red, every job green (e.g. a draft)": (self.leg("verify (macos, 2/4)", "SUCCESS"), self.ci_ok()),
+            "the cancelled job is another workflow's": (self.leg("verify (macos, 2/4)", "CANCELLED", run_id=88),
+                                                        self.ci_ok()),
+            "a cancelled job with a failed step": (self.leg("verify (macos, 2/4)", "CANCELLED", failing="FAILURE"),
+                                                  self.ci_ok()),
+            "ci-ok's steps unread": (self.leg("verify (macos, 2/4)", "CANCELLED"),
+                                     {**self.ci_ok(), "steps": {"pageInfo": {"hasNextPage": True}, "nodes": []}}),
+        }
+        for name, runs in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(self.kind(*runs)[0], "real")
+
+    def kind(self, *contexts):
+        node = PullTests().node(commits={"nodes": [{"commit": {"oid": "abc", "statusCheckRollup": {
+            "contexts": page(list(contexts))}}}]})
+        with mock.patch.object(common, "graphql", return_value=node):
+            p = github.pull(CFG, 5)
+        return github.failure_kind(p, frozenset({"ci-ok"})), p
+
+    def test_cancelled_legs_and_a_cancelled_required_check_are_infra_and_name_their_run(self) -> None:
+        kind, p = self.kind(self.run_node("ci-ok", "CANCELLED", steps=("SUCCESS", "CANCELLED")),
+                            self.run_node("verify (macos, 2/4)", "CANCELLED", steps=("SUCCESS", "CANCELLED")),
+                            self.run_node("verify (macos, 3/4)", "TIMED_OUT", steps=()))
+        self.assertEqual(kind, "infra")
+        self.assertEqual(github.infra_runs(p), (77,))
+
+    def test_a_required_check_that_failed_for_real_is_never_infra_even_behind_cancelled_legs(self) -> None:
+        """Review of #17, round two, item 4: #813's shape — ci-ok FAILURE, the legs under it cancelled."""
+        for own in (self.run_node("ci-ok", "FAILURE", steps=("SUCCESS", "FAILURE")),
+                    self.run_node("ci-ok", "FAILURE", steps=("SUCCESS",)),
+                    self.run_node("ci-ok", "CANCELLED", steps=("FAILURE",))):
+            with self.subTest(own=(own["conclusion"], [s["conclusion"] for s in own["steps"]["nodes"]])):
+                kind, _ = self.kind(own, self.run_node("verify (macos, 2/4)", "CANCELLED"),
+                                    self.run_node("verify (macos, 3/4)", "TIMED_OUT", steps=()))
+                self.assertEqual(kind, "real")
+
+    def test_a_required_check_that_itself_failed_to_start_is_infra(self) -> None:
+        self.assertEqual(self.kind(self.run_node("ci-ok", "STARTUP_FAILURE", steps=()))[0], "infra")
+
+    def test_a_failing_step_or_a_failed_leg_is_real(self) -> None:
+        for legs in ([self.run_node("verify", "FAILURE", steps=("FAILURE",))],
+                     [self.run_node("verify", "CANCELLED", steps=("FAILURE", "CANCELLED"))],
+                     [self.run_node("verify", "CANCELLED"), self.run_node("lint", "FAILURE", steps=("FAILURE",))],
+                     []):
+            with self.subTest(legs=[l["name"] + "=" + l["conclusion"] for l in legs]):
+                self.assertEqual(self.kind(self.run_node("ci-ok", "FAILURE", steps=("FAILURE",)), *legs)[0], "real")
+
+    def test_what_cannot_be_attributed_is_real(self) -> None:
+        unread = self.run_node("verify", "CANCELLED", more=True)
+        no_run = self.run_node("verify", "CANCELLED", run_id=None)
+        for leg in (unread, no_run):
+            with self.subTest(leg=leg["steps"]["pageInfo"]):
+                self.assertEqual(self.kind(self.run_node("ci-ok", "FAILURE"), leg)[0], "real")
+
+    def test_green_or_pending_is_neither(self) -> None:
+        self.assertIsNone(self.kind(self.run_node("ci-ok", "SUCCESS"))[0])
+
+
+class LandedTests(unittest.TestCase):
+    def answer(self, state, oid="abc", parents=1):
+        commit = {"oid": oid, "parents": {"totalCount": parents}} if oid else None
+        return mock.patch.object(common, "graphql", return_value={"repository": {"pullRequest": {
+            "state": state, "mergeCommit": commit}}})
+
+    def test_a_squash_lands_as_one_parent(self) -> None:
+        with self.answer("MERGED", "abc", 1):
+            self.assertEqual(github.landed_parents(CFG, 801), ("abc", 1))
+        with self.answer("MERGED", "def", 2):
+            self.assertEqual(github.landed_parents(CFG, 802), ("def", 2))
+
+    def test_a_pull_request_that_did_not_land_is_a_named_failure(self) -> None:
+        for state, oid in (("OPEN", None), ("CLOSED", None), ("MERGED", None)):
+            with self.subTest(state=state), self.answer(state, oid):
+                with self.assertRaises(GhError):
+                    github.landed_parents(CFG, 803)
 
 
 class ChecksTests(unittest.TestCase):

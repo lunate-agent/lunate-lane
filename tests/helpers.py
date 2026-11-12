@@ -21,7 +21,8 @@ class TempState:
     def __init__(self, **over) -> None:
         self.root = pathlib.Path(tempfile.mkdtemp(prefix="lane-state-"))
         self.cfg = dataclasses.replace(common.load_config(), state=self.root / "state", checkout=self.root / "checkout",
-                                       pins=self.root / "pins.json", **over)
+                                       pins=self.root / "pins.json", app_config=self.root / "config" / "app.json",
+                                       **over)
         self.saved = common._CONFIG
         common._CONFIG = self.cfg
 
@@ -43,7 +44,7 @@ def pull(number: int, card_number: int | None = None, *, author: str = "lunate-w
     branch = f"wt/issue-{card_number}" if card_number is not None else f"feature/{number}"
     values = dict(number=number, author=author, branch=branch, head=head, reviews=tuple(reviews),
                   labels=frozenset(labels), checks=tuple(checks), title=f"pr {number}",
-                  created="2026-11-12T00:00:00Z")
+                  created="2026-11-12T00:00:00Z", files=())
     values.update(over)
     return github.Pull(**values)
 

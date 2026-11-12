@@ -15,15 +15,20 @@ import argparse
 import json
 import os
 import pathlib
+import re
+import shlex
 import subprocess
+import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 try:  # imported as scripts.open_pr by the tests, or run as a script
-    from . import common, identity
+    from . import common, identity, secret_scan
 except ImportError:  # pragma: no cover - the script path
     import common
     import identity
+    import secret_scan
 
 SLUG = common.config().slug
 API = "https://api.github.com"
@@ -32,6 +37,29 @@ WORKER_LOGIN = "lunate-worker[bot]"
 
 class OpenPrError(common.LaneError):
     """Anything that stops the pull request being opened. Never carries a token."""
+
+
+class SecretFound(OpenPrError):
+    """What would be pushed or posted holds something secret-shaped. Names the kind and where — never the value."""
+
+    def __init__(self, kind: str, where: str) -> None:
+        super().__init__(f"the {where} holds something shaped like a {kind} — nothing was pushed")
+        self.kind, self.where = kind, where
+
+
+def scan(repo: pathlib.Path, branch: str, base: str, title: str, body: str, known: tuple = ()) -> None:
+    """Before every push (#12): the diff's added lines against the base, the title and the body. A match raises
+    SecretFound; an unreadable diff is a failure, never a clean scan."""
+    try:
+        diff = common.git(repo, "diff", "--no-color", "--no-textconv", "--no-ext-diff", "--unified=0",
+                          f"origin/{base}...refs/heads/{branch}")
+    except common.GitError as exc:
+        raise OpenPrError(f"the diff of {branch} could not be read for the secret scan: {exc}") from exc
+    added = "\n".join(line[1:] for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
+    for where, text in (("diff's added lines", added), ("title", title), ("body", body)):
+        kind = secret_scan.secret_kind(text, known, strict=True)
+        if kind:
+            raise SecretFound(kind, where)
 
 
 def _api(token: str, method: str, path: str, payload: dict | None = None) -> dict:
@@ -56,53 +84,168 @@ def _api(token: str, method: str, path: str, payload: dict | None = None) -> dic
         raise OpenPrError(f"GitHub could not be reached for {method} {path} ({exc.__class__.__name__})") from exc
 
 
-def push(repo: pathlib.Path, branch: str, token: str, host: str = "github.com") -> None:
-    """Push the named local branch. The token never reaches the report, argv, a file, or the keychain.
+# The token goes only to a prompt for exactly the push URL's host; any other prompt gets nothing (exit 1).
+ASKPASS = """#!/bin/sh
+case "$1" in
+  {password_prompt}) cat {token_file} ;;
+  {username_prompt}) echo x-access-token ;;
+  *) exit 1 ;;
+esac
+"""
+# What the push mirror's own config may hold: what `git init --bare` writes, nothing that redirects or runs.
+MIRROR_KEYS = frozenset({"core.repositoryformatversion", "core.filemode", "core.bare", "core.ignorecase",
+                         "core.precomposeunicode", "core.logallrefupdates"})
+SAFE_GIT = common.SAFE_GIT
 
-    Three things are disabled so nothing durable can see the token: it rides in the URL prefix rewrite, every
-    credential helper is blanked (so no helper is consulted and nothing is stored in the login keychain), and
-    hooks are pointed at an empty directory.
+
+def push_url(host: str = "github.com") -> str:
+    return f"https://x-access-token@{host}/{SLUG}.git"
+
+
+def _secret_dir() -> pathlib.Path:
+    """`<app config dir>/run`: mode 700 under the directory every session's sandbox denies (harness)."""
+    path = common.config().app_config.parent / "run"
+    try:
+        path.mkdir(mode=0o700, parents=True, exist_ok=True)
+        os.chmod(path, 0o700)
+    except OSError as exc:
+        raise OpenPrError(f"the push's secret directory {path} could not be prepared ({exc.__class__.__name__})") from exc
+    return path
+
+
+_git_env = common.git_env
+
+
+PUSH_FILE = re.compile(r"^push-(\d+)-\d+\.(token|askpass)$")
+
+
+def sweep_secret_dir() -> int:
+    """Remove token and askpass files whose push is gone (its process was killed before its `finally`). Run at
+    the start of every feeder tick and every push. Returns how many went."""
+    run_dir = _secret_dir()
+    gone = 0
+    try:
+        for entry in os.scandir(run_dir):
+            match = PUSH_FILE.match(entry.name)
+            if not match:
+                continue
+            try:
+                os.kill(int(match.group(1)), 0)
+                continue  # its push is still running
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                continue  # alive, someone else's
+            os.unlink(entry.path)
+            gone += 1
+    except OSError as exc:
+        raise OpenPrError(f"stale push files in {run_dir} could not be swept ({exc.__class__.__name__})") from exc
+    return gone
+
+
+def push_env(token: str, run_dir: pathlib.Path, url: str) -> dict:
+    """The push's environment, and its askpass helper and token file in `run_dir` (mode 600).
+
+    The token is in neither the environment nor any argv: git asks `GIT_ASKPASS` for the password, and the helper
+    reads the file — only when git's prompt names exactly `url`'s scheme and host (git's prompt is
+    `Password for 'https://x-access-token@github.com': `). Any process of the same user can read another's argv
+    and environment on macOS, but not that file: it sits in a directory the session sandbox denies.
     """
-    exists = subprocess.run(
-        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
-        capture_output=True, text=True, cwd=str(repo), timeout=60,
-    )
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname or ""
+    if parts.port:
+        host += f":{parts.port}"
+    origin = f"{parts.scheme}://x-access-token@{host}"
+    stem = f"push-{os.getpid()}-{time.monotonic_ns()}"
+    token_file, helper = run_dir / f"{stem}.token", run_dir / f"{stem}.askpass"
+    try:
+        fd = os.open(token_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(token)
+        fd = os.open(helper, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(ASKPASS.format(
+                token_file=shlex.quote(str(token_file)),
+                password_prompt=shlex.quote(f"Password for '{origin}': "),
+                username_prompt=shlex.quote(f"Username for '{parts.scheme}://{host}': ")))
+    except OSError as exc:
+        for path in (token_file, helper):
+            path.unlink(missing_ok=True)
+        raise OpenPrError(f"the push's askpass files could not be written in {run_dir} ({exc.__class__.__name__})") from exc
+    return _git_env({"GIT_ASKPASS": str(helper), "SSH_ASKPASS": str(helper),
+                     "LANE_PUSH_FILES": f"{token_file}{os.pathsep}{helper}"})
+
+
+def _drop_push_files(env: dict) -> None:
+    for name in env.get("LANE_PUSH_FILES", "").split(os.pathsep):
+        if name:
+            try:
+                pathlib.Path(name).unlink(missing_ok=True)
+            except OSError:
+                pass
+
+
+def _run_git(argv: list, cwd: pathlib.Path | None, env: dict, what: str, token: str = "") -> str:
+    try:
+        done = subprocess.run(["git", *SAFE_GIT, *argv], capture_output=True, text=True,
+                              cwd=str(cwd) if cwd else None, env=env, timeout=180)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OpenPrError(f"{what} could not be run ({exc.__class__.__name__}: {exc})") from exc
+    if done.returncode != 0:
+        tail = (done.stderr or "") + (done.stdout or "")
+        raise OpenPrError(f"{what} was refused: {(tail.replace(token, '[REDACTED]') if token else tail).strip()[:200]}")
+    return done.stdout
+
+
+def push_mirror() -> pathlib.Path:
+    """`<state>/push-mirror.git`: a bare repository only the lane writes (the session sandbox denies the state
+    directory), whose config is checked to hold nothing but what `git init --bare` puts there."""
+    mirror = common.state_dir() / "push-mirror.git"
+    env = _git_env()
+    if not (mirror / "HEAD").exists():
+        _run_git(["init", "-q", "--bare", str(mirror)], None, env, "creating the push mirror")
+    keys = {line.split("=", 1)[0].lower()
+            for line in _run_git(["-C", str(mirror), "config", "--local", "--list"], None, env,
+                                 "reading the push mirror's config").splitlines() if line}
+    if keys - MIRROR_KEYS:
+        raise OpenPrError(f"the push mirror {mirror} has config it must not have ({', '.join(sorted(keys - MIRROR_KEYS))})"
+                          " — nothing was pushed; delete the mirror and the next push recreates it")
+    return mirror
+
+
+def push(repo: pathlib.Path, branch: str, token: str, url: str | None = None) -> None:
+    """Push the named local branch of `repo` (a worktree) to `url` — `https://github.com/<repo>.git` unless given.
+
+    The branch is first fetched into the lane's private bare mirror, and pushed from there to the explicit URL:
+    the worktree's config (which a session could write: a `pushurl`, an `insteadOf`) is never consulted for where
+    the push goes. System and global config are off, hooks point nowhere, no credential helper is asked, and the
+    token reaches git only through the askpass helper, for exactly that host (push_env). Never a force push (#8).
+    """
+    url = url or push_url()
+    env = _git_env()
+    try:
+        exists = subprocess.run(["git", *SAFE_GIT, "-C", str(repo), "rev-parse", "--verify", "--quiet",
+                                 f"refs/heads/{branch}"], capture_output=True, text=True, env=env, timeout=60)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OpenPrError(f"git could not check {branch!r} in {repo} ({exc.__class__.__name__}: {exc})") from exc
+    if exists.returncode not in (0, 1):
+        raise OpenPrError(f"git could not check {branch!r} in {repo}: {exists.stderr.strip()[:160]}")
     if exists.returncode != 0:
         raise OpenPrError(f"there is no local branch {branch!r} in {repo} to push")
-    hooks_dir = pathlib.Path(os.environ.get("TMPDIR", "/tmp")) / f"lane-hooks-{os.getpid()}"
-    hooks_dir.mkdir(parents=True, exist_ok=True)
-    env = dict(os.environ)
-    env.update(
-        {
-            "GIT_ASKPASS": "true",
-            "GIT_TERMINAL_PROMPT": "0",
-            "GIT_CONFIG_COUNT": "4",
-            # a prefix rewrite: the token is in the config, not argv, so it cannot show in a process listing
-            "GIT_CONFIG_KEY_0": f"url.https://x-access-token:{token}@{host}/.insteadOf",
-            "GIT_CONFIG_VALUE_0": f"https://{host}/",
-            "GIT_CONFIG_KEY_1": "credential.helper",
-            "GIT_CONFIG_VALUE_1": "",
-            "GIT_CONFIG_KEY_2": "core.hooksPath",
-            "GIT_CONFIG_VALUE_2": str(hooks_dir),
-            "GIT_CONFIG_KEY_3": "credential.interactive",
-            "GIT_CONFIG_VALUE_3": "never",
-        }
-    )
-    done = subprocess.run(
-        ["git", "push", "--force-with-lease", "origin", f"refs/heads/{branch}:refs/heads/{branch}"],
-        capture_output=True,
-        text=True,
-        cwd=str(repo),
-        env=env,
-        timeout=180,
-    )
+    source = repo / ".git"
+    if source.is_symlink() or not source.is_dir():  # never follow a worktree's .git pointer file
+        raise OpenPrError(f"{repo} is not a checkout with its own .git directory — push from the checkout")
+    mirror = push_mirror()
+    ref = f"refs/heads/{branch}"
+    _run_git(["-C", str(mirror), "fetch", "-q", "--no-tags", "--no-write-fetch-head", str(source.resolve()),
+              f"+{ref}:{ref}"],
+             None, env, f"copying {branch} into the push mirror")
+    sweep_secret_dir()
+    secret_env = push_env(token, _secret_dir(), url)
     try:
-        hooks_dir.rmdir()
-    except OSError:
-        pass
-    if done.returncode != 0:
-        tail = ((done.stderr or "") + (done.stdout or "")).replace(token, "[REDACTED]")
-        raise OpenPrError(f"the push of {branch} was refused: {tail.strip()[:200]}")
+        _run_git(["-C", str(mirror), "push", url, f"{ref}:{ref}"], None, secret_env, f"the push of {branch}", token)
+    finally:
+        _drop_push_files(secret_env)
 
 
 def _graphql(token: str, query: str, variables: dict, what: str) -> dict:
@@ -126,8 +269,24 @@ def _graphql(token: str, query: str, variables: dict, what: str) -> dict:
     return payload["data"]
 
 
-def arm_auto_merge(token: str, node_id: str | None, method: str = "SQUASH") -> None:
-    """Arm auto-merge through the merge queue, or raise. A refused auto-merge is not a success.
+def queue_method(token: str, base: str) -> str:
+    """The merge method of the base branch's merge queue, read from its rules (ruleset `protect-default` sets
+    `merge_queue.merge_method`). The lane arms with it rather than guessing (#6); no queue rule is a refusal."""
+    rules = _api(token, "GET", f"/repos/{SLUG}/rules/branches/{base}")
+    if not isinstance(rules, list):
+        raise OpenPrError(f"the rules for {base} came back as {type(rules).__name__}, not a list")
+    methods = {str((rule.get("parameters") or {}).get("merge_method") or "").upper()
+               for rule in rules if isinstance(rule, dict) and rule.get("type") == "merge_queue"}
+    methods.discard("")
+    if len(methods) != 1:
+        raise OpenPrError(f"{base} has {'no' if not methods else 'more than one'} merge queue method in its rules "
+                          f"({', '.join(sorted(methods)) or 'none'}) — refusing to guess how auto-merge lands")
+    return methods.pop()
+
+
+def arm_auto_merge(token: str, node_id: str | None, method: str) -> None:
+    """Arm auto-merge through the merge queue with the queue's own method, or raise. A refused auto-merge is not
+    a success.
 
     Rule one applies to this file first: if auto-merge cannot be armed, the caller must exit non-zero
     rather than report a pull request as delivered.
@@ -152,29 +311,84 @@ def disarm_auto_merge(token: str, node_id: str) -> None:
     _graphql(token, query, {"id": node_id}, "disable auto-merge")
 
 
+STATE = ("query($id:ID!){node(id:$id){... on PullRequest{number isDraft "
+         "autoMergeRequest{enabledAt mergeMethod}}}}")
+
+
+def pr_state(token: str, node_id: str | None) -> dict:
+    """{draft, armed, merge_method} as GitHub reads them now. Unreadable is a failure, never 'off' or 'ready'."""
+    if not node_id:
+        raise OpenPrError("the pull request's state could not be read — no node id for it")
+    node = _graphql(token, STATE, {"id": node_id}, "pull request state read").get("node")
+    if not isinstance(node, dict) or "autoMergeRequest" not in node or not isinstance(node.get("isDraft"), bool):
+        raise OpenPrError(f"pull request {node_id} came back without its draft and auto-merge state")
+    request = node["autoMergeRequest"]
+    method = (str(request.get("mergeMethod") or "") or None) if isinstance(request, dict) else None
+    return {"draft": node["isDraft"], "armed": request is not None, "merge_method": method}
+
+
+def auto_merge_state(token: str, node_id: str | None) -> tuple[bool, str | None]:
+    """(on, the merge method GitHub records) for this pull request."""
+    state = pr_state(token, node_id)
+    return state["armed"], state["merge_method"]
+
+
 def auto_merge_enabled(token: str, node_id: str | None) -> bool:
     """Whether GitHub says auto-merge is on for this pull request. Unreadable is a failure, not 'off'."""
-    if not node_id:
-        raise OpenPrError("auto-merge state could not be read — no node id for the pull request")
-    data = _graphql(token, "query($id:ID!){node(id:$id){... on PullRequest{number autoMergeRequest{enabledAt}}}}",
-                    {"id": node_id}, "auto-merge read")
-    node = data.get("node")
-    if not isinstance(node, dict) or "autoMergeRequest" not in node:
-        raise OpenPrError(f"pull request {node_id} came back without its auto-merge state")
-    return node["autoMergeRequest"] is not None
+    return pr_state(token, node_id)["armed"]
 
 
-def _settle(token: str, node_id: str | None, arm: bool) -> str:
-    """Arm, or make sure auto-merge is off, then report what GitHub says — never the intent."""
-    if arm:
-        arm_auto_merge(token, node_id)
-    elif auto_merge_enabled(token, node_id):
+def mark_ready(token: str, node_id: str) -> None:
+    _graphql(token, "mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id})"
+                    "{pullRequest{isDraft}}}", {"id": node_id}, "mark ready for review")
+
+
+def convert_to_draft(token: str, node_id: str) -> None:
+    _graphql(token, "mutation($id:ID!){convertPullRequestToDraft(input:{pullRequestId:$id})"
+                    "{pullRequest{isDraft}}}", {"id": node_id}, "convert to draft")
+
+
+def hold(token: str, number: int, node_id: str | None) -> None:
+    """Make the pull request a draft with auto-merge off, and read both back — before unclean work is pushed (#5).
+
+    Lunate's CI runs its heavy legs only on ready pull requests, and an armed pull request could land
+    half-done work, so nothing that is not a clean finish is pushed to one that is ready or armed.
+    """
+    state = pr_state(token, node_id)
+    if state["armed"]:
         disarm_auto_merge(token, node_id)  # type: ignore[arg-type]
-    actual = auto_merge_enabled(token, node_id)
-    if actual != arm:
-        raise OpenPrError(f"auto-merge should be {'on' if arm else 'off'} but GitHub reads it as "
-                          f"{'on' if actual else 'off'}")
-    return "armed" if actual else "not armed"
+    if not state["draft"]:
+        convert_to_draft(token, node_id)  # type: ignore[arg-type]
+    after = pr_state(token, node_id)
+    if after["armed"] or not after["draft"]:
+        raise OpenPrError(f"#{number}: should be a draft with auto-merge off but GitHub reads it as "
+                          f"{'a draft' if after['draft'] else 'ready'} with auto-merge "
+                          f"{'on' if after['armed'] else 'off'} — nothing was pushed")
+
+
+def _settle(token: str, number: int, node_id: str | None, arm: bool, base: str) -> dict:
+    """After the push: a clean finish is marked ready, then armed with the queue's method; anything else stays a
+    draft with auto-merge off. Then report what GitHub says — never the intent (#5, #6).
+
+    The method GitHub records is reported but not required to match: with a merge queue required, GitHub has
+    recorded MERGE on a pull request armed with SQUASH (#813), while the queue landed every merge as one squash
+    commit. What lands is checked on the merged commit instead (`github.landed_parents`).
+    """
+    queue = None
+    if arm:
+        if pr_state(token, node_id)["draft"]:
+            mark_ready(token, node_id)  # type: ignore[arg-type]
+        queue = queue_method(token, base)
+        arm_auto_merge(token, node_id, queue)
+    else:
+        hold(token, number, node_id)
+    state = pr_state(token, node_id)
+    if state["armed"] != arm or state["draft"] == arm:
+        raise OpenPrError(f"#{number} should be {'ready and armed' if arm else 'a draft, not armed'} but GitHub reads "
+                          f"it as {'a draft' if state['draft'] else 'ready'}, auto-merge "
+                          f"{'on' if state['armed'] else 'off'}")
+    return {"auto_merge": "armed" if state["armed"] else "not armed", "draft": state["draft"],
+            "queue_method": queue, "merge_method": state["merge_method"]}
 
 
 def _worker_token() -> str:
@@ -193,58 +407,54 @@ def find_open_pr(branch: str, token: str) -> dict | None:
     return pulls[0] if pulls else None
 
 
-def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = "main", arm: bool = True) -> dict:
-    """Open or reuse the pull request for `branch`, as the worker identity, then arm auto-merge.
+def _owned(existing: dict, branch: str) -> tuple[int, str]:
+    number = existing.get("number")
+    author = (existing.get("user") or {}).get("login", "")
+    if author != WORKER_LOGIN:
+        raise OpenPrError(f"#{number} is already open for {branch!r} but authored by {author!r}, not {WORKER_LOGIN}")
+    return int(number), author
 
-    `arm=False` leaves auto-merge off — and turns it off on a reused pull request that was armed, before the push:
-    the lane opens a card's pull request at its first commit, so the worker knows the number for its changelog
-    fragment, and arms it only when the session finished cleanly. A rework that is not clean disarms it again.
 
-    Raises on anything short of a pull request that exists, is authored by `lunate-worker[bot]`, and whose
-    auto-merge state, read back from GitHub, is the one asked for. `auto_merge` in the result is that read.
+def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = "main", arm: bool = True,
+            known: tuple = ()) -> dict:
+    """Open or reuse the pull request for `branch`, as the worker identity — always opened as a draft (#5).
+
+    `arm=True` is a clean finish: push, mark ready, then arm auto-merge. `arm=False` keeps it a draft with
+    auto-merge off — and makes a reused pull request so before the push: the lane opens a card's pull request at
+    its first commit, so the worker knows the number for its changelog fragment, and a rework that is not clean
+    must not sit on a ready or armed pull request, not even briefly.
+
+    Raises on anything short of a pull request that exists, is authored by `lunate-worker[bot]`, and whose draft
+    and auto-merge state, read back from GitHub, are the ones asked for. The result carries that read.
+
+    Before anything else the diff, title and body are scanned (`scan`, #12): a match pushes and changes nothing.
+    `known` are values that must never leave (the model credential).
     """
+    scan(repo, branch, base, title, body, known)
     token = _worker_token()
 
     # the author is checked before the push: never overwrite a branch whose PR belongs to someone else
     existing = find_open_pr(branch, token)
     if existing:
-        number = existing.get("number")
-        author = (existing.get("user") or {}).get("login", "")
-        if author != WORKER_LOGIN:
-            raise OpenPrError(
-                f"#{number} is already open for {branch!r} but authored by {author!r}, not {WORKER_LOGIN}"
-            )
-        if not arm and auto_merge_enabled(token, existing.get("node_id")):
-            # off before the push: work that is not clean never sits on an armed pull request, not even briefly
-            disarm_auto_merge(token, existing["node_id"])
-            if auto_merge_enabled(token, existing["node_id"]):
-                raise OpenPrError(f"#{number}: auto-merge should be off but GitHub reads it as on after the disarm "
-                                  "— nothing was pushed")
+        number, author = _owned(existing, branch)
+        if not arm:
+            hold(token, number, existing.get("node_id"))
         # a re-dispatch usually carries new commits, and reuse must deliver them
         push(repo, branch, token)
         return {"number": number, "url": existing.get("html_url"), "author": author,
-                "auto_merge": _settle(token, existing.get("node_id"), arm), "reused": True}
+                **_settle(token, number, existing.get("node_id"), arm, base), "reused": True}
 
     push(repo, branch, token)
     try:
-        pull = _api(
-            token,
-            "POST",
-            f"/repos/{SLUG}/pulls",
-            {"title": title, "body": body, "head": branch, "base": base},
-        )
+        pull = _api(token, "POST", f"/repos/{SLUG}/pulls",
+                    {"title": title, "body": body, "head": branch, "base": base, "draft": True})
     except OpenPrError:
         # a race: another run opened it between the check and this call
         raced = find_open_pr(branch, token)
         if raced:
-            raced_author = (raced.get("user") or {}).get("login", "")
-            if raced_author != WORKER_LOGIN:
-                raise OpenPrError(
-                    f"#{raced.get('number')} already exists for {branch!r} but is authored by {raced_author!r}"
-                )
-            return {"number": raced.get("number"), "url": raced.get("html_url"),
-                    "author": (raced.get("user") or {}).get("login", ""),
-                    "auto_merge": _settle(token, raced.get("node_id"), arm), "reused": True}
+            number, author = _owned(raced, branch)
+            return {"number": number, "url": raced.get("html_url"), "author": author,
+                    **_settle(token, number, raced.get("node_id"), arm, base), "reused": True}
         raise
 
     number = pull.get("number")
@@ -261,7 +471,33 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
         raise OpenPrError(f"the pull request came back authored by {author!r}, not {WORKER_LOGIN}{closed}")
 
     return {"number": number, "url": pull.get("html_url"), "author": author,
-            "auto_merge": _settle(token, pull.get("node_id"), arm), "reused": False}
+            **_settle(token, number, pull.get("node_id"), arm, base), "reused": False}
+
+
+def rearm(number: int, node_id: str, base: str) -> dict:
+    """Arm a ready, approved pull request that is not armed, with the queue's method, and read it back."""
+    token = _worker_token()
+    if pr_state(token, node_id)["draft"]:
+        raise OpenPrError(f"#{number} is a draft — a draft is never armed")
+    queue = queue_method(token, base)
+    arm_auto_merge(token, node_id, queue)
+    state = pr_state(token, node_id)
+    if not state["armed"] or state["draft"]:
+        raise OpenPrError(f"#{number} should be ready and armed but GitHub reads it as "
+                          f"{'a draft' if state['draft'] else 'ready'}, auto-merge {'on' if state['armed'] else 'off'}")
+    return {"auto_merge": "armed", "queue_method": queue, "merge_method": state["merge_method"]}
+
+
+def return_to_draft(branch: str, expected: int) -> None:
+    """At the start of a rework: the branch's open pull request goes back to draft with auto-merge off (#5)."""
+    token = _worker_token()
+    existing = find_open_pr(branch, token)
+    if not existing:
+        raise OpenPrError(f"no open pull request for {branch!r} to return to draft")
+    number, _ = _owned(existing, branch)
+    if number != expected:
+        raise OpenPrError(f"the open pull request for {branch!r} is #{number}, not #{expected}")
+    hold(token, number, existing.get("node_id"))
 
 
 def comment(number: int, body: str) -> None:
@@ -295,7 +531,10 @@ def main() -> int:
             print(close_pr(args.close, args.branch))
             return 0
         if args.body_file:
-            body = pathlib.Path(args.body_file).read_text()
+            try:
+                body = pathlib.Path(args.body_file).read_text()
+            except OSError as exc:
+                raise OpenPrError(f"the body file {args.body_file} could not be read: {exc}") from exc
         else:
             body = args.body or ""
         result = open_pr(pathlib.Path(args.repo), args.branch, args.title, body, args.base)

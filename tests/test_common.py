@@ -28,8 +28,11 @@ class ConfigTests(unittest.TestCase):
     def test_the_checked_in_config_loads(self) -> None:
         cfg = common.load_config()
         self.assertEqual((cfg.owner, cfg.name), ("lunate-agent", "lunate"))
-        self.assertNotEqual(cfg.worker_model, cfg.reviewer_model)
+        self.assertEqual((cfg.reviewer_full, cfg.reviewer_light),
+                         ("opencode-go/gpt-6-luna", "opencode-go/glm-5.3-flash"))
+        self.assertNotIn(cfg.worker_model, (cfg.reviewer_full, cfg.reviewer_light))
         self.assertTrue(cfg.state.is_absolute())
+        self.assertEqual(cfg.wip_limit, 3, "3 for the first unattended night; 5 once a night has run clean")
 
     def test_a_missing_key_is_a_named_failure_not_a_default(self) -> None:
         del self.data["models"]["reviewer"]
@@ -37,10 +40,28 @@ class ConfigTests(unittest.TestCase):
             common.load_config(self.write(self.data))
         self.assertIn("models.reviewer", str(caught.exception))
 
-    def test_the_reviewer_model_must_differ_from_the_workers(self) -> None:
-        self.data["models"]["reviewer"] = self.data["models"]["worker"]
-        with self.assertRaises(ConfigError):
+    def test_both_reviewer_models_must_differ_from_the_workers(self) -> None:
+        for kind in ("full", "light"):
+            with self.subTest(kind=kind):
+                data = json.loads(json.dumps(self.data))
+                data["models"]["reviewer"][kind] = data["models"]["worker"]
+                with self.assertRaises(ConfigError) as caught:
+                    common.load_config(self.write(data))
+                self.assertIn(f"the {kind} reviewer model must differ", str(caught.exception))
+
+    def test_the_aggregate_check_and_its_step_are_configured(self) -> None:
+        cfg = common.load_config()
+        self.assertEqual((cfg.aggregate_check, cfg.aggregate_step), ("ci-ok", "Every required job succeeded"))
+        del self.data["checks"]["aggregate_step"]
+        with self.assertRaises(ConfigError) as caught:
             common.load_config(self.write(self.data))
+        self.assertIn("checks.aggregate_step", str(caught.exception))
+
+    def test_the_old_single_reviewer_model_is_refused_by_name(self) -> None:
+        self.data["models"]["reviewer"] = "opencode-go/glm-5.3-flash"
+        with self.assertRaises(ConfigError) as caught:
+            common.load_config(self.write(self.data))
+        self.assertIn("models.reviewer.full", str(caught.exception))
 
     def test_an_unreadable_config_is_a_named_failure(self) -> None:
         with self.assertRaises(ConfigError):
@@ -82,6 +103,31 @@ class RunTests(unittest.TestCase):
         args = gh_json.call_args.args
         self.assertIn("-f", args[args.index("name=x") - 1])
         self.assertEqual(args[args.index("n=5") - 1], "-F")
+
+
+class GitEnvTests(unittest.TestCase):
+    """Review of #17, round two, item 2: the lane's git reads an empty, lane-owned global config."""
+
+    def setUp(self) -> None:
+        from tests.helpers import TempState
+
+        self.state = TempState()
+        self.addCleanup(self.state.close)
+
+    def test_the_global_config_is_an_empty_lane_owned_file_and_is_emptied_again(self) -> None:
+        env = common.git_env()
+        path = pathlib.Path(env["GIT_CONFIG_GLOBAL"])
+        self.assertEqual((env["GIT_CONFIG_NOSYSTEM"], path.parent), ("1", self.state.cfg.state / "git"))
+        path.write_text("[core]\n\tfsmonitor = /tmp/evil\n")
+        common.git_env()
+        self.assertEqual(path.read_text(), "")
+
+    def test_a_symlinked_global_config_is_refused(self) -> None:
+        path = common.empty_gitconfig()
+        path.unlink()
+        path.symlink_to(self.state.root / "elsewhere")
+        with self.assertRaises(common.StateError):
+            common.git_env()
 
 
 class RestTests(unittest.TestCase):
