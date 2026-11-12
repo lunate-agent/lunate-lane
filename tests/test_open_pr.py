@@ -170,6 +170,23 @@ class FailurePathTests(unittest.TestCase):
         with self.assertRaises(open_pr.OpenPrError) as caught:
             open_pr.open_pr(self.repo, "lane/x", "t", "b", arm=False)
         self.assertIn("GitHub reads it as on", str(caught.exception))
+        self.assertNotIn(("push", "lane/x"), self.events, "unclean work must not reach a PR that is still armed")
+
+    def test_a_disarm_call_that_fails_pushes_nothing(self) -> None:
+        self.reuse()
+        self.armed["N42"] = True
+        fake = self.fake_graphql
+
+        def refusing(token, query, variables, what):
+            if "disablePullRequestAutoMerge" in query:
+                raise open_pr.OpenPrError("disable auto-merge was refused: [FORBIDDEN]")
+            return fake(token, query, variables, what)
+
+        open_pr._graphql = refusing
+        with self.assertRaises(open_pr.OpenPrError) as caught:
+            open_pr.open_pr(self.repo, "lane/x", "t", "b", arm=False)
+        self.assertIn("disable auto-merge was refused", str(caught.exception))
+        self.assertNotIn(("push", "lane/x"), self.events)
 
     def test_an_unreadable_auto_merge_state_is_a_failure(self) -> None:
         self.reuse()

@@ -217,6 +217,9 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
         if not arm and auto_merge_enabled(token, existing.get("node_id")):
             # off before the push: work that is not clean never sits on an armed pull request, not even briefly
             disarm_auto_merge(token, existing["node_id"])
+            if auto_merge_enabled(token, existing["node_id"]):
+                raise OpenPrError(f"#{number}: auto-merge should be off but GitHub reads it as on after the disarm "
+                                  "— nothing was pushed")
         # a re-dispatch usually carries new commits, and reuse must deliver them
         push(repo, branch, token)
         return {"number": number, "url": existing.get("html_url"), "author": author,
