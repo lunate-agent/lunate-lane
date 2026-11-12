@@ -235,7 +235,10 @@ delivers it (cron mail, or the orchestrator's own scheduler capturing stdout). B
     checkout's own `.git/config` defines them; sessions cannot write that file, and the lane's git ignores the
     global and system config where a planted one would otherwise sit.
   - The login keychain's *service* (securityd) is reachable over Mach IPC even though its files are denied;
-    sessions get no git credential helper (see below), so nothing in them asks it for a GitHub credential.
+    sessions get no git credential helper — their git reads neither the system config (Homebrew's
+    `osxkeychain`) nor the user's global config (`gh auth git-credential`), only their own identity — so nothing in
+    them asks the keychain for a GitHub credential. Denying the service itself could not be verified and is not
+    done.
   - `sandbox-exec` is deprecated by Apple and the profile language is undocumented; a macOS update could change
     what it enforces. `tests/test_harness.py` checks the profile against the real `sandbox-exec` on every run.
 

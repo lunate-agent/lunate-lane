@@ -101,6 +101,23 @@ class CredentialAndEnvTests(HarnessCase):
         self.assertEqual(list(pathlib.Path(env["GH_CONFIG_DIR"]).iterdir()), [])
         self.assertEqual(env["OPENCODE_API_KEY"], SECRET)
 
+    def test_the_sessions_git_has_no_credential_helper_from_any_config(self) -> None:
+        """Review of #17: not the system's osxkeychain, not the user's gh helper — checked with the real git."""
+        system = self.state.root / "system.gitconfig"
+        system.write_text("[credential]\n\thelper = osxkeychain\n")
+        (self.real_home / ".gitconfig").write_text('[credential "https://github.com"]\n\thelper = !gh auth git-credential\n')
+        env = harness.session_env(self.cfg, self.state.root / "scratch", real_home=self.real_home)
+        env["GIT_CONFIG_SYSTEM"] = str(system)  # where a system helper would come from, if system config were read
+        listed = subprocess.run(["git", "config", "--show-origin", "--get-regexp", "^credential"], env=env,
+                                capture_output=True, text=True, cwd=str(self.worktree))
+        helpers = [line for line in listed.stdout.splitlines() if not line.rstrip().endswith("credential.helper")]
+        self.assertEqual(helpers, [], listed.stdout)
+        self.assertEqual(env["GIT_CONFIG_NOSYSTEM"], "1")
+        self.assertTrue(env["GIT_CONFIG_GLOBAL"].startswith(str(self.state.root / "scratch")))
+        name = subprocess.run(["git", "config", "user.name"], env=env, capture_output=True, text=True,
+                              cwd=str(self.worktree))
+        self.assertEqual(name.stdout.strip(), "Lane Test", "the session still has its identity")
+
     def test_the_session_gets_a_home_of_its_own_with_only_what_pi_needs(self) -> None:
         scratch = self.state.root / "scratch"
         env = harness.session_env(self.cfg, scratch)

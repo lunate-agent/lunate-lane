@@ -136,8 +136,12 @@ def session_env(cfg: common.Config, scratch: pathlib.Path, extra: dict | None = 
     except OSError as exc:
         raise HarnessError(f"the session's scratch {scratch} could not be prepared: {exc}") from exc
     path = os.environ.get("PATH") or DEFAULT_PATH
-    env = {"PATH": path, "HOME": str(session_home(cfg, scratch, real_home)), "TMPDIR": str(scratch),
+    home = session_home(cfg, scratch, real_home)
+    # no git credential helper of any kind (review of #17): Homebrew's system config names osxkeychain and the
+    # user's global config names `gh auth git-credential`; the session reads neither, only its own identity
+    env = {"PATH": path, "HOME": str(home), "TMPDIR": str(scratch),
            "GH_CONFIG_DIR": str(nogh), "GIT_TERMINAL_PROMPT": "0",
+           "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"),
            "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "",
            cfg.harness["credential_env"]: read_credential(cfg)}
     dotnet = real_home / ".dotnet"
