@@ -36,27 +36,39 @@ class ComposeTests(unittest.TestCase):
     def test_the_message_names_stuck_pull_requests_and_why(self) -> None:
         old = pull(5, 9, created="2026-11-10T08:00:00Z", reviews=[review("CHANGES_REQUESTED")])
         fresh = pull(6, 10, created="2026-11-12T08:00:00Z", auto_merge=True)
-        text = digest.compose(CFG, [card(1), card(2)], [old, fresh], [{"number": 801}], REQUIRED, NOW)
+        red = pull(7, 11, checks=[("ci-ok", "COMPLETED", "FAILURE")])
+        dropped = pull(8, 12, reviews=[review("APPROVED")], queue_removal="FAILED_CHECKS")
+        foreign = pull(9, None, author="someone", mergeable="CONFLICTING")
+        text = digest.compose(CFG, [card(1), card(2)], [old, fresh, red, dropped, foreign],
+                              [{"number": 801, "title": "Fix the loop"}], REQUIRED, NOW)
         self.assertIn("0.4.0: 2 open issue(s)", text)
-        self.assertIn("Open PRs (2):", text)
-        self.assertIn("Merged in the last 24h (1): #801", text)
-        self.assertIn("Stuck more than a day (1):", text)
-        self.assertIn("#5 open 2d — changes requested", text)
-        self.assertNotIn("#6 open", text)
+        self.assertIn("Open PRs (5):", text)
+        self.assertIn("Stuck (3):", text)
+        self.assertIn("  #5 — changes requested — open 2d", text)
+        self.assertIn("  #7 — required checks failing", text)
+        self.assertIn("  #8 — out of the merge queue after approval (failed_checks)", text)
+        self.assertNotIn("  #6 —", text)
+        self.assertNotIn("  #9 —", text, "another author's fresh conflict is not the lane's to call stuck")
+        self.assertIn("Merged since yesterday (1):\n  #801 Fix the loop", text)
+
+    def test_wip_counts_worker_pull_requests_and_running_workers_once_each(self) -> None:
+        pulls = [pull(5, 9), pull(6, 10), pull(7, 11, author="someone")]
+        text = digest.compose(CFG, [], pulls, [], REQUIRED, NOW, {}, {10: frozenset(), 12: frozenset()})
+        self.assertIn("WIP 3 of 5: #5 (card #9), #6 (card #10, worker running), card #12 (worker running, no PR yet)",
+                      text)
 
     def test_parked_cards_are_listed_with_why(self) -> None:
-        text = digest.compose(CFG, [], [], [], REQUIRED, NOW, {9: "reworks", 3: "idle"})
-        self.assertIn("Parked cards (2)", text)
+        text = digest.compose(CFG, [], [], [], REQUIRED, NOW, {9: "reworks", 3: "idle", 4: "secret"})
+        self.assertIn("Parked cards (3)", text)
         self.assertIn("#3 — runs with no new commit", text)
+        self.assertIn("#4 — secret-shaped text in a push", text)
         self.assertIn("#9 — rework rounds used up", text)
         self.assertLess(text.index("#3 —"), text.index("#9 —"))
 
     def test_a_quiet_day_says_so(self) -> None:
         text = digest.compose(CFG, [], [], [], REQUIRED, NOW)
-        self.assertIn("Open PRs: none", text)
-        self.assertIn("Merged in the last 24h (0): none", text)
-        self.assertIn("Stuck more than a day: none", text)
-        self.assertIn("Parked cards: none", text)
+        for line in ("WIP 0 of 5", "Open PRs: none", "Stuck: none", "Parked cards: none", "Merged since yesterday: none"):
+            self.assertIn(line, text)
 
 
 class ReadTests(unittest.TestCase):

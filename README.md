@@ -116,8 +116,10 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
 4. **Merging** is GitHub's: the ruleset (one approval, code-owner review for `adr/`, required checks, merge queue)
    plus the auto-merge the worker armed.
 5. **Digest** (`scripts/digest.py`, daily). One short message on stdout and in `<state>/digest/latest.md`: open
-   issues in the milestone, every open pull request with its state, the last 24 hours' merges, and pull requests
-   open for more than a day with the reason they are stuck.
+   issues in the milestone; WIP against its limit, with what is in flight (as the feeder counts it); every open
+   pull request with its state; what is stuck and why (a worker pull request that is red, conflicting or out of
+   the merge queue, and any pull request open for more than a day); the parked cards and why; and what merged
+   since yesterday, with titles.
 
 ## Files
 
