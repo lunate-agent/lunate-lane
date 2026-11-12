@@ -117,7 +117,10 @@ def session_home(cfg: common.Config, scratch: pathlib.Path, real_home: pathlib.P
     identity = _git_identity(cfg)
     if identity:
         lines = ["[user]"] + [f"\t{key} = {value}" for key, value in identity.items()]
-        (home / ".gitconfig").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        try:
+            (home / ".gitconfig").write_text("\n".join(lines) + "\n", encoding="utf-8")
+        except OSError as exc:
+            raise HarnessError(f"the session's git identity could not be written in {home}: {exc}") from exc
     return home
 
 
@@ -126,7 +129,10 @@ def session_env(cfg: common.Config, scratch: pathlib.Path, extra: dict | None = 
     """The whole environment a session gets — nothing inherited beyond PATH, and a HOME of its own."""
     real_home = real_home or pathlib.Path.home()
     nogh = scratch / "gh-config"
-    nogh.mkdir(parents=True, exist_ok=True)
+    try:
+        nogh.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise HarnessError(f"the session's scratch {scratch} could not be prepared: {exc}") from exc
     path = os.environ.get("PATH") or DEFAULT_PATH
     env = {"PATH": path, "HOME": str(session_home(cfg, scratch, real_home)), "TMPDIR": str(scratch),
            "GH_CONFIG_DIR": str(nogh), "GIT_TERMINAL_PROMPT": "0",
@@ -207,8 +213,12 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
     session_id = f"{worktree.name}-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
     env = session_env(cfg, scratch, extra_env)
     command = sandboxed(argv(cfg, model, scratch / "sessions", session_id, prompt), write_profile(cfg, scratch))
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    with log_path.open("ab") as out:
+    try:
+        log_path.parent.mkdir(parents=True, exist_ok=True)
+        out_file = log_path.open("ab")
+    except OSError as exc:
+        raise HarnessError(f"the session log {log_path} could not be opened: {exc}") from exc
+    with out_file as out:
         try:
             proc = subprocess.Popen(command, cwd=str(worktree), env=env, stdin=subprocess.DEVNULL, stdout=out,
                                     stderr=subprocess.STDOUT, start_new_session=True)
@@ -222,7 +232,10 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
             while proc.poll() is None:
                 time.sleep(tick)
                 now = time.monotonic()
-                current = log_path.stat().st_size
+                try:
+                    current = log_path.stat().st_size
+                except OSError as exc:
+                    raise HarnessError(f"the session log {log_path} could not be read: {exc}") from exc
                 if current != size:
                     size, last_activity = current, now
                 if now - started > timeout or now - last_activity > idle:
@@ -253,6 +266,10 @@ def _kill_group(proc: subprocess.Popen) -> None:
             os.killpg(proc.pid, sig)
         except ProcessLookupError:
             return
+        except PermissionError:  # macOS answers EPERM for a group whose only member has exited unreaped
+            if proc.poll() is not None:
+                return
+            raise HarnessError(f"the session group {proc.pid} could not be signalled") from None
         try:
             proc.wait(timeout=20)
             return
@@ -366,7 +383,10 @@ def reap_session(card: int, session: tuple | None, grace: float = 10.0) -> bool:
 
 def _clear_dead(path: pathlib.Path, card: int, session: tuple | None) -> None:
     reap_session(card, session)
-    path.unlink(missing_ok=True)
+    try:
+        path.unlink(missing_ok=True)
+    except OSError as exc:
+        raise StateError(f"the dead worker's record {path} could not be removed: {exc}") from exc
 
 
 def clear_worker(card: int, pid: int) -> None:

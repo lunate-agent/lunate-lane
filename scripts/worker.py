@@ -227,9 +227,12 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
                         "auto-merge off")
     scratch = common.state_dir("scratch", f"issue-{number}")
     pr_file = scratch / "pr-number"
-    pr_file.unlink(missing_ok=True)
-    if rework_pr:
-        pr_file.write_text(str(rework_pr))
+    try:
+        pr_file.unlink(missing_ok=True)
+        if rework_pr:
+            pr_file.write_text(str(rework_pr))
+    except OSError as exc:
+        raise common.StateError(f"the pull request number file {pr_file} could not be written: {exc}") from exc
     text = brief(cfg, issue, worktree, rework_pr, findings, has_fragments(cfg, worktree))
     start_head = common.git(worktree, "rev-parse", "HEAD")
     opened: dict = {"pr": rework_pr, "tried": False}
@@ -243,7 +246,10 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
             opened["tried"] = True  # one attempt; the end of the session tries again and fails loudly
             opened["pr"] = dispatch_card.dispatch(worktree, number, arm=False,
                                                   known=(harness.read_credential(cfg),))["number"]
-            pr_file.write_text(str(opened["pr"]))
+            try:
+                pr_file.write_text(str(opened["pr"]))
+            except OSError as exc:
+                raise common.StateError(f"#{opened['pr']} opened, but {pr_file} could not be written: {exc}") from exc
             common.log(job, f"opened #{opened['pr']} at the first commit, auto-merge not armed yet")
         except LaneError as exc:
             common.log(job, f"could not open the pull request at the first commit — {exc}")

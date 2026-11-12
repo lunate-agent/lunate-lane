@@ -89,7 +89,11 @@ def tick() -> None:
     pulls = [github.pull(cfg, p.number) for p in github.open_pulls(cfg)]
     merged = merged_since(cfg, now - datetime.timedelta(days=1))
     message = compose(cfg, cards, pulls, merged, required, now, harness.parked_details())
-    (common.state_dir("digest") / "latest.md").write_text(message + "\n", encoding="utf-8")
+    latest = common.state_dir("digest") / "latest.md"
+    try:
+        latest.write_text(message + "\n", encoding="utf-8")
+    except OSError as exc:
+        raise common.StateError(f"the digest {latest} could not be written: {exc}") from exc
     print(message)
 
 

@@ -14,6 +14,7 @@ import os
 import pathlib
 import re
 import subprocess
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -215,15 +216,23 @@ def log(job: str, message: str) -> None:
     """One timestamped line to the job's log under the state directory, and to stdout for cron."""
     line = f"{time.strftime('%Y-%m-%d %H:%M:%S')} {job}: {message}"
     print(line, flush=True)
-    with (state_dir("logs") / f"{job}.log").open("a", encoding="utf-8") as handle:
-        handle.write(line + "\n")
+    path = state_dir("logs") / f"{job}.log"
+    try:
+        with path.open("a", encoding="utf-8") as handle:
+            handle.write(line + "\n")
+    except OSError as exc:
+        raise StateError(f"the log {path} could not be written: {exc}") from exc
 
 
 @contextlib.contextmanager
 def job_lock(job: str) -> Iterator[None]:
     """An exclusive, non-blocking flock per job. Released by the kernel even if the process dies."""
     path = state_dir("locks") / f"{job}.lock"
-    with path.open("a") as handle:
+    try:
+        handle = path.open("a")
+    except OSError as exc:
+        raise StateError(f"the lock {path} could not be opened: {exc}") from exc
+    with handle:
         try:
             fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError as exc:
@@ -240,9 +249,17 @@ def run_job(job: str, body: Callable[[], None]) -> int:
         with job_lock(job):
             body()
     except LockBusy as exc:
-        log(job, f"skipped — {exc}")
+        _last_word(job, f"skipped — {exc}")
         return 0
     except LaneError as exc:
-        log(job, f"FAILED — {exc}")
+        _last_word(job, f"FAILED — {exc}")
         return 1
     return 0
+
+
+def _last_word(job: str, message: str) -> None:
+    """Log the job's outcome; if even the log cannot be written, say both on stderr rather than a traceback."""
+    try:
+        log(job, message)
+    except LaneError as exc:
+        print(f"{job}: {message} (and the log could not be written: {exc})", file=sys.stderr, flush=True)

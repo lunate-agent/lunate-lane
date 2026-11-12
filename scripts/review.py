@@ -123,7 +123,10 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str]:
     repo, worktree = cfg.checkout, common.state_dir("reviews") / f"pr-{p.number}"
     scratch = common.state_dir("scratch", f"review-{p.number}")
     verdict_file, diff_file = scratch / "verdict.json", scratch / "diff.patch"
-    verdict_file.unlink(missing_ok=True)
+    try:
+        verdict_file.unlink(missing_ok=True)
+    except OSError as exc:
+        raise ReviewError(f"the old verdict {verdict_file} could not be removed: {exc}") from exc
     common.git(repo, "fetch", "-q", "origin", p.head)
     if worktree.exists():
         common.git(repo, "worktree", "remove", "--force", str(worktree))
@@ -131,7 +134,10 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str]:
     harness.record_review(p.number, driver, worktree)  # so a SIGKILLed run's session and worktree get cleared
     common.git(repo, "worktree", "add", "--detach", str(worktree), p.head)
     try:
-        diff_file.write_text(common.git(worktree, "diff", f"origin/{cfg.base}...HEAD"))
+        try:
+            diff_file.write_text(common.git(worktree, "diff", f"origin/{cfg.base}...HEAD"))
+        except OSError as exc:
+            raise ReviewError(f"the diff {diff_file} could not be written: {exc}") from exc
         issue = dispatch_card.card(worktree, p.card)
         fragments = ("never edit `CHANGELOG.md`; the PR must add `changes/" + str(p.number) + ".md`."
                      if common.git(repo, "ls-tree", "--name-only", f"origin/{cfg.base}", "--", "changes")

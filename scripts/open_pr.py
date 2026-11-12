@@ -155,14 +155,20 @@ def push(repo: pathlib.Path, branch: str, token: str, host: str = "github.com") 
     Every credential helper is blanked (so no helper is consulted and nothing is stored in the login keychain),
     hooks point at an empty directory, and the token reaches git only through the askpass helper (push_env).
     """
-    exists = subprocess.run(
-        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
-        capture_output=True, text=True, cwd=str(repo), timeout=60,
-    )
+    try:
+        exists = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
+            capture_output=True, text=True, cwd=str(repo), timeout=60,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OpenPrError(f"git could not check {branch!r} in {repo} ({exc.__class__.__name__}: {exc})") from exc
     if exists.returncode != 0:
         raise OpenPrError(f"there is no local branch {branch!r} in {repo} to push")
     hooks_dir = pathlib.Path(os.environ.get("TMPDIR", "/tmp")) / f"lane-hooks-{os.getpid()}"
-    hooks_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        hooks_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise OpenPrError(f"the empty hooks directory {hooks_dir} could not be made: {exc}") from exc
     env = push_env(token, _secret_dir(), hooks_dir, host)
     try:
         done = subprocess.run(
@@ -453,7 +459,10 @@ def main() -> int:
             print(close_pr(args.close, args.branch))
             return 0
         if args.body_file:
-            body = pathlib.Path(args.body_file).read_text()
+            try:
+                body = pathlib.Path(args.body_file).read_text()
+            except OSError as exc:
+                raise OpenPrError(f"the body file {args.body_file} could not be read: {exc}") from exc
         else:
             body = args.body or ""
         result = open_pr(pathlib.Path(args.repo), args.branch, args.title, body, args.base)
