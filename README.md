@@ -75,9 +75,16 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    the way out. If the driver is SIGKILLed, its record names the session's group, and the next feeder or
    reviewer tick that finds the driver dead kills that session before clearing the record.
 3. **Reviewer** (`scripts/review.py`, every 10 minutes). For each open worker pull request that is not a draft,
-   has no running worker, has every *required* check green on its head, and has no review from
-   `lunate-reviewer` at that head: runs a Pi session on the reviewer model (the config refuses one equal to the
+   has no running worker, has every *required* check green on its head, has no review from
+   `lunate-reviewer` at that head, and is not held back by an *older* open pull request (any author) that changes
+   the same OpenSpec capability (`openspec/specs/<cap>/…` or a change's `specs/<cap>/…` delta) — the older one
+   lands first: runs a Pi session on the reviewer model (the config refuses one equal to the
    worker's) in a detached worktree at the head, with the diff and the issue in `templates/review-brief.md`. The
+   brief also carries the other open pull requests on the same capabilities and the worker's session report: the
+   reviewer compares the spec delta with main's spec and with theirs, and checks the worker's **Intent
+   decisions** (the grill-me questions it answered itself). The worker's brief says a conflict in
+   `openspec/specs/**` is resolved by reverting the archive commit, merging `origin/main` and re-archiving, never
+   by hand. The
    session writes a JSON verdict; the lane re-reads the pull request and, only if it is still open at the same
    head, posts a real review — `APPROVE` or `REQUEST_CHANGES` with the findings — as `lunate-reviewer`. It then
    reads the review back, and if GitHub names any other author the run exits non-zero. A submitted review cannot

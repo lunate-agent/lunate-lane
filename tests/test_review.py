@@ -38,6 +38,16 @@ class SkipTests(unittest.TestCase):
         self.assertIn("already reviewed", self.reason(pull(1, 9, reviews=[a_review("APPROVED")])))
         self.assertIsNone(self.reason(pull(1, 9, head="h2", reviews=[a_review("CHANGES_REQUESTED", commit="h1")])))
 
+    def test_an_older_open_pull_request_on_the_same_capability_holds_a_newer_one_back(self) -> None:
+        older = pull(4, 8, author="someone", files=("openspec/specs/agent-loop/spec.md",))
+        newer = pull(6, 9, files=("openspec/changes/x/specs/agent-loop/spec.md", "src/A.cs"))
+        reason = review.skip_reason(newer, REQUIRED, {}, "lunate-reviewer", [older, newer])
+        self.assertIn("older #4", reason)
+        self.assertIn("agent-loop", reason)
+        self.assertIsNone(review.skip_reason(older, REQUIRED, {}, "lunate-reviewer", [older, newer]))
+        unrelated = pull(7, 10, files=("openspec/specs/print-mode/spec.md",))
+        self.assertIsNone(review.skip_reason(unrelated, REQUIRED, {}, "lunate-reviewer", [older, newer, unrelated]))
+
     def test_a_pull_request_with_no_card_is_not_reviewed(self) -> None:
         self.assertIn("no card", self.reason(pull(1, None)))
 
@@ -206,6 +216,28 @@ class TickTests(unittest.TestCase):
         with mock.patch.object(review, "run_review") as run_review, mock.patch.object(sys, "argv", ["r", "--dry-run"]):
             self.assertEqual(review.main(), 0)
         run_review.assert_not_called()
+
+
+class BriefTests(unittest.TestCase):
+    def test_the_neighbours_name_other_open_pull_requests_on_the_same_capabilities(self) -> None:
+        mine = pull(6, 9, files=("openspec/changes/x/specs/agent-loop/spec.md",))
+        other = pull(4, 8, title="Loop rewrite", files=("openspec/specs/agent-loop/spec.md", "src/B.cs"))
+        text = review.spec_neighbours(mine, [mine, other, pull(5, 7, files=("docs/a.md",))])
+        self.assertIn("This pull request changes: agent-loop.", text)
+        self.assertIn('#4 "Loop rewrite" also changes agent-loop: `openspec/specs/agent-loop/spec.md`', text)
+        self.assertNotIn("#5", text)
+        self.assertIn("No other open pull request", review.spec_neighbours(mine, [mine]))
+        self.assertIn("changes no OpenSpec capability", review.spec_neighbours(pull(5, 7), []))
+
+    def test_the_review_brief_carries_the_spec_comparison_the_neighbours_and_the_intent_decisions(self) -> None:
+        text = common.render("review-brief.md", PR="6", REPO="o/r", TITLE="t", HEAD="abc", WORKTREE="/w",
+                             BASE="main", DIFF_FILE="/d", FRAGMENT_CHECK="f", VERDICT_FILE="/v", CARD="9",
+                             SPEC_NEIGHBOURS="NEIGHBOURS-HERE", WORKER_REPORT="REPORT-HERE", BODY="b")
+        self.assertIn("git show origin/main:openspec/specs/<capability>/spec.md", text)
+        self.assertIn("NEIGHBOURS-HERE", text)
+        self.assertIn("REPORT-HERE", text)
+        self.assertIn("**Intent decisions**", text)
+        self.assertIn("reverting the archive commit", text)
 
 
 class ErrorTypeTests(unittest.TestCase):

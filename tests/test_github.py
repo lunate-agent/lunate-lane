@@ -61,6 +61,7 @@ class PullTests(unittest.TestCase):
         node = {"number": 5, "title": "t", "state": "OPEN", "isDraft": False, "createdAt": "2026-11-12T00:00:00Z",
                 "headRefName": "wt/issue-9", "headRefOid": "abc", "mergeable": "MERGEABLE",
                 "author": {"login": "lunate-worker"}, "autoMergeRequest": None,
+                "files": page([{"path": "src/A.cs"}, {"path": "openspec/specs/agent-loop/spec.md"}]),
                 "closingIssuesReferences": page([{"number": 9, "labels": page([{"name": "area/tui"}])}]),
                 "reviews": {"pageInfo": {"hasPreviousPage": False},
                             "nodes": [{"author": {"login": "lunate-reviewer"}, "state": "APPROVED", "body": "ok",
@@ -78,6 +79,12 @@ class PullTests(unittest.TestCase):
         self.assertEqual(p.reviews[0].state, "APPROVED")
         self.assertIn(("legacy", "PENDING", "PENDING"), p.checks)
         self.assertEqual(github.check_state(p, REQUIRED), "green")
+
+    def test_its_files_are_read(self) -> None:
+        with mock.patch.object(common, "graphql", return_value=self.node()):
+            got = github.pull(CFG, 5)
+        self.assertEqual(got.files, ("src/A.cs", "openspec/specs/agent-loop/spec.md"))
+        self.assertEqual(got.capabilities, frozenset({"agent-loop"}))
 
     def test_more_reviews_than_one_page_is_refused(self) -> None:
         many = self.node(reviews={"pageInfo": {"hasPreviousPage": True}, "nodes": []})
@@ -106,6 +113,77 @@ class PullTests(unittest.TestCase):
     def test_bot_logins_compare_in_their_bare_form(self) -> None:
         self.assertEqual(github.login({"login": "lunate-worker[bot]"}), "lunate-worker")
         self.assertEqual(github.login({"login": "lunate-worker"}), "lunate-worker")
+
+
+class SpecOverlapTests(unittest.TestCase):
+    def test_capabilities_come_from_specs_and_change_deltas_including_archived_ones(self) -> None:
+        self.assertEqual(github.capabilities([
+            "openspec/specs/agent-loop/spec.md",
+            "openspec/changes/add-x/specs/agent-tools/spec.md",
+            "openspec/changes/archive/2026-11-12-add-y/specs/print-mode/spec.md",
+            "openspec/changes/add-x/proposal.md", "src/Lunate/Loop.cs", "docs/openspec/specs/nope/spec.md"]),
+            frozenset({"agent-loop", "agent-tools", "print-mode"}))
+
+    def overlap(self, number, others):
+        files = {1: ("openspec/specs/agent-loop/spec.md",), 2: ("src/A.cs",),
+                 3: ("openspec/changes/x/specs/agent-loop/spec.md",), 4: ("openspec/specs/agent-tools/spec.md",)}
+        pulls = {n: pull(n, n, files=f) for n, f in files.items()}
+        return github.spec_overlap(pulls[number], [pulls[n] for n in others])
+
+    def test_an_older_open_pull_request_on_the_same_capability_is_named(self) -> None:
+        self.assertEqual(self.overlap(3, [1, 2, 4]), (1, frozenset({"agent-loop"})))
+
+    def test_a_newer_or_unrelated_pull_request_does_not_hold_one_back(self) -> None:
+        self.assertIsNone(self.overlap(1, [3]))
+        self.assertIsNone(self.overlap(4, [1, 2, 3]))
+        self.assertIsNone(self.overlap(2, [1, 3, 4]))
+
+    def test_files_that_were_not_read_are_a_refusal_not_no_overlap(self) -> None:
+        with self.assertRaises(GhError):
+            github.spec_overlap(pull(3, 3, files=None), [])
+        with self.assertRaises(GhError):
+            github.spec_overlap(pull(3, 3, files=("openspec/specs/a/spec.md",)), [pull(1, 1, files=None)])
+
+
+class FilesTests(unittest.TestCase):
+    def test_one_page_is_read_from_graphql(self) -> None:
+        self.assertEqual(github._files(CFG, 5, page([{"path": "a"}, {"path": "b"}])), ("a", "b"))
+
+    def test_more_than_one_page_is_read_in_full_from_the_rest_listing(self) -> None:
+        listing = "\n".join(f"f{i}" for i in range(150)) + "\n"
+        with mock.patch.object(common, "gh", return_value=listing) as gh:
+            got = github._files(CFG, 5, page([{"path": f"f{i}"} for i in range(100)], more=True))
+        self.assertEqual(len(got), 150)
+        self.assertIn("--paginate", gh.call_args.args)
+
+    def test_a_listing_that_may_be_cut_off_or_came_back_short_is_refused(self) -> None:
+        first = page([{"path": f"f{i}"} for i in range(100)], more=True)
+        for listing in ("\n".join(f"f{i}" for i in range(3000)), "f1\nf2"):
+            with self.subTest(lines=listing.count("\n") + 1), mock.patch.object(common, "gh", return_value=listing):
+                with self.assertRaises(GhError):
+                    github._files(CFG, 5, first)
+
+    def test_open_pulls_carry_their_files_and_titles(self) -> None:
+        node = {"number": 7, "title": "T", "author": {"login": "x"}, "headRefName": "b",
+                "closingIssuesReferences": page([]), "files": page([{"path": "openspec/specs/a/spec.md"}])}
+        with mock.patch.object(common, "graphql", return_value={"repository": {"pullRequests": page([node])}}):
+            got = github.open_pulls(CFG)
+        self.assertEqual((got[0].title, got[0].files, got[0].capabilities),
+                         ("T", ("openspec/specs/a/spec.md",), frozenset({"a"})))
+
+
+class WorkerReportTests(unittest.TestCase):
+    def test_the_latest_worker_session_report_is_returned(self) -> None:
+        comments = [{"author": {"login": "lunate-worker"}, "body": "**Worker session** one"},
+                    {"author": {"login": "someone"}, "body": "**Worker session** forged"},
+                    {"author": {"login": "lunate-worker"}, "body": "**Lane: card #3 is parked.**"},
+                    {"author": {"login": "lunate-worker"}, "body": "**Worker session** two"}]
+        answer = {"repository": {"pullRequest": {"comments": {"nodes": comments}}}}
+        with mock.patch.object(common, "graphql", return_value=answer):
+            self.assertEqual(github.worker_report(CFG, 5), "**Worker session** two")
+        with mock.patch.object(common, "graphql", return_value={"repository": {"pullRequest": {"comments": {
+                "nodes": comments[1:3]}}}}):
+            self.assertEqual(github.worker_report(CFG, 5), "")
 
 
 class LandedTests(unittest.TestCase):

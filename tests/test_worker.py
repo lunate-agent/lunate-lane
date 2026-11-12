@@ -131,6 +131,15 @@ class BriefTests(unittest.TestCase):
         self.assertIn("never the full suite", text)
         self.assertIn(ISSUE["body"], text)
 
+    def test_the_brief_carries_the_spec_conflict_rule_and_asks_for_intent_decisions(self) -> None:
+        text = worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), None, "", True)
+        self.assertIn("is never resolved by hand", text)
+        self.assertIn("git revert", text)
+        self.assertIn("git merge origin/main", text)
+        self.assertIn("openspec archive <change> --yes", text)
+        self.assertIn("grill-me", text)
+        self.assertIn("**Intent decisions**", text)
+
     def test_a_rework_names_its_pull_request_fragment_and_findings(self) -> None:
         text = worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), 12, "1. not met — x.cs:3", True)
         self.assertIn("It is #12.", text)

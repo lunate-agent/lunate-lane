@@ -51,6 +51,12 @@ class Pull:
     labels: frozenset = frozenset()  # labels of the issues it closes
     reviews: tuple = ()  # Review, oldest first
     checks: tuple = ()  # (name, status, conclusion)
+    files: tuple | None = None  # changed paths; None means not read
+
+    @property
+    def capabilities(self) -> frozenset:
+        """The OpenSpec capabilities this pull request touches (see `capabilities`)."""
+        return capabilities(self.files or ())
 
     @property
     def card(self) -> int | None:
@@ -59,6 +65,51 @@ class Pull:
         if match:
             return int(match.group(1))
         return self.cards[0] if self.cards else None
+
+
+# openspec/specs/<cap>/… and a change's delta, openspec/changes/[archive/]<change>/specs/<cap>/…
+SPEC_PATH = re.compile(r"^openspec/(?:specs|changes/(?:archive/)?[^/]+/specs)/([^/]+)/")
+FILES_LIMIT = 3000  # GitHub lists at most this many files of one pull request
+
+
+def capabilities(paths) -> frozenset:
+    return frozenset(m.group(1) for m in map(SPEC_PATH.match, paths) if m)
+
+
+def spec_overlap(p: Pull, others) -> tuple[int, frozenset] | None:
+    """The oldest *older* open pull request touching one of `p`'s OpenSpec capabilities, and the shared ones.
+
+    A pull request whose files were not read cannot be cleared: that is a refusal, not 'no overlap'.
+    """
+    if p.files is None:
+        raise GhError(f"#{p.number}'s files were not read — cannot tell whether it overlaps an older spec change")
+    mine = p.capabilities
+    if not mine:
+        return None
+    for other in sorted(others, key=lambda o: o.number):
+        if other.number >= p.number:
+            break
+        if other.files is None:
+            raise GhError(f"#{other.number}'s files were not read — cannot clear #{p.number} of a spec overlap")
+        shared = mine & other.capabilities
+        if shared:
+            return other.number, shared
+    return None
+
+
+def _files(cfg: common.Config, number: int, connection: dict) -> tuple:
+    """Every changed path of a pull request: the first page from GraphQL, the rest from the REST listing."""
+    nodes = connection.get("nodes") or []
+    if not (connection.get("pageInfo") or {}).get("hasNextPage"):
+        return tuple(str(n["path"]) for n in nodes)
+    raw = common.gh("api", "--paginate", f"repos/{cfg.slug}/pulls/{int(number)}/files?per_page=100",
+                    "--jq", ".[].filename")
+    paths = tuple(line for line in raw.splitlines() if line)
+    if len(paths) >= FILES_LIMIT:
+        raise GhError(f"#{number} changes {FILES_LIMIT} files or more — GitHub's listing may be cut off")
+    if len(paths) <= len(nodes):
+        raise GhError(f"#{number}'s file listing came back shorter than its first page")
+    return paths
 
 
 def login(raw: dict | None) -> str:
@@ -125,15 +176,18 @@ def milestone_cards(cfg: common.Config) -> list[Card]:
 
 OPEN_PULLS = """query($owner:String!,$name:String!,$cursor:String){repository(owner:$owner,name:$name){
 pullRequests(first:50,after:$cursor,states:OPEN){pageInfo{hasNextPage endCursor}
-nodes{number author{login} headRefName closingIssuesReferences(first:10){pageInfo{hasNextPage} nodes{number}}}}}}"""
+nodes{number title author{login} headRefName closingIssuesReferences(first:10){pageInfo{hasNextPage} nodes{number}}
+files(first:100){pageInfo{hasNextPage} nodes{path}}}}}}"""
 
 
 def open_pulls(cfg: common.Config) -> list[Pull]:
-    """Every open pull request, any author, light: number, author, branch and the issues it closes."""
+    """Every open pull request, any author, light: number, title, author, branch, the issues it closes, its files."""
     nodes = _paged(OPEN_PULLS, ("repository", "pullRequests"), "the open pull requests",
                    owner=cfg.owner, name=cfg.name)
-    return [Pull(number=int(n["number"]), author=login(n.get("author")), branch=str(n.get("headRefName") or ""),
-                 cards=tuple(i["number"] for i in _complete(n["closingIssuesReferences"], f"#{n['number']}'s issues")))
+    return [Pull(number=int(n["number"]), title=str(n.get("title") or ""), author=login(n.get("author")),
+                 branch=str(n.get("headRefName") or ""),
+                 cards=tuple(i["number"] for i in _complete(n["closingIssuesReferences"], f"#{n['number']}'s issues")),
+                 files=_files(cfg, int(n["number"]), n["files"]))
             for n in nodes]
 
 
@@ -141,6 +195,7 @@ PULL = """query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,na
 number title state isDraft createdAt headRefName headRefOid mergeable author{login} autoMergeRequest{enabledAt}
 closingIssuesReferences(first:10){pageInfo{hasNextPage} nodes{number labels(first:50){pageInfo{hasNextPage} nodes{name}}}}
 reviews(last:100){pageInfo{hasPreviousPage} nodes{author{login} state body commit{oid}}}
+files(first:100){pageInfo{hasNextPage} nodes{path}}
 commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:100){pageInfo{hasNextPage}
 nodes{__typename ... on CheckRun{name status conclusion} ... on StatusContext{context state}}}}}}}}}}"""
 
@@ -169,7 +224,7 @@ def pull(cfg: common.Config, number: int) -> Pull:
                          for label in _complete(i["labels"], f"#{number}'s issue #{i['number']}'s labels")),
         reviews=tuple(Review(login(r.get("author")), str(r["state"]), str((r.get("commit") or {}).get("oid") or ""),
                              str(r.get("body") or "")) for r in node["reviews"]["nodes"]),
-        checks=checks,
+        checks=checks, files=_files(cfg, int(number), node["files"]),
     )
 
 
@@ -217,3 +272,18 @@ pullRequest(number:$n){state mergeCommit{oid parents(first:3){totalCount}}}}}"""
     if node.get("state") != "MERGED" or not isinstance(commit, dict):
         raise GhError(f"#{number} is {str(node.get('state') or 'unreadable').lower()}, not merged with a commit")
     return str(commit["oid"]), int(commit["parents"]["totalCount"])
+
+
+REPORT = """query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){pullRequest(number:$n){
+comments(last:50){nodes{author{login} body}}}}}"""
+
+
+def worker_report(cfg: common.Config, number: int) -> str:
+    """The worker identity's latest session report on the pull request, or '' when it has posted none."""
+    data = common.graphql(REPORT, owner=cfg.owner, name=cfg.name, n=int(number))
+    node = (data.get("repository") or {}).get("pullRequest")
+    if not node:
+        raise GhError(f"pull request #{number} was not found in {cfg.slug}")
+    found = [c["body"] for c in node["comments"]["nodes"]
+             if login(c.get("author")) == cfg.worker_app and str(c.get("body") or "").startswith("**Worker session**")]
+    return found[-1] if found else ""

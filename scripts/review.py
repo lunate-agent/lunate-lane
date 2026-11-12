@@ -30,8 +30,9 @@ class ReviewError(LaneError):
     """The review could not be run, or produced no usable verdict."""
 
 
-def skip_reason(p: github.Pull, required: frozenset, running: dict, reviewer: str) -> str | None:
-    """Why this pull request is not reviewed now, or None if it is due."""
+def skip_reason(p: github.Pull, required: frozenset, running: dict, reviewer: str, others=()) -> str | None:
+    """Why this pull request is not reviewed now, or None if it is due. `others` are the open pull requests (any
+    author, with their files): one that is older and touches the same OpenSpec capability holds this one back."""
     if p.state != "OPEN":
         return f"is {p.state.lower()}"
     if p.draft:
@@ -45,6 +46,10 @@ def skip_reason(p: github.Pull, required: frozenset, running: dict, reviewer: st
         return f"required checks are {checks}"
     if github.reviewer_verdict(p, reviewer) is not None:
         return f"already reviewed at {p.head[:8]}"
+    overlap = github.spec_overlap(p, [o for o in others if o.number != p.number])
+    if overlap:
+        older, shared = overlap
+        return f"older #{older} also changes the OpenSpec capability {', '.join(sorted(shared))} — it lands first"
     return None
 
 
@@ -52,11 +57,12 @@ def due(cfg: common.Config) -> list[github.Pull]:
     required = github.required_checks(cfg)
     running = harness.running_workers()
     found = []
-    for summary in github.open_pulls(cfg):
+    pulls = github.open_pulls(cfg)
+    for summary in pulls:
         if summary.author != cfg.worker_app:
             continue
         p = github.pull(cfg, summary.number)
-        reason = skip_reason(p, required, running, cfg.reviewer_app)
+        reason = skip_reason(p, required, running, cfg.reviewer_app, pulls)
         if reason:
             common.log(JOB, f"#{p.number} skipped — {reason}")
         else:
@@ -124,9 +130,11 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str]:
         fragments = ("never edit `CHANGELOG.md`; the PR must add `changes/" + str(p.number) + ".md`."
                      if common.git(repo, "ls-tree", "--name-only", f"origin/{cfg.base}", "--", "changes")
                      else "the `changes/` convention is not on main yet; `CHANGELOG.md` must not be edited.")
+        report = github.worker_report(cfg, p.number) or "(the worker posted no session report on this pull request)"
         prompt = common.render("review-brief.md", PR=str(p.number), REPO=cfg.slug, TITLE=p.title, HEAD=p.head[:9],
                                WORKTREE=str(worktree), BASE=cfg.base, DIFF_FILE=str(diff_file),
                                FRAGMENT_CHECK=fragments, VERDICT_FILE=str(verdict_file), CARD=str(p.card),
+                               SPEC_NEIGHBOURS=spec_neighbours(p, github.open_pulls(cfg)), WORKER_REPORT=report,
                                BODY=(issue.get("body") or "").strip())
         log_path = common.state_dir("sessions") / f"review-{p.number}-{p.head[:8]}.jsonl"
         outcome = harness.run_session(cfg, model=cfg.reviewer_model, worktree=worktree, prompt=prompt,
@@ -136,6 +144,23 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str]:
         return read_verdict(verdict_file)
     finally:
         common.git(repo, "worktree", "remove", "--force", str(worktree))
+
+
+def spec_neighbours(p: github.Pull, others) -> str:
+    """The other open pull requests that change one of `p`'s OpenSpec capabilities, for the review brief."""
+    mine = p.capabilities
+    if not mine:
+        return "This pull request changes no OpenSpec capability."
+    lines = [f"This pull request changes: {', '.join(sorted(mine))}."]
+    for other in sorted(others, key=lambda o: o.number):
+        shared = mine & other.capabilities
+        if other.number != p.number and shared:
+            paths = [f for f in other.files or () if github.capabilities([f]) & shared]
+            lines.append(f"- #{other.number} \"{other.title}\" also changes {', '.join(sorted(shared))}: "
+                         + ", ".join(f"`{f}`" for f in paths[:20]) + (" …" if len(paths) > 20 else ""))
+    if len(lines) == 1:
+        lines.append("No other open pull request changes these capabilities.")
+    return "\n".join(lines)
 
 
 def tick(dry_run: bool = False) -> None:

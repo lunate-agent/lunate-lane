@@ -15,8 +15,24 @@ The worktree at {{WORKTREE}} is checked out at that head. The diff against `orig
 4. **OpenSpec**: a change folder under `openspec/changes/` that the PR adds must be archived in its **last**
    commit; nothing under `openspec/specs/` may be hand-edited. A behaviour fix with no OpenSpec change must say
    why and name the requirement it restores.
+   **Compare the delta** with main's spec (`git show origin/{{BASE}}:openspec/specs/<capability>/spec.md`) and
+   with the other open pull requests below that change the same capabilities: a requirement this PR changes or
+   removes must be one the issue asks to change, and must not contradict another open PR's delta without saying
+   so. A conflict in `openspec/specs/**` resolved by hand (instead of reverting the archive commit, merging
+   `origin/{{BASE}}` and re-archiving) is a request for changes.
 5. **Changelog**: {{FRAGMENT_CHECK}}
 6. **Tests name the behaviour**: a test that would still pass with the change reverted is not evidence.
+7. **Intent decisions**: the worker's report (below) lists, under **Intent decisions**, the grill-me questions
+   about the card's intent with the answer it chose for each. Check each answer against the issue and the
+   specs: a wrong reading of the intent is a finding; a missing list on a behaviour change is a finding.
+
+## OpenSpec neighbours
+
+{{SPEC_NEIGHBOURS}}
+
+## The worker's report
+
+{{WORKER_REPORT}}
 
 ## Your verdict
 
@@ -28,7 +44,8 @@ Write exactly one JSON object to the file `{{VERDICT_FILE}}` and nothing else in
 The body lists the acceptance checks by number with evidence, the tests you ran with counts, and — for
 REQUEST_CHANGES — each finding as a concrete thing to change, with its `file:line`. Request changes for: a check
 not met, a scope violation, a hand-edited spec, an archive that is not last, a missing changelog fragment, a test
-that does not test the change, or anything you could not establish. The lane posts this as a real review.
+that does not test the change, a spec delta that contradicts main's spec or another open PR unannounced, a wrong
+or missing intent decision, or anything you could not establish. The lane posts this as a real review.
 
 ## The issue (#{{CARD}})
 
