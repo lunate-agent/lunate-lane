@@ -71,7 +71,7 @@ class CardTests(unittest.TestCase):
         subprocess.run(["git", "commit", "-q", "-m", "the worker's work"], cwd=self._tmp, capture_output=True)
         seen = {}
 
-        def fake_open(repo, branch, title, body, base="main"):
+        def fake_open(repo, branch, title, body, base="main", arm=True):
             seen.update(branch=branch, title=title, body=body)
             return {"number": 808, "url": "u", "author": open_pr.WORKER_LOGIN, "auto_merge": "armed", "reused": False}
 

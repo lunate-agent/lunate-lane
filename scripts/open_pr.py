@@ -20,11 +20,12 @@ import urllib.error
 import urllib.request
 
 try:  # imported as scripts.open_pr by the tests, or run as a script
-    from . import identity
+    from . import common, identity
 except ImportError:  # pragma: no cover - the script path
+    import common
     import identity
 
-SLUG = "lunate-agent/lunate"
+SLUG = common.config().slug
 API = "https://api.github.com"
 WORKER_LOGIN = "lunate-worker[bot]"
 
@@ -147,14 +148,17 @@ def _worker_token() -> str:
 
 def find_open_pr(branch: str, token: str) -> dict | None:
     """The open pull request for this branch, if any. Reusing one beats failing with a 422."""
-    pulls = _api(token, "GET", f"/repos/{SLUG}/pulls?state=open&head=lunate-agent:{branch}")
+    pulls = _api(token, "GET", f"/repos/{SLUG}/pulls?state=open&head={SLUG.split('/')[0]}:{branch}")
     if isinstance(pulls, list) and pulls:
         return pulls[0]
     return None
 
 
-def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = "main") -> dict:
+def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = "main", arm: bool = True) -> dict:
     """Open or reuse the pull request for `branch`, as the worker identity, then arm auto-merge.
+
+    `arm=False` opens it without auto-merge: the lane opens a card's pull request at its first commit, so the
+    worker knows the number for its changelog fragment, and arms it only when the session finished cleanly.
 
     Raises on anything short of a pull request that exists, is authored by `lunate-worker[bot]`, and has
     auto-merge armed.
@@ -172,9 +176,10 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
             )
         # a re-dispatch usually carries new commits, and reuse must deliver them
         push(repo, branch, token)
-        arm_auto_merge(token, existing.get("node_id"))
+        if arm:
+            arm_auto_merge(token, existing.get("node_id"))
         return {"number": number, "url": existing.get("html_url"), "author": author,
-                "auto_merge": "armed", "reused": True}
+                "auto_merge": "armed" if arm else "not armed", "reused": True}
 
     push(repo, branch, token)
     try:
@@ -193,10 +198,11 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
                 raise OpenPrError(
                     f"#{raced.get('number')} already exists for {branch!r} but is authored by {raced_author!r}"
                 )
-            arm_auto_merge(token, raced.get("node_id"))
+            if arm:
+                arm_auto_merge(token, raced.get("node_id"))
             return {"number": raced.get("number"), "url": raced.get("html_url"),
                     "author": (raced.get("user") or {}).get("login", ""),
-                    "auto_merge": "armed", "reused": True}
+                    "auto_merge": "armed" if arm else "not armed", "reused": True}
         raise
 
     number = pull.get("number")
@@ -212,9 +218,15 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
             closed = " and it could NOT be closed"
         raise OpenPrError(f"the pull request came back authored by {author!r}, not {WORKER_LOGIN}{closed}")
 
-    arm_auto_merge(token, pull.get("node_id"))
+    if arm:
+        arm_auto_merge(token, pull.get("node_id"))
     return {"number": number, "url": pull.get("html_url"), "author": author,
-            "auto_merge": "armed", "reused": False}
+            "auto_merge": "armed" if arm else "not armed", "reused": False}
+
+
+def comment(number: int, body: str) -> None:
+    """A comment on the pull request, as the worker identity."""
+    _api(_worker_token(), "POST", f"/repos/{SLUG}/issues/{number}/comments", {"body": body})
 
 
 def close_pr(number: int, branch: str) -> str:

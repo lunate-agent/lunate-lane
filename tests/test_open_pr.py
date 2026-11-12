@@ -106,6 +106,23 @@ class FailurePathTests(unittest.TestCase):
         self.assertIn("authored by 'someone-else'", str(caught.exception))
         self.assertEqual(pushes, [], "the branch must not be touched when the PR belongs to someone else")
 
+    def test_an_unarmed_open_pushes_and_opens_but_never_arms(self) -> None:
+        """The lane opens a card's pull request at its first commit without auto-merge; arming comes later."""
+        def api(token, method, path, payload=None):
+            if method == "GET":
+                return []
+            return {"number": 3, "html_url": "u", "user": {"login": open_pr.WORKER_LOGIN}, "node_id": "N3"}
+
+        open_pr._api = api
+        open_pr.push = lambda *a, **k: None
+        saved_arm = open_pr.arm_auto_merge
+        open_pr.arm_auto_merge = lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not arm"))
+        try:
+            result = open_pr.open_pr(self.repo, "lane/x", "t", "b", arm=False)
+        finally:
+            open_pr.arm_auto_merge = saved_arm
+        self.assertEqual((result["number"], result["auto_merge"]), (3, "not armed"))
+
     def test_a_branch_that_does_not_exist_is_refused_before_pushing(self) -> None:
         with self.assertRaises(open_pr.OpenPrError) as caught:
             open_pr.push(self.repo, "lane/never-created", "token-for-tests")

@@ -1,0 +1,32 @@
+{
+  "repo": "lunate-agent/lunate",
+  "milestone": "0.4.0",
+  "base": "main",
+  "wip_limit": 5,
+  "apps": {
+    "worker": "lunate-worker",
+    "reviewer": "lunate-reviewer"
+  },
+  "models": {
+    "worker": "opencode-go/deepseek-v4.1-flash",
+    "reviewer": "opencode-go/glm-5.3-flash"
+  },
+  "labels": {
+    "bug": "kind/bug",
+    "area_prefix": "area/"
+  },
+  "harness": {
+    "binary": "pi",
+    "credential_file": "~/.hermes/.env",
+    "credential_key": "OPENCODE_GO_API_KEY",
+    "credential_env": "OPENCODE_API_KEY",
+    "session_timeout": 5400,
+    "stall_idle": 1200
+  },
+  "paths": {
+    "checkout": "~/dev/lunate",
+    "state": "~/.local/state/lunate-lane",
+    "app_config": "~/.config/lunate-lane/app.json",
+    "pins": "~/.config/lunate-lane/pins.json"
+  }
+}

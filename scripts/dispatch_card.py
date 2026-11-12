@@ -18,11 +18,12 @@ import re
 import subprocess
 
 try:  # imported as scripts.dispatch_card by the tests, or run as a script
-    from . import open_pr
+    from . import common, open_pr
 except ImportError:  # pragma: no cover - the script path
+    import common
     import open_pr
 
-SLUG = "lunate-agent/lunate"
+SLUG = common.config().slug
 
 
 class CardError(RuntimeError):
@@ -46,7 +47,7 @@ def gh(*args: str, repo: pathlib.Path) -> str:
 def card(repo: pathlib.Path, number: int) -> dict:
     """The issue, or a named failure. Never an empty card."""
     raw = gh("issue", "view", str(number), "-R", SLUG,
-             "--json", "number,title,state,milestone,body", repo=repo)
+             "--json", "number,title,state,milestone,labels,body", repo=repo)
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -78,7 +79,7 @@ def branch_for(repo: pathlib.Path, number: int) -> str:
     return name
 
 
-BASE = "origin/main"
+BASE = f"origin/{common.config().base}"
 
 
 def _count(repo: pathlib.Path, name: str) -> int:
@@ -133,12 +134,12 @@ def body_for(data: dict) -> str:
     return f"{head}\n\n{issue_text}\n"
 
 
-def dispatch(repo: pathlib.Path, number: int) -> dict:
-    """Card to pull request. Raises rather than half-opening anything."""
+def dispatch(repo: pathlib.Path, number: int, arm: bool = True) -> dict:
+    """Card to pull request. Raises rather than half-opening anything. `arm=False` leaves auto-merge off."""
     branch = branch_for(repo, number)
     data = card(repo, number)
     title = data["title"]
-    return open_pr.open_pr(repo, branch, title, body_for(data))
+    return open_pr.open_pr(repo, branch, title, body_for(data), common.config().base, arm=arm)
 
 
 def main() -> int:

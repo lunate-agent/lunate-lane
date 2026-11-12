@@ -16,9 +16,14 @@ import time
 import urllib.error
 import urllib.request
 
-CONFIG = pathlib.Path.home() / ".config" / "lunate-lane" / "app.json"
+try:  # imported as scripts.identity by the tests, or run as a script
+    from . import common
+except ImportError:  # pragma: no cover - the script path
+    import common
+
+CONFIG = common.config().app_config
 API = "https://api.github.com"
-REPO = "lunate-agent/lunate"
+REPO = common.config().slug
 
 
 class IdentityError(RuntimeError):
@@ -52,7 +57,10 @@ def app_jwt(app_id: int, key_path: pathlib.Path) -> str:
 
 def installation_token(name: str) -> str:
     """Mint an installation token. The token is returned, never printed."""
-    config = json.loads(CONFIG.read_text())
+    try:
+        config = json.loads(CONFIG.read_text())
+    except (OSError, json.JSONDecodeError) as exc:
+        raise IdentityError(f"the App config {CONFIG} could not be read ({exc.__class__.__name__})") from exc
     if name not in config:
         raise IdentityError(f"unknown identity {name!r}; known: {', '.join(sorted(config))}")
     app = config[name]
