@@ -93,6 +93,25 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(feed.main(), 1)
         self.assertEqual(harness.rework_rounds(9, 50), 1)
 
+    def test_an_approved_clean_pull_request_that_is_not_armed_is_rearmed(self) -> None:
+        """Review of #17: arming failed after mark_ready, and nobody re-armed it."""
+        from scripts import open_pr
+
+        github.pull.return_value = pull(50, 9, reviews=[review("APPROVED")], node_id="N50")
+        with mock.patch.object(open_pr, "rearm", return_value={"auto_merge": "armed", "queue_method": "SQUASH",
+                                                               "merge_method": "MERGE"}) as rearm:
+            with mock.patch.object(sys, "argv", ["feed.py", "--dry-run"]):
+                feed.main()
+            rearm.assert_not_called()
+            feed.main()
+            rearm.assert_called_once_with(50, "N50", "main")
+            github.pull.return_value = pull(50, 9, reviews=[review("APPROVED")], disarmed_by="a-maintainer")
+            feed.main()
+            self.assertEqual(rearm.call_count, 1, "a person's disarm stands")
+        log = (self.state.cfg.state / "logs" / "feed.log").read_text()
+        self.assertIn("would re-arm #50", log)
+        self.assertIn("re-armed #50: approved at h1 but not armed — auto-merge armed", log)
+
     def test_two_rework_rounds_still_rework(self) -> None:
         for _ in range(2):
             harness.note_rework(9, 50)

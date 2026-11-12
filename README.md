@@ -68,6 +68,9 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      request (on the issue if there is none), and the digest lists it. A new commit resets the idle-run count (and
      lifts an idle park) but not the rework rounds. To give a parked card back to the lane, delete
      `<state>/attempts/<card>.json`; that clears both counts.
+   - **re-arming**: a worker pull request that is ready, approved at its head, green, not conflicting, neither
+     queued nor armed — the state a clean finish leaves when arming fails after it was marked ready — is armed
+     again with the queue's method and read back. Not when a person turned auto-merge off last.
    - **tidying, after the launches** (`scripts/cleanup.py`): a card whose lane pull request (`wt/issue-N`) is merged
      or closed, with none open and no worker running, loses its worktree, its local branch and its scratch
      directory (a merged one first has its merge commit's parent count logged — 1 is the squash the queue should

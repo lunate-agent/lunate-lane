@@ -441,6 +441,20 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
             **_settle(token, number, pull.get("node_id"), arm, base), "reused": False}
 
 
+def rearm(number: int, node_id: str, base: str) -> dict:
+    """Arm a ready, approved pull request that is not armed, with the queue's method, and read it back."""
+    token = _worker_token()
+    if pr_state(token, node_id)["draft"]:
+        raise OpenPrError(f"#{number} is a draft — a draft is never armed")
+    queue = queue_method(token, base)
+    arm_auto_merge(token, node_id, queue)
+    state = pr_state(token, node_id)
+    if not state["armed"] or state["draft"]:
+        raise OpenPrError(f"#{number} should be ready and armed but GitHub reads it as "
+                          f"{'a draft' if state['draft'] else 'ready'}, auto-merge {'on' if state['armed'] else 'off'}")
+    return {"auto_merge": "armed", "queue_method": queue, "merge_method": state["merge_method"]}
+
+
 def return_to_draft(branch: str, expected: int) -> None:
     """At the start of a rework: the branch's open pull request goes back to draft with auto-merge off (#5)."""
     token = _worker_token()

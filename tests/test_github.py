@@ -220,6 +220,20 @@ class QueueAndDisarmTests(unittest.TestCase):
                 self.assertEqual(github.stuck_reason(p, frozenset({"ci-ok"}), "lunate-reviewer"), expected)
 
 
+class RearmTests(unittest.TestCase):
+    def test_only_a_ready_approved_green_unarmed_unqueued_pull_request_is_rearmed(self) -> None:
+        ok = dict(reviews=[helper_review("APPROVED")])
+        cases = ((pull(5, 9, **ok), True), (pull(5, 9, **ok, auto_merge=True), False),
+                 (pull(5, 9, **ok, in_queue=True), False), (pull(5, 9, **ok, draft=True), False),
+                 (pull(5, 9, **ok, disarmed_by="a-maintainer"), False),
+                 (pull(5, 9, **ok, mergeable="CONFLICTING"), False), (pull(5, 9, **ok, queue_removal="X"), False),
+                 (pull(5, 9, **ok, checks=[("ci-ok", "IN_PROGRESS", "")]), False), (pull(5, 9), False),
+                 (pull(5, 9, reviews=[helper_review("APPROVED", commit="old")]), False))
+        for p, expected in cases:
+            with self.subTest(p=p):
+                self.assertIs(github.needs_rearm(p, frozenset({"ci-ok"}), "lunate-reviewer"), expected)
+
+
 class FailureKindTests(unittest.TestCase):
     """Review of #17, item 1: what is the runner's fault (rerun once) and what is a real failure (rework)."""
 

@@ -17,7 +17,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from scripts import cards, cleanup, common, github, harness, worker  # noqa: E402
+from scripts import cards, cleanup, common, github, harness, open_pr, worker  # noqa: E402
 from scripts.common import LaneError  # noqa: E402
 
 JOB = "feed"
@@ -29,11 +29,11 @@ def rules(cfg: common.Config) -> cards.Rules:
 
 def decide(cfg: common.Config) -> tuple[list[cards.Launch], list[str]]:
     """Read everything the decision needs, then decide. Every read raises on failure."""
-    launches, notes, _ = decide_all(cfg)
+    launches, notes, _, _ = decide_all(cfg)
     return launches, notes
 
 
-def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[github.Pull]]:
+def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[github.Pull], list[github.Pull]]:
     """The launches and notes, and the worker pull requests whose required checks failed for infra reasons and
     have not been rerun on their head yet: those are rerun once, not reworked."""
     milestone = github.milestone_cards(cfg)
@@ -48,7 +48,9 @@ def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[
     rerun = [p for p in worker_pulls if p.state == "OPEN" and not p.draft and p.card not in running
              and p.card not in parked and (p.number, p.head) not in reran
              and github.failure_kind(p, required) == "infra"]
-    return launches, notes, rerun
+    rearm = [p for p in worker_pulls if p.card not in running and p.card not in parked
+             and github.needs_rearm(p, required, cfg.reviewer_app)]
+    return launches, notes, rerun, rearm
 
 
 def rerun(cfg: common.Config, p: github.Pull, dry_run: bool) -> None:
@@ -83,7 +85,7 @@ def start(cfg: common.Config, launch: cards.Launch) -> int:
 
 def tick(dry_run: bool = False) -> None:
     cfg = common.config()
-    launches, notes, reruns = decide_all(cfg)
+    launches, notes, reruns, rearms = decide_all(cfg)
     for p in reruns:
         rerun(cfg, p, dry_run)
     # the launches first, in the order they were chosen, then the notes on why nothing else was (#3)
@@ -112,6 +114,13 @@ def tick(dry_run: bool = False) -> None:
         common.log(JOB, "nothing to start")
     for note in notes:
         common.log(JOB, note)
+    for p in rearms:  # approved and clean, but its arming failed or never happened
+        if dry_run:
+            common.log(JOB, f"would re-arm #{p.number}: ready, approved at {p.head[:8]}, green, not armed")
+            continue
+        result = open_pr.rearm(p.number, p.node_id, cfg.base)
+        common.log(JOB, f"re-armed #{p.number}: approved at {p.head[:8]} but not armed — auto-merge {result['auto_merge']}"
+                        f" (queue {result['queue_method']}, GitHub records {result['merge_method'] or 'none'})")
     # after the launches, so a cleanup that fails never holds work back — it still fails the tick, by name
     cleanup.tidy(cfg, JOB, github.open_pulls(cfg), harness.running_workers(), dry_run)
 

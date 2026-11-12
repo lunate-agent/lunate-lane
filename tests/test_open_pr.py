@@ -501,6 +501,14 @@ class FailurePathTests(unittest.TestCase):
         self.assertIn("nothing was pushed", str(caught.exception))
         self.assertNotIn(("push", "lane/x"), self.events)
 
+    def test_rearm_arms_a_ready_pull_request_and_reads_it_back_but_never_a_draft(self) -> None:
+        self.drafts["N7"], self.drafts["N8"] = False, True
+        self.assertEqual(open_pr.rearm(7, "N7", "main")["auto_merge"], "armed")
+        self.assertTrue(self.armed["N7"])
+        with self.assertRaises(open_pr.OpenPrError):
+            open_pr.rearm(8, "N8", "main")
+        self.assertFalse(self.armed.get("N8"))
+
     def test_return_to_draft_refuses_another_pull_request(self) -> None:
         self.reuse(42)
         with self.assertRaises(open_pr.OpenPrError):

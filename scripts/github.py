@@ -69,6 +69,7 @@ class Pull:
     in_queue: bool = False  # in the merge queue now
     queue_removal: str = ""  # why the merge queue removed it — only a removal of the current head counts
     disarmed_by: str = ""  # a person who turned auto-merge off last (the latest auto-merge event is theirs)
+    node_id: str = ""
     runs: tuple = ()  # Run, for every check run on the head
 
     @property
@@ -210,7 +211,7 @@ def open_pulls(cfg: common.Config) -> list[Pull]:
 
 
 PULL = """query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){pullRequest(number:$n){
-number title state isDraft createdAt headRefName headRefOid mergeable author{login} autoMergeRequest{enabledAt}
+id number title state isDraft createdAt headRefName headRefOid mergeable author{login} autoMergeRequest{enabledAt}
 isInMergeQueue queueRemoval:timelineItems(last:1,itemTypes:[REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{
 ... on RemovedFromMergeQueueEvent{createdAt reason beforeCommit{oid}}}}
 autoMergeEvents:timelineItems(last:1,itemTypes:[AUTO_MERGE_ENABLED_EVENT,AUTO_MERGE_DISABLED_EVENT]){nodes{__typename
@@ -250,6 +251,7 @@ def pull(cfg: common.Config, number: int) -> Pull:
         checks=checks, files=_files(cfg, int(number), node["files"]),
         in_queue=bool(node.get("isInMergeQueue")),
         queue_removal=_queue_removal(node), disarmed_by=_disarmed_by(node, cfg.worker_app),
+        node_id=str(node.get("id") or ""),
         runs=tuple(_run(c) for c in contexts if c["__typename"] == "CheckRun"),
     )
 
@@ -372,6 +374,15 @@ def failure_kind(p: Pull, required: frozenset) -> str | None:
 def infra_runs(p: Pull) -> tuple:
     """The workflow runs to rerun for an infra failure: those of the failing check runs, each once."""
     return tuple(sorted({r.run_id for r in p.runs if r.conclusion and r.conclusion not in PASSED and r.run_id}))
+
+
+def needs_rearm(p: Pull, required: frozenset, reviewer: str) -> bool:
+    """A clean, ready, approved pull request that is not armed and not queued — the state a clean finish leaves
+    when arming fails after `mark_ready` (review of #17). Not when a person turned auto-merge off, and not when it
+    is stuck (that is a rework) or its checks are not green."""
+    return (p.state == "OPEN" and not p.draft and not p.auto_merge and not p.in_queue and not p.disarmed_by
+            and p.mergeable != "CONFLICTING" and not p.queue_removal and check_state(p, required) == "green"
+            and reviewer_verdict(p, reviewer) == "APPROVED")
 
 
 def stuck_reason(p: Pull, required: frozenset, reviewer: str, reran: frozenset = frozenset()) -> str | None:
