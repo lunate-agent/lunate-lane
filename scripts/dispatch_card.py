@@ -26,7 +26,7 @@ except ImportError:  # pragma: no cover - the script path
 SLUG = common.config().slug
 
 
-class CardError(RuntimeError):
+class CardError(common.LaneError):
     """The card cannot become a pull request, and the reason is named."""
 
 

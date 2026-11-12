@@ -8,7 +8,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from scripts import common, github, harness, identity, review  # noqa: E402
+from scripts import common, dispatch_card, github, harness, identity, review  # noqa: E402
 from scripts.common import LaneError  # noqa: E402
 from tests.helpers import REQUIRED, TempState, pull  # noqa: E402
 from tests.helpers import review as a_review  # noqa: E402
@@ -146,6 +146,24 @@ class TickTests(unittest.TestCase):
         log = (self.state.cfg.state / "logs" / "review.log").read_text()
         self.assertIn("#5 FAILED — the reviewer wrote no verdict", log)
 
+    def test_a_card_that_cannot_be_read_fails_that_review_only_and_is_logged_not_raised(self) -> None:
+        """dispatch_card.CardError is a LaneError: it fails one review, the next still runs, run_job logs it."""
+        posted = []
+
+        def run_review(cfg, p):
+            if p.number == 5:
+                raise dispatch_card.CardError("issue #9 is CLOSED, not open — nothing to dispatch")
+            return "APPROVE", "ok"
+
+        with mock.patch.object(review, "run_review", side_effect=run_review), \
+                mock.patch.object(review, "post", side_effect=lambda cfg, p, e, b: posted.append(p.number) or True), \
+                mock.patch.object(sys, "argv", ["r"]):
+            self.assertEqual(review.main(), 1)
+        self.assertEqual(posted, [6])
+        log = (self.state.cfg.state / "logs" / "review.log").read_text()
+        self.assertIn("#5 FAILED — issue #9 is CLOSED", log)
+        self.assertIn("review: FAILED — no review was posted for #5", log)
+
     def test_unreadable_required_checks_review_nothing(self) -> None:
         github.required_checks.side_effect = common.GhError("no required status checks found")
         with mock.patch.object(review, "run_review") as run_review:
@@ -167,6 +185,13 @@ class TickTests(unittest.TestCase):
 class ErrorTypeTests(unittest.TestCase):
     def test_review_errors_are_lane_errors(self) -> None:
         self.assertTrue(issubclass(review.ReviewError, LaneError))
+
+    def test_every_error_the_lane_catches_is_a_lane_error(self) -> None:
+        from scripts import open_pr
+
+        for error in (dispatch_card.CardError, open_pr.OpenPrError, identity.IdentityError):
+            with self.subTest(error=error.__name__):
+                self.assertTrue(issubclass(error, LaneError))
 
 
 if __name__ == "__main__":

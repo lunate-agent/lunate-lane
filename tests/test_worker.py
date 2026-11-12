@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from scripts import dispatch_card, github, harness, open_pr, worker  # noqa: E402
+from scripts import dispatch_card, github, harness, identity, open_pr, worker  # noqa: E402
 from scripts.common import GitError, LaneError  # noqa: E402
 from tests.helpers import TempState, git, origin_and_clone, pull, review  # noqa: E402
 
@@ -150,7 +150,8 @@ class DriveTests(RepoCase):
             if commit:
                 git(worktree, "config", "user.email", "w@example.invalid")
                 git(worktree, "config", "user.name", "w")
-                (worktree / "fix.cs").write_text("fixed\n")
+                self.runs = getattr(self, "runs", 0) + 1
+                (worktree / "fix.cs").write_text(f"fixed {self.runs}\n")
                 git(worktree, "add", "fix.cs")
                 git(worktree, "commit", "-q", "-m", "fix")
                 on_tick()
@@ -195,20 +196,38 @@ class DriveTests(RepoCase):
         self.assertIn("stalled", self.comments[0][1])
 
     def test_a_failed_early_open_does_not_stop_the_session_and_the_end_tries_again(self) -> None:
-        calls = []
+        """The real exception types dispatch raises: none of them may escape on_tick and kill the session."""
+        for error in (open_pr.OpenPrError("GitHub refused POST /pulls (502)"),
+                      dispatch_card.CardError("issue #3 is CLOSED, not open"),
+                      identity.IdentityError("the token exchange was refused (401)")):
+            with self.subTest(error=type(error).__name__):
+                calls = []
+                self.dispatched.clear()
+                self.comments.clear()
 
-        def flaky(repo, number, arm=True):
-            calls.append(arm)
-            if len(calls) == 1:
-                raise LaneError("GitHub refused POST /pulls (502)")
-            return self.dispatch(repo, number, arm)
+                def flaky(repo, number, arm=True, error=error):
+                    calls.append(arm)
+                    if len(calls) == 1:
+                        raise error
+                    return self.dispatch(repo, number, arm)
 
-        dispatch_card.dispatch.side_effect = flaky
-        with self.fake_session():
-            self.assertEqual(worker.drive(self.cfg, 3, None), 0)
-        self.assertEqual(calls, [False, True])
-        self.assertEqual(self.pr_seen, "")
-        self.assertIn("could not open the pull request", (self.cfg.state / "logs" / "worker-3.log").read_text())
+                dispatch_card.dispatch.side_effect = flaky
+                with self.fake_session():
+                    self.assertEqual(worker.drive(self.cfg, 3, None), 0)
+                self.assertEqual(calls, [False, True])
+                self.assertEqual(self.pr_seen, "")
+                self.assertIn(f"could not open the pull request at the first commit — {error}",
+                              (self.cfg.state / "logs" / "worker-3.log").read_text())
+                (self.cfg.state / "logs" / "worker-3.log").unlink()
+
+    def test_a_failure_while_finishing_reaches_the_worker_log_not_a_traceback(self) -> None:
+        open_pr.comment.side_effect = open_pr.OpenPrError("GitHub refused POST /issues/77/comments (502)")
+        with self.fake_session(), mock.patch.object(sys, "argv", ["worker.py", "--issue", "3"]), \
+                mock.patch.object(harness, "live_pid", return_value=None):
+            self.assertEqual(worker.main(), 1)
+        log = (self.cfg.state / "logs" / "worker-3.log").read_text()
+        self.assertIn("FAILED — GitHub refused POST /issues/77/comments (502)", log)
+        self.assertFalse((self.cfg.state / "workers" / "3.json").exists())
 
     def test_a_closed_issue_is_never_worked(self) -> None:
         dispatch_card.card.side_effect = dispatch_card.CardError("issue #3 is CLOSED, not open")

@@ -26,7 +26,7 @@ API = "https://api.github.com"
 REPO = common.config().slug
 
 
-class IdentityError(RuntimeError):
+class IdentityError(common.LaneError):
     """Anything that stops a token being minted. Never carries key material."""
 
 

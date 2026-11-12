@@ -30,7 +30,7 @@ API = "https://api.github.com"
 WORKER_LOGIN = "lunate-worker[bot]"
 
 
-class OpenPrError(RuntimeError):
+class OpenPrError(common.LaneError):
     """Anything that stops the pull request being opened. Never carries a token."""
 
 
