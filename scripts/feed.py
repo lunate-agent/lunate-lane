@@ -85,6 +85,10 @@ def start(cfg: common.Config, launch: cards.Launch) -> int:
 
 def tick(dry_run: bool = False) -> None:
     cfg = common.config()
+    if not dry_run:
+        swept = open_pr.sweep_secret_dir()
+        if swept:
+            common.log(JOB, f"removed {swept} token file(s) a killed push left behind")
     launches, notes, reruns, rearms = decide_all(cfg)
     for p in reruns:
         rerun(cfg, p, dry_run)

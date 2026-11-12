@@ -15,6 +15,7 @@ import argparse
 import json
 import os
 import pathlib
+import re
 import shlex
 import subprocess
 import time
@@ -115,6 +116,33 @@ def _secret_dir() -> pathlib.Path:
 _git_env = common.git_env
 
 
+PUSH_FILE = re.compile(r"^push-(\d+)-\d+\.(token|askpass)$")
+
+
+def sweep_secret_dir() -> int:
+    """Remove token and askpass files whose push is gone (its process was killed before its `finally`). Run at
+    the start of every feeder tick and every push. Returns how many went."""
+    run_dir = _secret_dir()
+    gone = 0
+    try:
+        for entry in os.scandir(run_dir):
+            match = PUSH_FILE.match(entry.name)
+            if not match:
+                continue
+            try:
+                os.kill(int(match.group(1)), 0)
+                continue  # its push is still running
+            except ProcessLookupError:
+                pass
+            except PermissionError:
+                continue  # alive, someone else's
+            os.unlink(entry.path)
+            gone += 1
+    except OSError as exc:
+        raise OpenPrError(f"stale push files in {run_dir} could not be swept ({exc.__class__.__name__})") from exc
+    return gone
+
+
 def push_env(token: str, run_dir: pathlib.Path, url: str) -> dict:
     """The push's environment, and its askpass helper and token file in `run_dir` (mode 600).
 
@@ -208,6 +236,7 @@ def push(repo: pathlib.Path, branch: str, token: str, url: str | None = None) ->
     ref = f"refs/heads/{branch}"
     _run_git(["-C", str(mirror), "fetch", "-q", "--no-tags", "--no-write-fetch-head", str(repo), f"+{ref}:{ref}"],
              None, env, f"copying {branch} into the push mirror")
+    sweep_secret_dir()
     secret_env = push_env(token, _secret_dir(), url)
     try:
         _run_git(["-C", str(mirror), "push", url, f"{ref}:{ref}"], None, secret_env, f"the push of {branch}", token)

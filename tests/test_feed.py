@@ -112,6 +112,15 @@ class FeedTests(unittest.TestCase):
         self.assertIn("would re-arm #50", log)
         self.assertIn("re-armed #50: approved at h1 but not armed — auto-merge armed", log)
 
+    def test_a_tick_sweeps_stale_token_files_first(self) -> None:
+        from scripts import open_pr
+
+        with mock.patch.object(open_pr, "sweep_secret_dir", return_value=2) as sweep:
+            feed.main()
+        sweep.assert_called_once_with()
+        self.assertIn("removed 2 token file(s) a killed push left behind",
+                      (self.state.cfg.state / "logs" / "feed.log").read_text())
+
     def test_two_rework_rounds_still_rework(self) -> None:
         for _ in range(2):
             harness.note_rework(9, 50)

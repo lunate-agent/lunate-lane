@@ -225,7 +225,8 @@ delivers it (cron mail, or the orchestrator's own scheduler capturing stdout). B
   - `sysctl(KERN_PROCARGS2)` is not mediated by the sandbox on this macOS, so a session can still read the
     argv and environment of any process of the same user. The lane therefore keeps secrets out of both: the
     push's token reaches git through a `GIT_ASKPASS` helper that reads a mode-600 file in a denied directory,
-    and answers only a prompt for exactly `https://x-access-token@github.com`. The push itself goes from a
+    and answers only a prompt for exactly `https://x-access-token@github.com`. Files a killed push left there are
+    swept at the start of every feeder tick and every push. The push itself goes from a
     lane-private bare mirror (`<state>/push-mirror.git`, whose config is checked) to the explicit URL
     `https://github.com/lunate-agent/lunate.git`, with system and global config off and hooks pointing nowhere,
     so nothing a session writes into the checkout's config (a `pushurl`, an `insteadOf`) decides where the

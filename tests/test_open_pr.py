@@ -365,6 +365,17 @@ class FailurePathTests(unittest.TestCase):
                 self.assertNotEqual(refused.returncode, 0)
                 self.assertNotIn(token, refused.stdout + refused.stderr)
 
+    def test_token_files_a_killed_push_left_behind_are_swept_and_a_running_ones_are_not(self) -> None:
+        run_dir = open_pr._secret_dir()
+        dead = subprocess.Popen(["/usr/bin/true"])
+        dead.wait()
+        stale = [run_dir / f"push-{dead.pid}-1.token", run_dir / f"push-{dead.pid}-1.askpass"]
+        live = run_dir / f"push-{os.getpid()}-2.token"
+        for path in (*stale, live):
+            path.write_text("ghs_x")
+        self.assertEqual(open_pr.sweep_secret_dir(), 2)
+        self.assertEqual(sorted(p.name for p in run_dir.iterdir()), [live.name])
+
     def test_the_default_push_url_is_the_explicit_github_url(self) -> None:
         self.assertEqual(open_pr.push_url(), "https://x-access-token@github.com/lunate-agent/lunate.git")
 
