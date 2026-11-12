@@ -63,7 +63,10 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    0, not stalled, nothing uncommitted, a new commit, a real final message). Otherwise auto-merge is left off — and
    turned **off** before the push when a rework lands on a pull request that was armed — with a comment naming
    why, and the orchestrator takes over. The auto-merge state in the comment and the log is read back from
-   GitHub, never assumed. The final report is scanned before posting: anything token- or key-shaped (GitHub
+   GitHub, never assumed. Auto-merge is armed with the merge queue's own method, read from the base branch's
+   rules (no queue rule is a refusal, not a guess). GitHub may record a different `mergeMethod` on the pull
+   request than the one sent (it recorded `MERGE` on #813, armed with `SQUASH`); the log shows both, and what
+   actually lands is checked on the merged commit's parent count. The final report is scanned before posting: anything token- or key-shaped (GitHub
    tokens, `sk-` keys, private-key blocks, AWS keys, JWTs, `key=…`/`token=…` assignments, long opaque strings, or
    the model credential itself) replaces it with a fixed "output withheld" note, and the worker log says so.
    Stopping a worker with `kill <pid>` (SIGTERM, also SIGHUP or SIGINT) kills its Pi session's process group on

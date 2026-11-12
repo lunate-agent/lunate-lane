@@ -24,7 +24,9 @@ class FailurePathTests(unittest.TestCase):
         self._tmp = tempfile.mkdtemp(prefix="lane-test-")
         self.repo = pathlib.Path(self._tmp)
         subprocess.run(["git", "init", "-q", "-b", "main"], cwd=self._tmp, capture_output=True)
-        self.saved = (open_pr._api, open_pr.identity.installation_token, open_pr.push, open_pr._graphql)
+        self.saved = (open_pr._api, open_pr.identity.installation_token, open_pr.push, open_pr._graphql,
+                      open_pr.queue_method)
+        open_pr.queue_method = lambda token, base: "SQUASH"  # type: ignore[assignment]
         open_pr.identity.installation_token = lambda name: "token-for-tests"  # type: ignore[assignment]
         # a fake of GitHub's auto-merge state, per pull request node id
         self.armed: dict = {}
@@ -36,6 +38,7 @@ class FailurePathTests(unittest.TestCase):
         node = variables["id"]
         if "enablePullRequestAutoMerge" in query:
             self.events.append(("arm", node))
+            self.methods = getattr(self, "methods", []) + [variables["method"]]
             self.armed[node] = True
             return {"enablePullRequestAutoMerge": {"pullRequest": {"autoMergeRequest": {"enabledAt": "t"}}}}
         if "disablePullRequestAutoMerge" in query:
@@ -43,10 +46,13 @@ class FailurePathTests(unittest.TestCase):
             self.armed[node] = self.disarm_sticks and self.armed.get(node, False)
             return {"disablePullRequestAutoMerge": {"pullRequest": {"autoMergeRequest": None}}}
         self.events.append(("read", node))
-        return {"node": {"number": 1, "autoMergeRequest": {"enabledAt": "t"} if self.armed.get(node) else None}}
+        recorded = getattr(self, "recorded", "SQUASH")
+        return {"node": {"number": 1, "autoMergeRequest": {"enabledAt": "t", "mergeMethod": recorded}
+                         if self.armed.get(node) else None}}
 
     def tearDown(self) -> None:
-        open_pr._api, open_pr.identity.installation_token, open_pr.push, open_pr._graphql = self.saved
+        (open_pr._api, open_pr.identity.installation_token, open_pr.push, open_pr._graphql,
+         open_pr.queue_method) = self.saved
         shutil.rmtree(self._tmp, ignore_errors=True)
 
     def test_auto_merge_refused_is_a_failure_not_a_pass(self) -> None:
@@ -207,6 +213,47 @@ class FailurePathTests(unittest.TestCase):
         with self.assertRaises(open_pr.OpenPrError) as caught:
             open_pr.push(self.repo, "lane/never-created", "token-for-tests")
         self.assertIn("no local branch", str(caught.exception))
+
+    def test_auto_merge_is_armed_with_the_queues_method_and_the_recorded_method_is_reported(self) -> None:
+        """#6: the mutation's method is the merge queue's, read from the rules — and what GitHub records is
+        reported as read, even when (as on #813) it records MERGE for a queue that squashes."""
+        self.reuse()
+        open_pr.queue_method = lambda token, base: "SQUASH"
+        self.recorded = "MERGE"
+        result = open_pr.open_pr(self.repo, "lane/x", "t", "b")
+        self.assertEqual(self.methods, ["SQUASH"])
+        self.assertEqual((result["auto_merge"], result["queue_method"], result["merge_method"]),
+                         ("armed", "SQUASH", "MERGE"))
+
+    def test_the_queue_method_is_read_from_the_base_branchs_rules(self) -> None:
+        open_pr.queue_method = self.saved[4]
+        rules = [{"type": "pull_request", "parameters": {"allowed_merge_methods": ["merge", "squash"]}},
+                 {"type": "merge_queue", "parameters": {"merge_method": "SQUASH", "grouping_strategy": "ALLGREEN"}}]
+        paths = []
+        open_pr._api = lambda token, method, path, payload=None: paths.append((method, path)) or rules
+        self.assertEqual(open_pr.queue_method("t", "main"), "SQUASH")
+        self.assertEqual(paths, [("GET", "/repos/lunate-agent/lunate/rules/branches/main")])
+
+    def test_no_merge_queue_rule_is_a_refusal_not_a_guess(self) -> None:
+        open_pr.queue_method = self.saved[4]
+        for rules in ([], [{"type": "merge_queue", "parameters": {}}], {"message": "Not Found"},
+                      [{"type": "merge_queue", "parameters": {"merge_method": "SQUASH"}},
+                       {"type": "merge_queue", "parameters": {"merge_method": "MERGE"}}]):
+            with self.subTest(rules=rules):
+                open_pr._api = lambda *a, rules=rules, **k: rules
+                with self.assertRaises(open_pr.OpenPrError):
+                    open_pr.queue_method("t", "main")
+
+    def test_an_unreadable_queue_method_arms_nothing(self) -> None:
+        self.reuse()
+
+        def refuse(token, base):
+            raise open_pr.OpenPrError("main has no merge queue method in its rules")
+
+        open_pr.queue_method = refuse
+        with self.assertRaises(open_pr.OpenPrError):
+            open_pr.open_pr(self.repo, "lane/x", "t", "b")
+        self.assertNotIn(("arm", "N42"), self.events)
 
     def test_a_nameless_identity_is_a_named_failure(self) -> None:
         def boom(name):

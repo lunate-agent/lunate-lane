@@ -205,3 +205,15 @@ def reviewer_verdict(p: Pull, reviewer: str) -> str | None:
     states = [r.state for r in p.reviews if r.author == reviewer and r.commit == p.head
               and r.state not in ("DISMISSED", "PENDING")]
     return states[-1] if states else None
+
+
+def landed_parents(cfg: common.Config, number: int) -> tuple[str, int]:
+    """(merge commit, its parent count) of a merged pull request: 1 is a squash, 2 a merge commit (#6)."""
+    data = common.graphql("""query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){
+pullRequest(number:$n){state mergeCommit{oid parents(first:3){totalCount}}}}}""", owner=cfg.owner, name=cfg.name,
+                          n=int(number))
+    node = (data.get("repository") or {}).get("pullRequest") or {}
+    commit = node.get("mergeCommit")
+    if node.get("state") != "MERGED" or not isinstance(commit, dict):
+        raise GhError(f"#{number} is {str(node.get('state') or 'unreadable').lower()}, not merged with a commit")
+    return str(commit["oid"]), int(commit["parents"]["totalCount"])

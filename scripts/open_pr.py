@@ -126,8 +126,24 @@ def _graphql(token: str, query: str, variables: dict, what: str) -> dict:
     return payload["data"]
 
 
-def arm_auto_merge(token: str, node_id: str | None, method: str = "SQUASH") -> None:
-    """Arm auto-merge through the merge queue, or raise. A refused auto-merge is not a success.
+def queue_method(token: str, base: str) -> str:
+    """The merge method of the base branch's merge queue, read from its rules (ruleset `protect-default` sets
+    `merge_queue.merge_method`). The lane arms with it rather than guessing (#6); no queue rule is a refusal."""
+    rules = _api(token, "GET", f"/repos/{SLUG}/rules/branches/{base}")
+    if not isinstance(rules, list):
+        raise OpenPrError(f"the rules for {base} came back as {type(rules).__name__}, not a list")
+    methods = {str((rule.get("parameters") or {}).get("merge_method") or "").upper()
+               for rule in rules if isinstance(rule, dict) and rule.get("type") == "merge_queue"}
+    methods.discard("")
+    if len(methods) != 1:
+        raise OpenPrError(f"{base} has {'no' if not methods else 'more than one'} merge queue method in its rules "
+                          f"({', '.join(sorted(methods)) or 'none'}) — refusing to guess how auto-merge lands")
+    return methods.pop()
+
+
+def arm_auto_merge(token: str, node_id: str | None, method: str) -> None:
+    """Arm auto-merge through the merge queue with the queue's own method, or raise. A refused auto-merge is not
+    a success.
 
     Rule one applies to this file first: if auto-merge cannot be armed, the caller must exit non-zero
     rather than report a pull request as delivered.
@@ -152,29 +168,43 @@ def disarm_auto_merge(token: str, node_id: str) -> None:
     _graphql(token, query, {"id": node_id}, "disable auto-merge")
 
 
-def auto_merge_enabled(token: str, node_id: str | None) -> bool:
-    """Whether GitHub says auto-merge is on for this pull request. Unreadable is a failure, not 'off'."""
+def auto_merge_state(token: str, node_id: str | None) -> tuple[bool, str | None]:
+    """(on, the merge method GitHub records) for this pull request. Unreadable is a failure, not 'off'."""
     if not node_id:
         raise OpenPrError("auto-merge state could not be read — no node id for the pull request")
-    data = _graphql(token, "query($id:ID!){node(id:$id){... on PullRequest{number autoMergeRequest{enabledAt}}}}",
-                    {"id": node_id}, "auto-merge read")
+    data = _graphql(token, "query($id:ID!){node(id:$id){... on PullRequest{number "
+                           "autoMergeRequest{enabledAt mergeMethod}}}}", {"id": node_id}, "auto-merge read")
     node = data.get("node")
     if not isinstance(node, dict) or "autoMergeRequest" not in node:
         raise OpenPrError(f"pull request {node_id} came back without its auto-merge state")
-    return node["autoMergeRequest"] is not None
+    request = node["autoMergeRequest"]
+    return request is not None, (str(request.get("mergeMethod") or "") or None) if isinstance(request, dict) else None
 
 
-def _settle(token: str, node_id: str | None, arm: bool) -> str:
-    """Arm, or make sure auto-merge is off, then report what GitHub says — never the intent."""
+def auto_merge_enabled(token: str, node_id: str | None) -> bool:
+    """Whether GitHub says auto-merge is on for this pull request. Unreadable is a failure, not 'off'."""
+    return auto_merge_state(token, node_id)[0]
+
+
+def _settle(token: str, node_id: str | None, arm: bool, base: str) -> dict:
+    """Arm (with the queue's method), or make sure auto-merge is off, then report what GitHub says — never the
+    intent.
+
+    The method GitHub records is reported but not required to match: with a merge queue required, GitHub has
+    recorded MERGE on a pull request armed with SQUASH (#813), while the queue landed every merge as one squash
+    commit. What lands is checked on the merged commit instead (`github.landed_parents`).
+    """
+    queue = None
     if arm:
-        arm_auto_merge(token, node_id)
+        queue = queue_method(token, base)
+        arm_auto_merge(token, node_id, queue)
     elif auto_merge_enabled(token, node_id):
         disarm_auto_merge(token, node_id)  # type: ignore[arg-type]
-    actual = auto_merge_enabled(token, node_id)
+    actual, recorded = auto_merge_state(token, node_id)
     if actual != arm:
         raise OpenPrError(f"auto-merge should be {'on' if arm else 'off'} but GitHub reads it as "
                           f"{'on' if actual else 'off'}")
-    return "armed" if actual else "not armed"
+    return {"auto_merge": "armed" if actual else "not armed", "queue_method": queue, "merge_method": recorded}
 
 
 def _worker_token() -> str:
@@ -223,7 +253,7 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
         # a re-dispatch usually carries new commits, and reuse must deliver them
         push(repo, branch, token)
         return {"number": number, "url": existing.get("html_url"), "author": author,
-                "auto_merge": _settle(token, existing.get("node_id"), arm), "reused": True}
+                **_settle(token, existing.get("node_id"), arm, base), "reused": True}
 
     push(repo, branch, token)
     try:
@@ -244,7 +274,7 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
                 )
             return {"number": raced.get("number"), "url": raced.get("html_url"),
                     "author": (raced.get("user") or {}).get("login", ""),
-                    "auto_merge": _settle(token, raced.get("node_id"), arm), "reused": True}
+                    **_settle(token, raced.get("node_id"), arm, base), "reused": True}
         raise
 
     number = pull.get("number")
@@ -261,7 +291,7 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
         raise OpenPrError(f"the pull request came back authored by {author!r}, not {WORKER_LOGIN}{closed}")
 
     return {"number": number, "url": pull.get("html_url"), "author": author,
-            "auto_merge": _settle(token, pull.get("node_id"), arm), "reused": False}
+            **_settle(token, pull.get("node_id"), arm, base), "reused": False}
 
 
 def comment(number: int, body: str) -> None:

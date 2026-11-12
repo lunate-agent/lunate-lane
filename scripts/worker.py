@@ -210,7 +210,9 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
         report = WITHHELD.format(kind=kind)
     lines.append("\n" + report)
     open_pr.comment(result["number"], "\n".join(lines)[:COMMENT_LIMIT])
-    common.log(job, f"#{result['number']} pushed at {head}, auto-merge {result['auto_merge']}"
+    method = (f" (queue {result['queue_method']}, GitHub records {result.get('merge_method') or 'none'})"
+              if result.get("queue_method") else "")
+    common.log(job, f"#{result['number']} pushed at {head}, auto-merge {result['auto_merge']}{method}"
                + (f" — {'; '.join(found)}" if found else ""))
     if parked_now:
         park(cfg, number, result["number"], idle)

@@ -108,6 +108,25 @@ class PullTests(unittest.TestCase):
         self.assertEqual(github.login({"login": "lunate-worker"}), "lunate-worker")
 
 
+class LandedTests(unittest.TestCase):
+    def answer(self, state, oid="abc", parents=1):
+        commit = {"oid": oid, "parents": {"totalCount": parents}} if oid else None
+        return mock.patch.object(common, "graphql", return_value={"repository": {"pullRequest": {
+            "state": state, "mergeCommit": commit}}})
+
+    def test_a_squash_lands_as_one_parent(self) -> None:
+        with self.answer("MERGED", "abc", 1):
+            self.assertEqual(github.landed_parents(CFG, 801), ("abc", 1))
+        with self.answer("MERGED", "def", 2):
+            self.assertEqual(github.landed_parents(CFG, 802), ("def", 2))
+
+    def test_a_pull_request_that_did_not_land_is_a_named_failure(self) -> None:
+        for state, oid in (("OPEN", None), ("CLOSED", None), ("MERGED", None)):
+            with self.subTest(state=state), self.answer(state, oid):
+                with self.assertRaises(GhError):
+                    github.landed_parents(CFG, 803)
+
+
 class ChecksTests(unittest.TestCase):
     def state(self, *checks):
         return github.check_state(pull(1, 1, checks=checks), REQUIRED)
