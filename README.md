@@ -63,6 +63,12 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      request (on the issue if there is none), and the digest lists it. A new commit resets the idle-run count (and
      lifts an idle park) but not the rework rounds. To give a parked card back to the lane, delete
      `<state>/attempts/<card>.json`; that clears both counts.
+   - **tidying, after the launches** (`scripts/cleanup.py`): a card whose lane pull request (`wt/issue-N`) is merged
+     or closed, with none open and no worker running, loses its worktree, its local branch and its scratch
+     directory (a merged one first has its merge commit's parent count logged — 1 is the squash the queue should
+     make). Logs over 5 MB are rotated (three generations kept), Pi event logs older than 14 days are deleted, and
+     review sessions left by a killed review run are cleared. A cleanup that fails fails the tick by name, but only
+     after the launches.
 2. **Worker** (`scripts/worker.py --issue N [--rework PR]`, started detached by the feeder). Cuts or continues
    the worktree `<state>/worktrees/issue-N` of the checkout on `wt/issue-N`, renders `templates/worker-brief.md`
    with the issue body, and runs one Pi session on the worker model. The session has no GitHub credential; the
@@ -101,7 +107,9 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    by hand. The
    session writes a JSON verdict; the lane re-reads the pull request and, only if it is still open at the same
    head, posts a real review — `APPROVE` or `REQUEST_CHANGES` with the findings — as `lunate-reviewer`. It then
-   reads the review back, and if GitHub names any other author the run exits non-zero. A submitted review cannot
+   reads the review back, and if GitHub names any other author the run exits non-zero. A review run records
+   itself in `<state>/reviewing/<pr>.json` with its session's group; if it is `kill -9`ed, the next review or
+   feeder tick kills that exact session and removes its worktree, as for workers. A submitted review cannot
    be deleted, so a person has to dismiss it. A missing or malformed verdict posts nothing.
 4. **Merging** is GitHub's: the ruleset (one approval, code-owner review for `adr/`, required checks, merge queue)
    plus the auto-merge the worker armed.
@@ -120,6 +128,7 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
 | `scripts/harness.py` | Runs one headless Pi session under `sandbox-exec` with a minimal environment, its own HOME and a stall watchdog; the running-worker records, orphan clean-up, idle-run and rework counts. |
 | `scripts/secret_scan.py` | The secret shapes, shared by the report scan and the scan before every push. |
 | `scripts/feed.py` | Cron entry point: the feeder. |
+| `scripts/cleanup.py` | The feeder's tidying: finished cards' worktrees and branches, log rotation, dead review runs. |
 | `scripts/worker.py` | The detached driver for one card's worker session. |
 | `scripts/review.py` | Cron entry point: reviewer dispatch. |
 | `scripts/digest.py` | Cron entry point: the daily digest. |
@@ -142,7 +151,7 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
   argv. (The old lane's `~/.hermes/.env` is no longer read.)
 - State: `~/.local/state/lunate-lane/`: `locks/`, `logs/`, `workers/` (one pid file per running worker, with
   its session's process group), `attempts/` (idle-run counts; a parked card's file is deleted to unpark it),
-  `worktrees/`, `reviews/`, `scratch/` (each session's TMPDIR and its own `home/`), `sessions/` (Pi event logs),
+  `worktrees/`, `reviews/`, `reviewing/` (one record per running review), `scratch/` (each session's TMPDIR and its own `home/`), `sessions/` (Pi event logs),
   `digest/`.
 - The session's HOME: `<scratch>/home`, wiped and reseeded before every session. It gets copies of
   `~/.pi/agent/settings.json`, `models-store.json` and `bin/fd` (not `auth.json`; the credential is passed in the

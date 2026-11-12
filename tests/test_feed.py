@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from scripts import feed, github, harness  # noqa: E402
+from scripts import cleanup, feed, github, harness  # noqa: E402
 from scripts.common import GhError, StateError  # noqa: E402
 from tests.helpers import REQUIRED, TempState, card, pull, review  # noqa: E402
 
@@ -23,6 +23,7 @@ class FeedTests(unittest.TestCase):
             mock.patch.object(harness, "running_workers", return_value={}),
             mock.patch.object(github, "required_checks", return_value=REQUIRED),
             mock.patch.object(feed, "start", side_effect=lambda cfg, launch: self.started.append(launch) or 1),
+            mock.patch.object(cleanup, "tidy"),
             mock.patch("sys.stdout", new=io.StringIO()),
         ]
         for patch in self.patches:
@@ -32,6 +33,13 @@ class FeedTests(unittest.TestCase):
         for patch in reversed(self.patches):
             patch.stop()
         self.state.close()
+
+    def test_a_failed_cleanup_fails_the_tick_after_the_launches(self) -> None:
+        """#13: tidying runs after the launches; its failure is named, and the work it follows has started."""
+        cleanup.tidy.side_effect = StateError("the logs in /x could not be rotated: [Errno 13]")
+        self.assertEqual(feed.main(), 1)
+        self.assertEqual([l.card for l in self.started], [9, 2, 1])
+        self.assertIn("FAILED — the logs in /x could not be rotated", (self.state.cfg.state / "logs" / "feed.log").read_text())
 
     def test_a_fourth_rework_parks_the_card_with_one_comment_instead(self) -> None:
         """#9: three rework rounds on #50, whatever their cause; the fourth is a park, said once."""
@@ -165,6 +173,7 @@ class UnreadableStateTests(unittest.TestCase):
             mock.patch.object(github, "open_pulls", return_value=[]),
             mock.patch.object(github, "required_checks", return_value=REQUIRED),
             mock.patch.object(feed, "start", side_effect=lambda cfg, launch: self.started.append(launch) or 1),
+            mock.patch.object(cleanup, "tidy"),
             mock.patch.object(sys, "argv", ["feed.py"]),
             mock.patch("sys.stdout", new=io.StringIO()),
         ]

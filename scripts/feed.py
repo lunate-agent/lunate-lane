@@ -17,7 +17,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from scripts import cards, common, github, harness, worker  # noqa: E402
+from scripts import cards, cleanup, common, github, harness, worker  # noqa: E402
 from scripts.common import LaneError  # noqa: E402
 
 JOB = "feed"
@@ -80,6 +80,8 @@ def tick(dry_run: bool = False) -> None:
         common.log(JOB, "nothing to start")
     for note in notes:
         common.log(JOB, note)
+    # after the launches, so a cleanup that fails never holds work back — it still fails the tick, by name
+    cleanup.tidy(cfg, JOB, github.open_pulls(cfg), harness.running_workers(), dry_run)
 
 
 def main() -> int:

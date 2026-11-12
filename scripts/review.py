@@ -13,7 +13,9 @@ GitHub does not name `lunate-reviewer` as its author. A missing or malformed ver
 from __future__ import annotations
 
 import json
+import os
 import pathlib
+import shutil
 import sys
 
 if __package__ in (None, ""):
@@ -125,6 +127,8 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str]:
     common.git(repo, "fetch", "-q", "origin", p.head)
     if worktree.exists():
         common.git(repo, "worktree", "remove", "--force", str(worktree))
+    driver = os.getpid()
+    harness.record_review(p.number, driver, worktree)  # so a SIGKILLed run's session and worktree get cleared
     common.git(repo, "worktree", "add", "--detach", str(worktree), p.head)
     try:
         diff_file.write_text(common.git(worktree, "diff", f"origin/{cfg.base}...HEAD"))
@@ -140,12 +144,14 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str]:
                                BODY=(issue.get("body") or "").strip())
         log_path = common.state_dir("sessions") / f"review-{p.number}-{p.head[:8]}.jsonl"
         outcome = harness.run_session(cfg, model=cfg.reviewer_model, worktree=worktree, prompt=prompt,
-                                      scratch=scratch, log_path=log_path)
+                                      scratch=scratch, log_path=log_path,
+                                      on_start=lambda pgid, sid: harness.note_review_session(p.number, driver, pgid, sid))
         if outcome.stalled or outcome.rc != 0:
             raise ReviewError(f"the review session did not finish cleanly (rc {outcome.rc}, stalled {outcome.stalled})")
         return read_verdict(verdict_file)
     finally:
         common.git(repo, "worktree", "remove", "--force", str(worktree))
+        harness.clear_review(p.number, driver)
 
 
 def spec_neighbours(p: github.Pull, others) -> str:
@@ -165,9 +171,30 @@ def spec_neighbours(p: github.Pull, others) -> str:
     return "\n".join(lines)
 
 
+def remove_review_worktree(cfg: common.Config, worktree: pathlib.Path) -> None:
+    """Remove a review worktree a dead run left behind, and prune its registration. Only under <state>/reviews."""
+    if common.state_dir("reviews") not in worktree.parents:
+        raise LaneError(f"{worktree} is not a lane review worktree — left alone")
+    if (worktree / ".git").exists():
+        common.git(cfg.checkout, "worktree", "remove", "--force", str(worktree))
+    elif worktree.exists():
+        try:
+            shutil.rmtree(worktree)
+        except OSError as exc:
+            raise common.StateError(f"the review worktree {worktree} could not be removed: {exc}") from exc
+    common.git(cfg.checkout, "worktree", "prune")
+
+
+def reap(cfg: common.Config, job: str) -> None:
+    for pr in harness.reap_reviews(lambda path: remove_review_worktree(cfg, path)):
+        common.log(job, f"cleared the review of #{pr} that a dead run left behind (session and worktree)")
+
+
 def tick(dry_run: bool = False) -> None:
     cfg = common.config()
     failed = []
+    if not dry_run:
+        reap(cfg, JOB)
     pulls = due(cfg)
     if not pulls:
         common.log(JOB, "nothing due for review")
@@ -188,6 +215,7 @@ def tick(dry_run: bool = False) -> None:
 
 def main() -> int:
     dry_run = "--dry-run" in sys.argv[1:]
+    harness.exit_on_signals()  # a killed run still kills its session and removes its worktree
     return common.run_job(JOB, lambda: tick(dry_run))
 
 

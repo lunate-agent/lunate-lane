@@ -443,6 +443,67 @@ def running_workers() -> dict:
     return found
 
 
+# --- running reviews: one record per pull request under <state>/reviewing (#13) ---
+#     The review driver is the cron run of review.py; if it is SIGKILLed its Pi session and worktree outlive it.
+
+def _review_record(pr: int) -> pathlib.Path:
+    return common.state_dir("reviewing") / f"{int(pr)}.json"
+
+
+def record_review(pr: int, pid: int, worktree: pathlib.Path) -> None:
+    _write_record(_review_record(pr), {"pr": int(pr), "pid": pid, "worktree": str(worktree), "started": time.time()})
+
+
+def note_review_session(pr: int, pid: int, session_pgid: int, session_id: str) -> None:
+    path = _review_record(pr)
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise StateError(f"the review record {path} could not be read: {exc}") from exc
+    if data.get("pid") != pid:
+        raise StateError(f"the review record {path} belongs to pid {data.get('pid')}, not {pid}")
+    data["session_pgid"], data["session_id"] = int(session_pgid), str(session_id)
+    _write_record(path, data)
+
+
+def clear_review(pr: int, pid: int) -> None:
+    path = _review_record(pr)
+    try:
+        if path.exists() and json.loads(path.read_text()).get("pid") == pid:
+            path.unlink()
+    except (OSError, ValueError) as exc:
+        raise StateError(f"the review record {path} could not be cleared: {exc}") from exc
+
+
+def review_alive(pid: int) -> bool:
+    """The pid is alive and is a review.py run (a recycled pid is not)."""
+    command = _command(pid)
+    return command is not None and "review.py" in command
+
+
+def reap_reviews(remove_worktree: Callable[[pathlib.Path], None]) -> list[int]:
+    """Clear every review whose driver is dead: kill the session it left (only that exact session id), remove its
+    worktree, drop the record. Returns the pull requests cleared. An unreadable record raises."""
+    cleared = []
+    for path in _listing(common.state_dir("reviewing")):
+        try:
+            data = json.loads(path.read_text())
+            pr, pid, worktree = int(data["pr"]), int(data["pid"]), pathlib.Path(data["worktree"])
+            pgid, session_id = data.get("session_pgid"), data.get("session_id")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise StateError(f"the review record {path} could not be read: {exc}") from exc
+        if review_alive(pid):
+            continue
+        reap_session(pr, (int(pgid), str(session_id)) if pgid and session_id else None)
+        remove_worktree(worktree)
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise StateError(f"the review record {path} could not be removed: {exc}") from exc
+        cleared.append(pr)
+    return cleared
+
+
 # --- attempts: a card is parked after IDLE_RUN_LIMIT runs with no new commit, or after REWORK_LIMIT rework rounds
 #     on one pull request (#9). Deleting <state>/attempts/<card>.json unparks it and clears both counts.
 
