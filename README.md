@@ -202,7 +202,12 @@ the orchestrating user's crontab (`crontab -e`):
 
 `PATH` must reach `gh`, `git` and `pi`. The digest prints its message on stdout, so whatever runs that line
 delivers it (cron mail, or the orchestrator's own scheduler capturing stdout). Before the first real tick, run
-`feed.py --dry-run` and `review.py --dry-run` by hand and read what they would do. Then retire the old jobs in
+`feed.py --dry-run` and `review.py --dry-run` by hand and read what they would do.
+
+**WIP for the first unattended night is 3** (`wip_limit` in `lane.json`), not the 5 the lane is built for: fewer
+cards in flight while the crons run alone for the first time. Raise it to 5 once a night has run clean — nothing
+parked or kept by cleanup for a lane fault, no `FAILED` in `logs/feed.log` or `logs/review.log`, and the
+morning digest matching what GitHub shows. Then retire the old jobs in
 `~/.hermes` that feed, review or label the same repository, so two lanes never drive it at once.
 
 ## Known limitations

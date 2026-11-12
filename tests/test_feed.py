@@ -249,6 +249,10 @@ class FeedTests(unittest.TestCase):
 
     def test_a_tick_that_fills_the_limit_logs_its_launches_before_the_wip_note(self) -> None:
         """#3: five cards start, then the sixth is held — the WIP line comes after the five, not above them."""
+        import dataclasses
+        from scripts import common
+
+        common._CONFIG = dataclasses.replace(self.state.cfg, wip_limit=5)  # this test's own limit, not lane.json's
         github.milestone_cards.return_value = [card(n) for n in range(780, 786)]
         github.open_pulls.return_value = []
         with mock.patch.object(sys, "argv", ["feed.py", "--dry-run"]):

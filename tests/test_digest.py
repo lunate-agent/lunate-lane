@@ -1,5 +1,6 @@
 """The daily digest: each pull request's state, what is stuck and why, and failed reads. No network."""
 
+import dataclasses
 import datetime
 import io
 import pathlib
@@ -13,7 +14,7 @@ from scripts.common import GhError  # noqa: E402
 from tests.helpers import REQUIRED, TempState, card, pull, review  # noqa: E402
 
 NOW = datetime.datetime(2026, 11, 12, 12, 0, tzinfo=datetime.timezone.utc)
-CFG = common.load_config()
+CFG = dataclasses.replace(common.load_config(), wip_limit=5)  # the tests pin their own limit, not lane.json's
 
 
 def state(p):
