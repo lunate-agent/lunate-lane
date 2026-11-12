@@ -256,7 +256,7 @@ class DriveTests(RepoCase):
             patch.stop()
         super().tearDown()
 
-    def dispatch(self, repo, number, arm=True):
+    def dispatch(self, repo, number, arm=True, known=()):
         self.dispatched.append(arm)
         return {"number": 77, "url": "u", "author": "lunate-worker[bot]", "reused": False,
                 "auto_merge": "armed" if arm else "not armed"}
@@ -321,7 +321,7 @@ class DriveTests(RepoCase):
                 self.dispatched.clear()
                 self.comments.clear()
 
-                def flaky(repo, number, arm=True, error=error):
+                def flaky(repo, number, arm=True, known=(), error=error):
                     calls.append(arm)
                     if len(calls) == 1:
                         raise error
@@ -404,6 +404,38 @@ class DriveTests(RepoCase):
                 log = (self.cfg.state / "logs" / "worker-3.log").read_text()
                 self.assertIn(f"shaped like a {kind} — not posted", log)
                 self.assertNotIn(token, log)
+
+    def test_a_committed_secret_is_never_pushed_and_parks_the_card_naming_only_its_kind(self) -> None:
+        """#12, through the real dispatch and open_pr: the scan stops both the early open and the finish."""
+        token = "ghp_" + "K4m" * 10
+        self.patches[1].stop()
+        del self.patches[1]
+        pushed = []
+
+        def run(cfg, *, worktree, log_path, on_tick, **_):
+            git(worktree, "config", "user.email", "w@example.invalid")
+            git(worktree, "config", "user.name", "w")
+            (worktree / "Secrets.cs").write_text(f'const string T = "{token}";\n')
+            git(worktree, "add", "Secrets.cs")
+            git(worktree, "commit", "-q", "-m", "oops")
+            on_tick()
+            log_path.write_text("")
+            return harness.Outcome(0, False, 60, False)
+
+        with mock.patch.object(harness, "run_session", side_effect=run), \
+                mock.patch.object(open_pr, "push", side_effect=lambda *a, **k: pushed.append(a)):
+            self.assertEqual(worker.drive(self.cfg, 3, None), 1)
+        self.assertEqual(pushed, [])
+        self.assertEqual(harness.parked_details(), {3: "secret"})
+        self.assertEqual(len(self.comments), 1)
+        target, body = self.comments[0]
+        self.assertEqual(target, 3)
+        self.assertIn("shaped like a GitHub token in the diff's added lines", body)
+        log = (self.cfg.state / "logs" / "worker-3.log").read_text()
+        self.assertIn("secret scan: the diff's added lines holds something shaped like a GitHub token", log)
+        for text in (body, log):
+            self.assertNotIn(token, text)
+            self.assertNotIn(token[4:], text)
 
     def test_three_runs_without_a_new_commit_park_the_card_once_and_say_so_on_the_issue(self) -> None:
         for run in range(1, 5):

@@ -134,12 +134,13 @@ def body_for(data: dict) -> str:
     return f"{head}\n\n{issue_text}\n"
 
 
-def dispatch(repo: pathlib.Path, number: int, arm: bool = True) -> dict:
-    """Card to pull request. Raises rather than half-opening anything. `arm=False` leaves auto-merge off."""
+def dispatch(repo: pathlib.Path, number: int, arm: bool = True, known: tuple = ()) -> dict:
+    """Card to pull request. Raises rather than half-opening anything. `arm=False` leaves auto-merge off; `known`
+    are values the pre-push secret scan must catch."""
     branch = branch_for(repo, number)
     data = card(repo, number)
     title = data["title"]
-    return open_pr.open_pr(repo, branch, title, body_for(data), common.config().base, arm=arm)
+    return open_pr.open_pr(repo, branch, title, body_for(data), common.config().base, arm=arm, known=known)
 
 
 def main() -> int:

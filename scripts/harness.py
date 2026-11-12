@@ -28,7 +28,7 @@ import subprocess
 import time
 from typing import Callable
 
-from scripts import common
+from scripts import common, secret_scan
 from scripts.common import LaneError, StateError
 
 DEFAULT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
@@ -279,36 +279,8 @@ def last_text(log_path: pathlib.Path) -> str:
     return last
 
 
-# Shapes of things that must never be posted. Checked in order; the first match names the kind.
-SECRET_SHAPES = (
-    ("private key", re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----")),
-    ("GitHub token", re.compile(r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})")),
-    ("API key", re.compile(r"\bsk-[A-Za-z0-9_-]{16,}")),
-    ("OpenCode key", re.compile(r"\boc_[A-Za-z0-9_-]{8,}")),  # the model key's prefix: a fragment is enough
-    ("AWS access key", re.compile(r"\b(?:AKIA|ASIA)[0-9A-Z]{16}\b")),
-    ("JWT", re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}")),
-    ("credential assignment", re.compile(
-        r"(?i)\b[\w-]*(?:api[_-]?key|token|secret|passw(?:or)?d)[\w-]*[\"']?\s*[:=]\s*[\"']?[^\s\"']{12,}")),
-)
-_OPAQUE = re.compile(r"[A-Za-z0-9+/_=-]{32,}")
-
-
-def _opaque(run: str) -> bool:
-    """A long run that mixes upper case, lower case and digits — key-shaped. Hex (commit SHAs) and words are not."""
-    return any(c.isupper() for c in run) and any(c.islower() for c in run) and any(c.isdigit() for c in run)
-
-
-def secret_kind(text: str, known: tuple = ()) -> str | None:
-    """The kind of token- or key-shaped thing in `text`, or None. Never returns the match itself."""
-    for value in known:
-        if value and value in text:
-            return "configured credential"
-    for kind, pattern in SECRET_SHAPES:
-        if pattern.search(text):
-            return kind
-    if any(_opaque(match.group(0)) for match in _OPAQUE.finditer(text)):
-        return "opaque key-like string"
-    return None
+# The secret shapes live in scripts/secret_scan.py, shared with open_pr's scan before every push.
+SECRET_SHAPES, secret_kind = secret_scan.SECRET_SHAPES, secret_scan.secret_kind
 
 
 def leaked_markup(log_path: pathlib.Path) -> bool:

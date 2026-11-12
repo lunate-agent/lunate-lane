@@ -80,6 +80,11 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    actually lands is checked on the merged commit's parent count. The final report is scanned before posting: anything token- or key-shaped (GitHub
    tokens, `sk-` keys, private-key blocks, AWS keys, JWTs, `key=…`/`token=…` assignments, long opaque strings, or
    the model credential itself) replaces it with a fixed "output withheld" note, and the worker log says so.
+   **Before every push** the diff's added lines (against `origin/main`), the pull request's title and its body
+   are scanned for the shapes that are secrets by construction (private keys, GitHub tokens, `sk-`/`oc_` keys,
+   AWS keys, JWTs) and the model credential. A match pushes nothing, parks the card, comments once naming the kind
+   and where it was found, and logs the same — never the value. (The looser assignment and opaque-string rules
+   apply to the report only: on a diff they would fire on ordinary code such as `cancellationToken = …`.)
    Stopping a worker with `kill <pid>` (SIGTERM, also SIGHUP or SIGINT) kills its Pi session's process group on
    the way out. If the driver is SIGKILLed, its record names the session's group, and the next feeder or
    reviewer tick that finds the driver dead kills that session before clearing the record.
@@ -112,7 +117,8 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
 | `scripts/common.py` | Config loading, the named errors, `gh`/`git`/GraphQL/REST calls that raise instead of returning empty, templates, logs, locks, the cron job wrapper. |
 | `scripts/github.py` | Reads of GitHub's state: milestone cards with dependency edges, open pull requests, one pull request in full, required checks; the check and review verdicts. |
 | `scripts/cards.py` | The feeder's pure decisions: order, pins, WIP and area limits, rework before new work. |
-| `scripts/harness.py` | Runs one headless Pi session with a minimal environment, its own HOME and a stall watchdog; the secret-shape scan; the running-worker records, orphan clean-up and idle-run counts. |
+| `scripts/harness.py` | Runs one headless Pi session under `sandbox-exec` with a minimal environment, its own HOME and a stall watchdog; the running-worker records, orphan clean-up, idle-run and rework counts. |
+| `scripts/secret_scan.py` | The secret shapes, shared by the report scan and the scan before every push. |
 | `scripts/feed.py` | Cron entry point: the feeder. |
 | `scripts/worker.py` | The detached driver for one card's worker session. |
 | `scripts/review.py` | Cron entry point: reviewer dispatch. |

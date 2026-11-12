@@ -30,7 +30,11 @@ class FailurePathTests(unittest.TestCase):
         self.repo = pathlib.Path(self._tmp)
         self.state = TempState()
         self.addCleanup(self.state.close)
-        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=self._tmp, capture_output=True)
+        for args in (["init", "-q", "-b", "main"], ["config", "user.email", "t@example.invalid"],
+                     ["config", "user.name", "t"], ["commit", "-q", "--allow-empty", "-m", "seed"],
+                     ["update-ref", "refs/remotes/origin/main", "HEAD"], ["branch", "lane/x"],
+                     ["branch", "wt/issue-5"]):
+            subprocess.run(["git", *args], cwd=self._tmp, capture_output=True, check=True)
         self.saved = (open_pr._api, open_pr.identity.installation_token, open_pr.push, open_pr._graphql,
                       open_pr.queue_method)
         open_pr.queue_method = lambda token, base: "SQUASH"  # type: ignore[assignment]
@@ -293,6 +297,55 @@ class FailurePathTests(unittest.TestCase):
         self.assertGreater(seen["listed"], 5, "the process listing was read")
         self.assertFalse(seen["leaked"], "the token showed in a process's argv or environment")
         self.assertEqual(list(run_dir.iterdir()), [])
+
+    def commit_on(self, branch, path, text):
+        subprocess.run(["git", "switch", "-q", branch], cwd=self._tmp, check=True)
+        (self.repo / path).write_text(text)
+        subprocess.run(["git", "add", path], cwd=self._tmp, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", f"add {path}"], cwd=self._tmp, check=True)
+        subprocess.run(["git", "switch", "-q", "main"], cwd=self._tmp, check=True)
+
+    def test_a_secret_in_the_diff_stops_the_push_before_github_is_touched(self) -> None:
+        """#12: a real repository; the scan reads the diff's added lines and nothing is minted or pushed."""
+        token = "ghp_" + "Q7w" * 10
+        self.commit_on("lane/x", "Config.cs", f'const string Token = "{token}";\n')
+        open_pr.identity.installation_token = lambda name: (_ for _ in ()).throw(AssertionError("no token"))
+        open_pr.push = lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not push"))
+        with self.assertRaises(open_pr.SecretFound) as caught:
+            open_pr.open_pr(self.repo, "lane/x", "t", "b")
+        self.assertEqual((caught.exception.kind, caught.exception.where), ("GitHub token", "diff's added lines"))
+        self.assertNotIn(token, str(caught.exception))
+        self.assertIn("nothing was pushed", str(caught.exception))
+
+    def test_the_title_and_body_are_scanned_and_a_known_value_is_caught_without_a_shape(self) -> None:
+        jwt = "eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2Q"
+        for title, body, known, where, kind in (
+                (f"fix {jwt}", "b", (), "title", "JWT"),
+                ("t", "the key is plainvalue42", ("plainvalue42",), "body", "configured credential"),
+                ("t", "-----BEGIN RSA PRIVATE KEY-----", (), "body", "private key")):
+            with self.subTest(where=where, kind=kind):
+                with self.assertRaises(open_pr.SecretFound) as caught:
+                    open_pr.scan(self.repo, "lane/x", "main", title, body, known)
+                self.assertEqual((caught.exception.where, caught.exception.kind), (where, kind))
+
+    def test_ordinary_code_and_removed_secrets_pass_the_scan(self) -> None:
+        """No false park on C#'s CancellationToken, a lockfile hash, or a secret the branch removes."""
+        self.commit_on("main", "Old.cs", 'var k = "ghp_' + "R8t" * 10 + '";\n')
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "main"], cwd=self._tmp, check=True)
+        subprocess.run(["git", "branch", "-f", "lane/x", "main"], cwd=self._tmp, check=True)
+        subprocess.run(["git", "switch", "-q", "lane/x"], cwd=self._tmp, check=True)
+        subprocess.run(["git", "rm", "-q", "Old.cs"], cwd=self._tmp, check=True)
+        (self.repo / "Loop.cs").write_text("var cancellationToken = CancellationToken.None;\n"
+                                           '"contentHash": "Zx3k9Qm2Lp7Wv5Rt8Yb1Nc4Hd6Jf0Gs2Ae9Kq3Uw7Xo5Ti=="\n')
+        subprocess.run(["git", "add", "-A"], cwd=self._tmp, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "w"], cwd=self._tmp, check=True)
+        subprocess.run(["git", "switch", "-q", "main"], cwd=self._tmp, check=True)
+        open_pr.scan(self.repo, "lane/x", "main", "Fix the loop", "Closes #3")
+
+    def test_an_unreadable_diff_is_a_failure_not_a_clean_scan(self) -> None:
+        with self.assertRaises(open_pr.OpenPrError) as caught:
+            open_pr.scan(self.repo, "lane/never", "main", "t", "b")
+        self.assertIn("could not be read for the secret scan", str(caught.exception))
 
     def test_a_branch_that_does_not_exist_is_refused_before_pushing(self) -> None:
         with self.assertRaises(open_pr.OpenPrError) as caught:

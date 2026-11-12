@@ -241,7 +241,8 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
             if common.git(worktree, "rev-parse", "HEAD") == start_head:
                 return
             opened["tried"] = True  # one attempt; the end of the session tries again and fails loudly
-            opened["pr"] = dispatch_card.dispatch(worktree, number, arm=False)["number"]
+            opened["pr"] = dispatch_card.dispatch(worktree, number, arm=False,
+                                                  known=(harness.read_credential(cfg),))["number"]
             pr_file.write_text(str(opened["pr"]))
             common.log(job, f"opened #{opened['pr']} at the first commit, auto-merge not armed yet")
         except LaneError as exc:
@@ -268,7 +269,16 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
         if parked_now:
             park(cfg, number, number, "idle", idle)
         return 1
-    result = dispatch_card.dispatch(worktree, number, arm=not found)
+    try:
+        result = dispatch_card.dispatch(worktree, number, arm=not found, known=(harness.read_credential(cfg),))
+    except open_pr.SecretFound as exc:
+        # nothing was pushed; the card stops here until a person looks (#12). The kind, never the value.
+        common.log(job, f"secret scan: {exc}")
+        if harness.park(number, "secret"):
+            park(cfg, number, rework_pr_of(cfg, number) or number, "secret",
+                 detail=f"the secret scan before the push found something shaped like a {exc.kind} in the "
+                        f"{exc.where}; nothing was pushed")
+        return 1
     head = common.git(worktree, "rev-parse", "HEAD")[:9]
     lines = [f"**Worker session** on `{cfg.worker_model}` at `{head}`, {outcome.elapsed // 60} min."]
     if found:
@@ -295,6 +305,16 @@ PARK_WHY = {
     "idle": "{n} worker runs in a row ended with no new commit (cap: {cap})",
     "reworks": "it went back to a worker {n} times (cap: {cap}) and is still not ready",
 }
+
+
+def rework_pr_of(cfg: common.Config, card: int) -> int | None:
+    """The card's open pull request, from the worker record or the pr-number file the run wrote, if any."""
+    path = cfg.state / "scratch" / f"issue-{card}" / "pr-number"
+    try:
+        text = path.read_text().strip() if path.exists() else ""
+    except OSError as exc:
+        raise common.StateError(f"{path} could not be read: {exc}") from exc
+    return int(text) if text.isdigit() else None
 
 
 def park(cfg: common.Config, card: int, target: int, why: str, n: int = 0, detail: str = "") -> None:

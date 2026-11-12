@@ -22,10 +22,11 @@ import urllib.error
 import urllib.request
 
 try:  # imported as scripts.open_pr by the tests, or run as a script
-    from . import common, identity
+    from . import common, identity, secret_scan
 except ImportError:  # pragma: no cover - the script path
     import common
     import identity
+    import secret_scan
 
 SLUG = common.config().slug
 API = "https://api.github.com"
@@ -34,6 +35,29 @@ WORKER_LOGIN = "lunate-worker[bot]"
 
 class OpenPrError(common.LaneError):
     """Anything that stops the pull request being opened. Never carries a token."""
+
+
+class SecretFound(OpenPrError):
+    """What would be pushed or posted holds something secret-shaped. Names the kind and where — never the value."""
+
+    def __init__(self, kind: str, where: str) -> None:
+        super().__init__(f"the {where} holds something shaped like a {kind} — nothing was pushed")
+        self.kind, self.where = kind, where
+
+
+def scan(repo: pathlib.Path, branch: str, base: str, title: str, body: str, known: tuple = ()) -> None:
+    """Before every push (#12): the diff's added lines against the base, the title and the body. A match raises
+    SecretFound; an unreadable diff is a failure, never a clean scan."""
+    try:
+        diff = common.git(repo, "diff", "--no-color", "--no-ext-diff", "--unified=0",
+                          f"origin/{base}...refs/heads/{branch}")
+    except common.GitError as exc:
+        raise OpenPrError(f"the diff of {branch} could not be read for the secret scan: {exc}") from exc
+    added = "\n".join(line[1:] for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
+    for where, text in (("diff's added lines", added), ("title", title), ("body", body)):
+        kind = secret_scan.secret_kind(text, known, strict=True)
+        if kind:
+            raise SecretFound(kind, where)
 
 
 def _api(token: str, method: str, path: str, payload: dict | None = None) -> dict:
@@ -327,7 +351,8 @@ def _owned(existing: dict, branch: str) -> tuple[int, str]:
     return int(number), author
 
 
-def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = "main", arm: bool = True) -> dict:
+def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = "main", arm: bool = True,
+            known: tuple = ()) -> dict:
     """Open or reuse the pull request for `branch`, as the worker identity — always opened as a draft (#5).
 
     `arm=True` is a clean finish: push, mark ready, then arm auto-merge. `arm=False` keeps it a draft with
@@ -337,7 +362,11 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
 
     Raises on anything short of a pull request that exists, is authored by `lunate-worker[bot]`, and whose draft
     and auto-merge state, read back from GitHub, are the ones asked for. The result carries that read.
+
+    Before anything else the diff, title and body are scanned (`scan`, #12): a match pushes and changes nothing.
+    `known` are values that must never leave (the model credential).
     """
+    scan(repo, branch, base, title, body, known)
     token = _worker_token()
 
     # the author is checked before the push: never overwrite a branch whose PR belongs to someone else
