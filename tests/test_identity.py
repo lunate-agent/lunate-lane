@@ -9,6 +9,7 @@ from scripts import identity  # noqa: E402
 
 
 class IdentityTests(unittest.TestCase):
+    @unittest.skipUnless(identity.CONFIG.exists(), "live test: no App config on this machine")
     def test_both_identities_mint_and_read(self) -> None:
         for name in ("worker", "reviewer"):
             with self.subTest(name=name):
