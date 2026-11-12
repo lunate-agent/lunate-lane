@@ -38,6 +38,10 @@ HOME_SEED = (".pi/agent/settings.json", ".pi/agent/models-store.json", ".pi/agen
 # Under the real home: what a session may neither read nor write.
 SANDBOX_DENY = (".config/lunate-lane", ".hermes", ".ssh", ".config/gh", "Library/Keychains")
 SANDBOX_EXEC = "/usr/bin/sandbox-exec"
+# Tools that schedule or start work outside the session (review of #17, round two, item 3). Exec is denied, and so
+# is reading them, so a session cannot copy one into its scratch and run the copy.
+NO_EXEC = ("/bin/launchctl", "/usr/bin/crontab", "/usr/bin/at", "/usr/bin/atq", "/usr/bin/atrm", "/usr/bin/batch",
+           "/usr/bin/osascript", "/usr/bin/open")
 
 
 class HarnessError(LaneError):
@@ -216,6 +220,7 @@ def sandbox_profile(cfg: common.Config, real_home: pathlib.Path | None = None, *
             f"(allow file-write* {' '.join(allowed)})\n"
             f"(deny file-write* {' '.join(pinned)})\n"
             f"(deny file-read* file-write* {deny})\n"
+            f"(deny process-exec* file-read-data {' '.join(f'(literal {_sbpl(b)})' for b in NO_EXEC)})\n"
             # deny, then allow the session's own sandbox: `(target others)` alone is not enforced on this macOS
             # (a probe still read the lane's pids); this form is, and it keeps a session's own children readable
             # (dotnet's test host watches them)

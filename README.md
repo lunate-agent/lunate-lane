@@ -224,7 +224,9 @@ morning digest matching what GitHub shows. Then retire the old jobs in
     `~/Library/LaunchAgents` and Homebrew's prefix are all out of reach — tested by running each write;
   - denies **reading** `~/.config/lunate-lane` (the App keys, `app.json`, the model key, the push's askpass
     files), `~/.hermes`, `~/.ssh`, `~/.config/gh` and `~/Library/Keychains`;
-  - denies process-info calls on any process outside the session's own sandbox.
+  - denies process-info calls on any process outside the session's own sandbox;
+  - denies running — and reading, so they cannot be copied and run — `launchctl`, `crontab`, `at`/`atq`/`atrm`/
+    `batch`, `osascript` and `open`: the tools that would start or schedule work outside the sandbox.
 
   The lane's own git never takes a worktree's location from its pointer files: it passes `--git-dir` and
   `--work-tree` it computes, checks the admin directory's `gitdir` and `commondir` (git follows `commondir` even
@@ -244,7 +246,8 @@ morning digest matching what GitHub shows. Then retire the old jobs in
     token goes. The model key is in the session's own environment by design.
   - **Direct calls to macOS services.** The profile allows everything that is not a file write, a secret read,
     or another process's information — so a session can still talk to system services over Mach/XPC itself
-    (launchd, the keychain's securityd, LaunchServices) rather than through their command-line tools. That is
+    (launchd, the keychain's securityd, LaunchServices) rather than through the command-line tools the
+    profile blocks. That is
     the remaining risk this sandbox does not close; running sessions as a separate macOS user is the follow-up
     that does.
   - Filters and diff drivers named by a branch's `.gitattributes` still run in the lane's git when the

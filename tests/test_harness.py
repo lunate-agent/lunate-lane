@@ -317,6 +317,32 @@ class WriteSandboxTests(HarnessCase):
                                  "main"], capture_output=True, text=True).stdout.split()
         self.assertEqual(len(set(origin)), 1, "neither origin/main nor another branch moved")
 
+    def test_launchctl_crontab_at_osascript_and_open_cannot_be_run_or_copied(self) -> None:
+        """Review of #17, round two, item 3, run for real: a launchd job submitted from the session would outlive it
+        and run unsandboxed."""
+        label = f"lane.sandbox.probe.{os.getpid()}"
+        marker = self.scratch / "launched"
+        self.addCleanup(subprocess.run, ["/bin/launchctl", "remove", label], capture_output=True)
+        attempts = {
+            "launchctl submit": ["/bin/launchctl", "submit", "-l", label, "--", "/usr/bin/touch", str(marker)],
+            "crontab": ["/usr/bin/crontab", "-l"],
+            "at": ["/bin/sh", "-c", f'echo "touch {marker}" | /usr/bin/at now'],
+            "batch": ["/bin/sh", "-c", f'echo "touch {marker}" | /usr/bin/batch'],
+            "osascript": ["/usr/bin/osascript", "-e", "return 1"],
+            "open": ["/usr/bin/open", "-a", "Calculator"],
+            "a copy of launchctl": ["/bin/sh", "-c", f'cp /bin/launchctl "{self.scratch}/lc" && "{self.scratch}/lc" '
+                                                     f'submit -l {label} -- /usr/bin/touch "{marker}"'],
+        }
+        for name, command in attempts.items():
+            with self.subTest(tool=name):
+                done = subprocess.run(harness.sandboxed(command, self.sb), capture_output=True, text=True, timeout=60)
+                self.assertNotEqual(done.returncode, 0, done.stdout)
+                self.assertIn("Operation not permitted", done.stderr + done.stdout)
+        listed = subprocess.run(["/bin/launchctl", "list", label], capture_output=True, text=True)
+        self.assertNotEqual(listed.returncode, 0, "a launchd job from the session exists")
+        self.assertFalse((self.scratch / "lc").exists())
+        self.assertFalse(marker.exists())
+
     def test_dotnet_build_and_test_and_pi_still_work_under_the_profile(self) -> None:
         import shutil
 
