@@ -96,7 +96,8 @@ def capabilities(paths) -> frozenset:
 
 
 def spec_overlap(p: Pull, others) -> tuple[int, frozenset] | None:
-    """The oldest *older* open pull request touching one of `p`'s OpenSpec capabilities, and the shared ones.
+    """The oldest *older*, ready (not draft) open pull request touching one of `p`'s OpenSpec capabilities, and
+    the shared ones. A draft does not hold anything back: it may stay unfinished for days (review of #17).
 
     A pull request whose files were not read cannot be cleared: that is a refusal, not 'no overlap'.
     """
@@ -108,6 +109,8 @@ def spec_overlap(p: Pull, others) -> tuple[int, frozenset] | None:
     for other in sorted(others, key=lambda o: o.number):
         if other.number >= p.number:
             break
+        if other.draft:
+            continue
         if other.files is None:
             raise GhError(f"#{other.number}'s files were not read — cannot clear #{p.number} of a spec overlap")
         shared = mine & other.capabilities
@@ -195,7 +198,7 @@ def milestone_cards(cfg: common.Config) -> list[Card]:
 
 OPEN_PULLS = """query($owner:String!,$name:String!,$cursor:String){repository(owner:$owner,name:$name){
 pullRequests(first:50,after:$cursor,states:OPEN){pageInfo{hasNextPage endCursor}
-nodes{number title author{login} headRefName closingIssuesReferences(first:10){pageInfo{hasNextPage} nodes{number}}
+nodes{number title isDraft author{login} headRefName closingIssuesReferences(first:10){pageInfo{hasNextPage} nodes{number}}
 files(first:100){pageInfo{hasNextPage} nodes{path}}}}}}"""
 
 
@@ -204,6 +207,7 @@ def open_pulls(cfg: common.Config) -> list[Pull]:
     nodes = _paged(OPEN_PULLS, ("repository", "pullRequests"), "the open pull requests",
                    owner=cfg.owner, name=cfg.name)
     return [Pull(number=int(n["number"]), title=str(n.get("title") or ""), author=login(n.get("author")),
+                 draft=bool(n.get("isDraft")),
                  branch=str(n.get("headRefName") or ""),
                  cards=tuple(i["number"] for i in _complete(n["closingIssuesReferences"], f"#{n['number']}'s issues")),
                  files=_files(cfg, int(n["number"]), n["files"]))

@@ -139,6 +139,19 @@ class SpecOverlapTests(unittest.TestCase):
         self.assertIsNone(self.overlap(4, [1, 2, 3]))
         self.assertIsNone(self.overlap(2, [1, 3, 4]))
 
+    def test_an_older_draft_does_not_hold_a_newer_one_back_but_an_older_ready_one_does(self) -> None:
+        mine = pull(3, 3, files=("openspec/changes/x/specs/agent-loop/spec.md",))
+        draft = pull(1, 1, files=("openspec/specs/agent-loop/spec.md",), draft=True)
+        ready = pull(2, 2, files=("openspec/specs/agent-loop/spec.md",))
+        self.assertIsNone(github.spec_overlap(mine, [draft]))
+        self.assertEqual(github.spec_overlap(mine, [draft, ready]), (2, frozenset({"agent-loop"})))
+
+    def test_open_pulls_read_their_draft_state(self) -> None:
+        node = {"number": 7, "title": "T", "isDraft": True, "author": {"login": "x"}, "headRefName": "b",
+                "closingIssuesReferences": page([]), "files": page([])}
+        with mock.patch.object(common, "graphql", return_value={"repository": {"pullRequests": page([node])}}):
+            self.assertTrue(github.open_pulls(CFG)[0].draft)
+
     def test_files_that_were_not_read_are_a_refusal_not_no_overlap(self) -> None:
         with self.assertRaises(GhError):
             github.spec_overlap(pull(3, 3, files=None), [])
