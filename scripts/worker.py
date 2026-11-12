@@ -355,7 +355,8 @@ def main() -> int:
             common.log(job, f"worker {live} is already running this card — leaving")
             return 1
         if live is None:  # started by hand rather than by the feeder, which records the worker itself
-            if args.rework:  # the feeder counts its own reworks; a hand-started one counts here, before anything
+            harness.note_attempt(args.issue)  # the feeder counts its own launches; a hand-started one counts here
+            if args.rework:
                 harness.note_rework(args.issue, args.rework)
             labels = [label["name"] for label in dispatch_card.card(cfg.checkout, args.issue).get("labels") or []]
             harness.record_worker(args.issue, pid, cards.areas_of(labels, cfg.area_prefix), args.rework)

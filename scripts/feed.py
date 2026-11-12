@@ -105,9 +105,19 @@ def tick(dry_run: bool = False) -> None:
                 worker.park(cfg, launch.card, launch.rework_pr, "reworks", rounds)
             common.log(JOB, f"parked card #{launch.card} after {rounds} rework rounds on #{launch.rework_pr}")
             continue
+        idle = harness.idle_runs(launch.card)
+        if idle >= harness.IDLE_RUN_LIMIT:  # runs that never got far enough to finish count too
+            if dry_run:
+                common.log(JOB, f"would park card #{launch.card} instead of {what} — {idle} runs with no new commit")
+                continue
+            if harness.park(launch.card, "idle"):
+                worker.park(cfg, launch.card, launch.rework_pr or launch.card, "idle", idle)
+            common.log(JOB, f"parked card #{launch.card} after {idle} runs with no new commit")
+            continue
         if dry_run:
             common.log(JOB, f"would start {what}")
             continue
+        harness.note_attempt(launch.card)  # before anything that can fail, as for rework rounds
         if launch.rework_pr:
             # counted before anything that can fail — the worker's own setup included — so a rework that keeps
             # failing early still reaches the cap and is parked, instead of relaunching every tick

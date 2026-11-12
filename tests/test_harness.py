@@ -470,6 +470,7 @@ class WorkerRecordTests(HarnessCase):
         harness.note_run(3, True)
         self.assertEqual(harness.parked_details(), {3: "reworks"})
         for _ in range(3):
+            harness.note_attempt(4)
             harness.note_run(4, False)
         self.assertEqual(harness.parked_details(), {3: "reworks", 4: "idle"})
         harness.note_run(4, True)

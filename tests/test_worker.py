@@ -495,6 +495,7 @@ class DriveTests(RepoCase):
 
     def test_three_runs_without_a_new_commit_park_the_card_once_and_say_so_on_the_issue(self) -> None:
         for run in range(1, 5):
+            harness.note_attempt(3)  # what the feeder does at each launch
             with self.fake_session(commit=False):
                 self.assertEqual(worker.drive(self.cfg, 3, None), 1)
             self.assertEqual(harness.parked_cards(), frozenset({3}) if run >= 3 else frozenset())
@@ -532,6 +533,7 @@ class DriveTests(RepoCase):
         with mock.patch.object(github, "pull", return_value=pull(77, 3, head=sha,
                                                                  reviews=[review("CHANGES_REQUESTED", commit=sha)])):
             for _ in range(3):
+                harness.note_attempt(3)
                 with self.fake_session(commit=False):
                     worker.drive(self.cfg, 3, 77)
         parking = [c for c in self.comments if "is parked" in c[1]]
@@ -539,10 +541,19 @@ class DriveTests(RepoCase):
 
     def test_a_new_commit_resets_the_idle_count(self) -> None:
         for commit in (False, False, True, False, False):
+            harness.note_attempt(3)
             with self.fake_session(commit=commit):
                 worker.drive(self.cfg, 3, None)
-        self.assertEqual(harness.parked_cards(), frozenset())
+        self.assertEqual((harness.parked_cards(), harness.idle_runs(3)), (frozenset(), 2))
+        harness.note_attempt(3)
         self.assertEqual(harness.note_run(3, False), (3, True))
+
+    def test_a_hand_started_new_card_counts_its_attempt_before_anything_can_fail(self) -> None:
+        with mock.patch.object(sys, "argv", ["worker.py", "--issue", "3"]), \
+                mock.patch.object(harness, "live_pid", return_value=None), \
+                mock.patch.object(worker, "prepare_worktree", side_effect=GitError("worktree add failed (128)")):
+            self.assertEqual(worker.main(), 1)
+        self.assertEqual(harness.idle_runs(3), 1)
 
     def test_the_session_group_is_recorded_for_clean_up(self) -> None:
         harness.record_worker(3, os.getpid(), frozenset(), None)

@@ -633,9 +633,25 @@ def _write_attempts(path: pathlib.Path, data: dict) -> None:
         raise StateError(f"the attempts record {path} could not be written: {exc}") from exc
 
 
+def note_attempt(card: int) -> int:
+    """Count a worker run as idle *before* it starts — by the feeder, or by a hand-started worker — so a run whose
+    setup keeps failing (and never reaches its finish) still reaches the cap. A run that ends with a new commit
+    resets the count (note_run). Returns the idle runs so far, this one included."""
+    path = _attempts(card)
+    data = _read_attempts(path)
+    data["idle_runs"] += 1
+    _write_attempts(path, data)
+    return data["idle_runs"]
+
+
+def idle_runs(card: int) -> int:
+    return _read_attempts(_attempts(card))["idle_runs"]
+
+
 def note_run(card: int, new_commit: bool) -> tuple[int, bool]:
-    """Count a finished run: a new commit resets the idle count (and lifts an idle park), none adds one. Rework
-    rounds are kept. Returns (idle runs, parked just now)."""
+    """A finished run: a new commit resets the idle count (and lifts an idle park); none leaves the count as
+    note_attempt already set it and parks the card once it is at the cap. Rework rounds are kept.
+    Returns (idle runs, parked just now)."""
     path = _attempts(card)
     data = _read_attempts(path)
     if new_commit:
@@ -644,7 +660,6 @@ def note_run(card: int, new_commit: bool) -> tuple[int, bool]:
             data["parked"], data["reason"] = False, ""
         _write_attempts(path, data)
         return 0, False
-    data["idle_runs"] += 1
     parked_now = data["idle_runs"] >= IDLE_RUN_LIMIT and not data["parked"]
     if parked_now:
         data["parked"], data["reason"] = True, "idle"

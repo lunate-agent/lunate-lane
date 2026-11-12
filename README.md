@@ -66,7 +66,9 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      feeder parks it instead of starting a fourth rework. The feeder no longer starts or reworks a parked card, its
      open pull request still counts toward WIP, the run that parked it says so once in a comment on the pull
      request (on the issue if there is none), and the digest lists it. A new commit resets the idle-run count (and
-     lifts an idle park) but not the rework rounds. To give a parked card back to the lane, delete
+     lifts an idle park) but not the rework rounds. Both counts are taken when the feeder launches a run, before
+     anything that can fail, so a run whose setup keeps failing (a held worktree, a closed issue, a broken
+     checkout) still reaches its cap and is parked on the next tick instead of relaunching forever. To give a parked card back to the lane, delete
      `<state>/attempts/<card>.json`; that clears both counts.
    - **re-arming**: a worker pull request that is ready, approved at its head, green, not conflicting, neither
      queued nor armed — the state a clean finish leaves when arming fails after it was marked ready — is armed

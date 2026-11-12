@@ -78,6 +78,7 @@ class FeedTests(unittest.TestCase):
         diverged branch, a held worktree, a refused draft) is parked after three ticks instead of forever."""
         from scripts import open_pr
 
+        github.milestone_cards.return_value = []  # only the rework, here
         comments = []
         with mock.patch.object(open_pr, "comment", side_effect=lambda n, body: comments.append(n)):
             for tick in range(1, 6):
@@ -87,6 +88,50 @@ class FeedTests(unittest.TestCase):
         self.assertEqual([l.rework_pr for l in self.started].count(50), 3)
         self.assertEqual(harness.parked_details(), {9: "reworks"})
         self.assertEqual(comments, [50])
+
+    def test_a_new_card_whose_setup_keeps_failing_is_parked_after_three_ticks(self) -> None:
+        """Every launch counts an idle run before anything can fail: a new card whose worker dies before its
+        finish (a held worktree, a closed issue, a broken checkout) is parked on the fourth tick, once, on
+        the issue — instead of relaunching every tick."""
+        from scripts import open_pr
+
+        github.milestone_cards.return_value = [card(2, "kind/bug")]
+        github.open_pulls.return_value = []
+        comments = []
+        with mock.patch.object(open_pr, "comment", side_effect=lambda n, body: comments.append((n, body))):
+            for tick in range(1, 6):
+                feed.main()
+                self.assertEqual(harness.idle_runs(2), min(tick, 3), f"tick {tick}")
+        self.assertEqual([l.card for l in self.started], [2, 2, 2])
+        self.assertEqual(harness.parked_details(), {2: "idle"})
+        self.assertEqual(len(comments), 1)
+        self.assertEqual(comments[0][0], 2, "no pull request: the issue gets the comment")
+        self.assertIn("3 worker runs in a row ended with no new commit", comments[0][1])
+        log = (self.state.cfg.state / "logs" / "feed.log").read_text()
+        self.assertIn("parked card #2 after 3 runs with no new commit", log)
+        self.assertIn("#2 is parked after runs with no new commit — left for a person", log)
+
+    def test_a_dry_run_counts_nothing_and_only_says_it_would_park(self) -> None:
+        github.milestone_cards.return_value = [card(2)]
+        github.open_pulls.return_value = []
+        with mock.patch.object(sys, "argv", ["feed.py", "--dry-run"]):
+            feed.main()
+            self.assertEqual(harness.idle_runs(2), 0)
+            for _ in range(3):
+                harness.note_attempt(2)
+            feed.main()
+        self.assertEqual(harness.parked_details(), {})
+        self.assertIn("would park card #2 instead of card #2 — 3 runs with no new commit",
+                      (self.state.cfg.state / "logs" / "feed.log").read_text())
+
+    def test_a_run_that_makes_a_commit_resets_what_its_launch_counted(self) -> None:
+        github.milestone_cards.return_value = [card(2)]
+        github.open_pulls.return_value = []
+        feed.main()
+        feed.main()
+        self.assertEqual(harness.idle_runs(2), 2)
+        harness.note_run(2, True)  # the worker's finish, with a new commit
+        self.assertEqual(harness.idle_runs(2), 0)
 
     def test_a_failed_start_still_counts_the_round(self) -> None:
         feed.start.side_effect = common.LaneError("the worker for #9 could not be started (OSError)")
