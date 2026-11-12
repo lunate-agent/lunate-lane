@@ -25,6 +25,8 @@ from scripts import cards, common, dispatch_card, github, harness, open_pr  # no
 from scripts.common import GitError, LaneError  # noqa: E402
 
 COMMENT_LIMIT = 60000
+WITHHELD = ("(Output withheld: the session's final message contained something shaped like a {kind}. "
+            "It stays in the lane's local session log.)")
 
 
 def ref_exists(repo: pathlib.Path, ref: str) -> bool:
@@ -165,6 +167,11 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
     if found:
         lines.append(f"**Incomplete — auto-merge is {result['auto_merge']}:** " + "; ".join(found) + ".")
     report = harness.last_text(session_log).strip() or "(the session left no final message)"
+    kind = harness.secret_kind(report, (harness.read_credential(cfg),))
+    if kind:
+        common.log(job, f"the session's final message holds something shaped like a {kind} — not posted; "
+                        f"it stays in {session_log}")
+        report = WITHHELD.format(kind=kind)
     lines.append("\n" + report)
     open_pr.comment(result["number"], "\n".join(lines)[:COMMENT_LIMIT])
     common.log(job, f"#{result['number']} pushed at {head}, auto-merge {result['auto_merge']}"

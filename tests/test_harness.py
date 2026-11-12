@@ -75,6 +75,35 @@ class CredentialAndEnvTests(HarnessCase):
             harness.argv(self.cfg, "bare-model", self.state.root, "s1", "p")
 
 
+class SecretShapeTests(unittest.TestCase):
+    def test_token_and_key_shapes_are_caught(self) -> None:
+        cases = {
+            "GitHub token": ["ghs_" + "a" * 36, "ghp_" + "Ab1" * 12, "github_pat_" + "11ABC_" * 6],
+            "API key": ["sk-proj-" + "x" * 30],
+            "private key": ["-----BEGIN RSA PRIVATE KEY-----\nMIIE", "-----BEGIN PRIVATE KEY-----"],
+            "AWS access key": ["AKIAIOSFODNN7EXAMPLE"],
+            "JWT": ["eyJhbGciOiJSUzI1NiJ9.eyJpc3MiOjEyMzR9.c2lnbmF0dXJlLXZhbHVl"],
+            "credential assignment": ["OPENCODE_API_KEY=abcdefabcdefabcdef", "password: hunter2hunter2!"],
+            "opaque key-like string": ["value Zx9Qw8Er7Ty6Ui5Op4As3Df2Gh1Jk0LmNb here"],
+        }
+        for kind, texts in cases.items():
+            for text in texts:
+                with self.subTest(text=text):
+                    self.assertEqual(harness.secret_kind(f"before {text} after"), kind)
+
+    def test_a_known_value_is_caught_even_when_it_has_no_shape(self) -> None:
+        self.assertEqual(harness.secret_kind("it is plainword", ("plainword",)), "configured credential")
+        self.assertIsNone(harness.secret_kind("nothing here", ("",)))
+
+    def test_ordinary_reports_pass(self) -> None:
+        for text in ("1. met — src/Lunate.Tui/Shell.cs:42 (commit 3f9a2c1d4e5b6a7980f1e2d3c4b5a69788776655)",
+                     "Tests: dotnet test --filter FullyQualifiedName~Lunate.Tui.ShellTests passed (12/12)",
+                     "The token budget is described in docs/adr/0007-session-tokens.md",
+                     "Refactored ConfigurationLoaderServiceFactoryProvider into two classes"):
+            with self.subTest(text=text):
+                self.assertIsNone(harness.secret_kind(text))
+
+
 class SessionTests(HarnessCase):
     def run_fake(self, **kw):
         return harness.run_session(self.cfg, model="opencode-go/m", worktree=self.worktree, prompt="brief",

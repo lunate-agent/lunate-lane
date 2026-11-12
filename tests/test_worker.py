@@ -131,6 +131,7 @@ class DriveTests(RepoCase):
             mock.patch.object(dispatch_card, "card", return_value=dict(ISSUE)),
             mock.patch.object(dispatch_card, "dispatch", side_effect=self.dispatch),
             mock.patch.object(open_pr, "comment", side_effect=lambda n, body: self.comments.append((n, body))),
+            mock.patch.object(harness, "read_credential", return_value="model-credential-value-1234"),
         ]
         for patch in self.patches:
             patch.start()
@@ -263,6 +264,23 @@ class DriveTests(RepoCase):
         self.assertEqual(pushed, [False], "the push happened only after auto-merge was off")
         self.assertIn("auto-merge is not armed", self.comments[0][1])
         self.assertIn("auto-merge not armed", (self.cfg.state / "logs" / "worker-3.log").read_text())
+
+    def test_a_token_in_the_final_message_is_withheld_and_logged(self) -> None:
+        token = "ghs_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"
+        for text, kind in ((f"done, and here is {token}", "GitHub token"),
+                           ("my key is model-credential-value-1234", "configured credential")):
+            with self.subTest(kind=kind):
+                self.comments.clear()
+                with self.fake_session(text=text):
+                    worker.drive(self.cfg, 3, None)
+                body = self.comments[0][1]
+                self.assertIn("Output withheld", body)
+                self.assertIn(kind, body)
+                self.assertNotIn(token, body)
+                self.assertNotIn("model-credential-value-1234", body)
+                log = (self.cfg.state / "logs" / "worker-3.log").read_text()
+                self.assertIn(f"shaped like a {kind} — not posted", log)
+                self.assertNotIn(token, log)
 
     def test_a_closed_issue_is_never_worked(self) -> None:
         dispatch_card.card.side_effect = dispatch_card.CardError("issue #3 is CLOSED, not open")
