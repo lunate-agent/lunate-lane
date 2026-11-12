@@ -33,8 +33,24 @@ class HarnessCase(unittest.TestCase):
                                 session_timeout=30)
         self.worktree = root / "wt"
         self.worktree.mkdir()
+        # the real home a session must not see, with Pi's files and things that are not Pi's
+        self.real_home = root / "realhome"
+        for relative, text in ((".pi/agent/settings.json", "{}"), (".pi/agent/models-store.json", "{}"),
+                               (".pi/agent/bin/fd", "fd"), (".pi/agent/auth.json", "{\"k\": \"secret\"}"),
+                               (".config/lunate-lane/app.json", "{}"), (".ssh/id_ed25519", "key"),
+                               (".gitconfig", "[credential]\n\thelper = osxkeychain\n")):
+            (self.real_home / relative).parent.mkdir(parents=True, exist_ok=True)
+            (self.real_home / relative).write_text(text)
+        self.home_patch = mock.patch.object(harness.pathlib.Path, "home", return_value=self.real_home)
+        self.home_patch.start()
+        self.cfg.checkout.mkdir(parents=True, exist_ok=True)
+        subprocess.run(["git", "init", "-q", str(self.cfg.checkout)], check=True)
+        subprocess.run(["git", "-C", str(self.cfg.checkout), "config", "user.name", "Lane Test"], check=True)
+        subprocess.run(["git", "-C", str(self.cfg.checkout), "config", "user.email", "lane@example.invalid"],
+                       check=True)
 
     def tearDown(self) -> None:
+        self.home_patch.stop()
         self.state.close()
 
     def fake_pi(self, body: str) -> None:
@@ -64,6 +80,37 @@ class CredentialAndEnvTests(HarnessCase):
         self.assertEqual(env["GIT_CONFIG_VALUE_0"], "")
         self.assertEqual(list(pathlib.Path(env["GH_CONFIG_DIR"]).iterdir()), [])
         self.assertEqual(env["OPENCODE_API_KEY"], SECRET)
+
+    def test_the_session_gets_a_home_of_its_own_with_only_what_pi_needs(self) -> None:
+        scratch = self.state.root / "scratch"
+        env = harness.session_env(self.cfg, scratch)
+        home = pathlib.Path(env["HOME"])
+        self.assertEqual(home, scratch / "home")
+        self.assertNotEqual(home, self.real_home)
+        files = sorted(str(f.relative_to(home)) for f in home.rglob("*") if f.is_file())
+        self.assertEqual(files, [".gitconfig", ".pi/agent/bin/fd", ".pi/agent/models-store.json",
+                                 ".pi/agent/settings.json"])
+        self.assertFalse((home / ".pi/agent/auth.json").exists())
+        self.assertFalse((home / ".pi/agent/settings.json").is_symlink())
+        gitconfig = (home / ".gitconfig").read_text()
+        self.assertIn("name = Lane Test", gitconfig)
+        self.assertNotIn("credential", gitconfig)
+
+    def test_nothing_a_session_leaves_in_its_home_reaches_the_next(self) -> None:
+        scratch = self.state.root / "scratch"
+        home = pathlib.Path(harness.session_env(self.cfg, scratch)["HOME"])
+        (home / ".bashrc").write_text("planted")
+        (home / ".pi/agent/settings.json").write_text("tampered")
+        harness.session_env(self.cfg, scratch)
+        self.assertFalse((home / ".bashrc").exists())
+        self.assertEqual((home / ".pi/agent/settings.json").read_text(), "{}")
+
+    def test_an_unreadable_checkout_identity_is_a_named_failure(self) -> None:
+        import shutil
+
+        shutil.rmtree(self.cfg.checkout)
+        with self.assertRaises(harness.HarnessError):
+            harness.session_env(self.cfg, self.state.root / "scratch")
 
     def test_the_credential_never_reaches_argv(self) -> None:
         argv = harness.argv(self.cfg, "opencode-go/model", self.state.root, "s1", "the brief")

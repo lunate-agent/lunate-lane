@@ -3,10 +3,12 @@
 Vendored from the old lane's `worker_harness.py` (the Pi adapter, its minimal environment and the leaked
 tool-markup check) and `lunate-claims.py` (a pid file per running worker), cut down to what this lane uses.
 
-A session gets a minimal environment: PATH (with the pinned .NET SDK first when it exists), HOME, a private
-TMPDIR, and the model credential. It gets no GitHub credential: `gh` points at an empty config directory and
-git's credential helpers are blanked, so a session cannot push or open a pull request — the lane does that,
-as the worker identity, after reading what the session left behind.
+A session gets a minimal environment: PATH (with the pinned .NET SDK first when it exists), a HOME of its own
+under its scratch directory (seeded with only what Pi needs), a private TMPDIR, and the model credential. It is
+handed no GitHub credential: `gh` points at an empty config directory and git's credential helpers are blanked,
+so the lane, not the session, pushes and opens pull requests as the worker identity. This is not a sandbox: the
+session runs as the same macOS user and could still read files outside its HOME by absolute path (README,
+"Known limitations").
 """
 
 from __future__ import annotations
@@ -16,6 +18,7 @@ import json
 import os
 import pathlib
 import re
+import shutil
 import signal
 import subprocess
 import time
@@ -26,6 +29,8 @@ from scripts.common import LaneError, StateError
 
 DEFAULT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 TOOL_MARKUP = ("</arg_value>", "</arg_key>", "<arg_value>", "<arg_key>")
+# What Pi needs from the real home, copied into the session's own. Not auth.json: the credential is in the env.
+HOME_SEED = (".pi/agent/settings.json", ".pi/agent/models-store.json", ".pi/agent/bin/fd")
 
 
 class HarnessError(LaneError):
@@ -59,19 +64,66 @@ def read_credential(cfg: common.Config) -> str:
     raise HarnessError(f"{key} is not set in {path}")
 
 
-def session_env(cfg: common.Config, scratch: pathlib.Path, extra: dict | None = None) -> dict:
-    """The whole environment a session gets — nothing inherited beyond PATH."""
+def _git_identity(cfg: common.Config) -> dict:
+    """user.name and user.email as the checkout sees them. Unset (git's exit 1) is left out; a failure raises."""
+    found = {}
+    for key in ("user.name", "user.email"):
+        try:
+            done = subprocess.run(["git", "-C", str(cfg.checkout), "config", "--get", key],
+                                  capture_output=True, text=True, timeout=30)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise HarnessError(f"git could not read {key} in {cfg.checkout} ({exc.__class__.__name__})") from exc
+        if done.returncode not in (0, 1):
+            raise HarnessError(f"git could not read {key} in {cfg.checkout}: {done.stderr.strip()[:160]}")
+        if done.returncode == 0 and done.stdout.strip():
+            found[key.split(".")[1]] = done.stdout.strip()
+    return found
+
+
+def session_home(cfg: common.Config, scratch: pathlib.Path, real_home: pathlib.Path | None = None) -> pathlib.Path:
+    """A fresh HOME for one session: Pi's settings, its model cache and its `fd`, and a git identity — no more.
+
+    Wiped and reseeded each run, so nothing one session leaves there reaches the next. The real home's dotfiles,
+    `~/.config` (the App keys' config), `~/.ssh` and Pi's `auth.json` are not in it.
+    """
+    real_home = real_home or pathlib.Path.home()
+    home = scratch / "home"
+    try:
+        if home.exists():
+            shutil.rmtree(home)
+        home.mkdir(parents=True)
+        for relative in HOME_SEED:
+            source = real_home / relative
+            if source.is_file():
+                (home / relative).parent.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(source, home / relative)
+    except OSError as exc:
+        raise HarnessError(f"the session home {home} could not be prepared ({exc.__class__.__name__}: {exc})") from exc
+    identity = _git_identity(cfg)
+    if identity:
+        lines = ["[user]"] + [f"\t{key} = {value}" for key, value in identity.items()]
+        (home / ".gitconfig").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return home
+
+
+def session_env(cfg: common.Config, scratch: pathlib.Path, extra: dict | None = None,
+                real_home: pathlib.Path | None = None) -> dict:
+    """The whole environment a session gets — nothing inherited beyond PATH, and a HOME of its own."""
+    real_home = real_home or pathlib.Path.home()
     nogh = scratch / "gh-config"
     nogh.mkdir(parents=True, exist_ok=True)
     path = os.environ.get("PATH") or DEFAULT_PATH
-    env = {"PATH": path, "HOME": str(pathlib.Path.home()), "TMPDIR": str(scratch),
+    env = {"PATH": path, "HOME": str(session_home(cfg, scratch, real_home)), "TMPDIR": str(scratch),
            "GH_CONFIG_DIR": str(nogh), "GIT_TERMINAL_PROMPT": "0",
            "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "",
            cfg.harness["credential_env"]: read_credential(cfg)}
-    dotnet = pathlib.Path.home() / ".dotnet"
+    dotnet = real_home / ".dotnet"
     if (dotnet / "dotnet").exists():
         env["PATH"] = f"{dotnet}{os.pathsep}{path}"
         env["DOTNET_ROOT"] = str(dotnet)
+    packages = real_home / ".nuget" / "packages"
+    if packages.is_dir():
+        env["NUGET_PACKAGES"] = str(packages)  # a package cache, no credentials: spares a full restore per run
     env.update(extra or {})
     return env
 
