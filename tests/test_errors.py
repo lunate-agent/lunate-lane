@@ -107,15 +107,14 @@ class OpenPrTests(Case):
             open_pr.push(self.state.root / "gone", "wt/issue-1", "t")
         self.assertIn("git could not check", str(caught.exception))
 
-    def test_an_unmakeable_hooks_directory_is_an_open_pr_error(self) -> None:
+    def test_an_unmakeable_push_mirror_is_an_open_pr_error(self) -> None:
         _, clone = origin_and_clone(self.state.root)
         git(clone, "branch", "wt/issue-1")
-        blocker = self.state.root / "tmpfile"
-        blocker.write_text("x")
-        with mock.patch.dict(os.environ, {"TMPDIR": str(blocker)}):
-            with self.assertRaises(open_pr.OpenPrError) as caught:
-                open_pr.push(clone, "wt/issue-1", "t")
-        self.assertIn("hooks directory", str(caught.exception))
+        (self.cfg.state / "push-mirror.git").parent.mkdir(parents=True, exist_ok=True)
+        (self.cfg.state / "push-mirror.git").write_text("a file where the mirror goes")
+        with self.assertRaises(open_pr.OpenPrError) as caught:
+            open_pr.push(clone, "wt/issue-1", "t", url=f"file://{self.state.root}/nowhere.git")
+        self.assertIn("push mirror", str(caught.exception))
 
     def test_a_missing_body_file_is_a_named_failure_from_main(self) -> None:
         argv = ["open_pr.py", "--branch", "b", "--title", "t", "--body-file", str(self.state.root / "none.md")]

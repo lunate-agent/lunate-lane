@@ -13,6 +13,7 @@ import sys
 import tempfile
 import threading
 import unittest
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from scripts import open_pr  # noqa: E402
@@ -244,35 +245,35 @@ class FailurePathTests(unittest.TestCase):
         for args in (["config", "user.email", "w@example.invalid"], ["config", "user.name", "w"],
                      ["switch", "-q", "-c", "wt/issue-3"], ["commit", "-q", "--allow-empty", "-m", "one"]):
             subprocess.run(["git", "-C", str(work), *args], check=True)
-        open_pr.push(work, "wt/issue-3", "token-for-tests")
+        open_pr.push(work, "wt/issue-3", "token-for-tests", url=str(origin))
         first = subprocess.run(["git", "-C", str(origin), "rev-parse", "wt/issue-3"], capture_output=True,
                                text=True).stdout.strip()
         subprocess.run(["git", "-C", str(work), "commit", "-q", "--amend", "--allow-empty", "-m", "rewritten"],
                        check=True)
         with self.assertRaises(open_pr.OpenPrError) as caught:
-            open_pr.push(work, "wt/issue-3", "token-for-tests")
+            open_pr.push(work, "wt/issue-3", "token-for-tests", url=str(origin))
         self.assertIn("refused", str(caught.exception))
         self.assertEqual(subprocess.run(["git", "-C", str(origin), "rev-parse", "wt/issue-3"], capture_output=True,
                                         text=True).stdout.strip(), first)
 
-    def test_the_push_token_reaches_git_through_askpass_and_no_process_shows_it(self) -> None:
-        """#10: a real git against a local server that demands basic auth. While git waits on the authenticated
-        request, no process's argv or environment holds the token; the askpass files are gone afterwards."""
-        token = "ghs_" + "Zz9" * 12
-        seen: dict = {}
+    def server(self, token: str = ""):
+        """A local stand-in for a git host that demands basic auth; it records every request and what it got."""
+        seen: dict = {"requests": 0, "auth": []}
 
         class Server(http.server.BaseHTTPRequestHandler):
             def do_GET(self):  # noqa: N802
+                seen["requests"] += 1
                 auth = self.headers.get("Authorization")
                 if not auth or base64.b64decode(auth.split()[1]).decode().endswith(":"):  # no password: 401
                     self.send_response(401)
                     self.send_header("WWW-Authenticate", 'Basic realm="lane"')
                     self.end_headers()
                     return
-                seen["auth"] = base64.b64decode(auth.split()[1]).decode()
-                listing = subprocess.run(["ps", "-E", "-ww", "-axo", "command"], capture_output=True, text=True)
-                seen["listed"] = listing.stdout.count("\n")
-                seen["leaked"] = token in listing.stdout
+                seen["auth"].append(base64.b64decode(auth.split()[1]).decode())
+                if token:
+                    listing = subprocess.run(["ps", "-E", "-ww", "-axo", "command"], capture_output=True, text=True)
+                    seen["listed"] = listing.stdout.count("\n")
+                    seen["leaked"] = token in listing.stdout
                 self.send_response(404)
                 self.end_headers()
 
@@ -281,22 +282,101 @@ class FailurePathTests(unittest.TestCase):
 
         server = http.server.HTTPServer(("127.0.0.1", 0), Server)
         threading.Thread(target=server.serve_forever, daemon=True).start()
+        self.addCleanup(server.server_close)
         self.addCleanup(server.shutdown)
+        return f"http://x-access-token@127.0.0.1:{server.server_port}/r.git", seen
+
+    def real_push(self):
+        open_pr.push = self.saved[2]
+
+    def test_the_push_token_reaches_git_through_askpass_and_no_process_shows_it(self) -> None:
+        """#10: a real push from the mirror to a local server that demands basic auth. While git waits on the
+        authenticated request, no process's argv or environment holds the token; the askpass files are gone."""
+        self.real_push()
+        token = "ghs_" + "Zz9" * 12
+        url, seen = self.server(token)
         run_dir = open_pr._secret_dir()
         self.assertEqual(oct(run_dir.stat().st_mode & 0o777), "0o700")
-        env = open_pr.push_env(token, run_dir, self.repo / "hooks", host="127.0.0.1")
+        env = open_pr.push_env(token, run_dir, url)
         token_file = pathlib.Path(env["LANE_PUSH_FILES"].split(os.pathsep)[0])
         self.assertEqual(oct(token_file.stat().st_mode & 0o777), "0o600")
         self.assertNotIn(token, "".join(f"{k}={v}" for k, v in env.items()))
-        try:
-            subprocess.run(["git", "ls-remote", f"http://x-access-token@127.0.0.1:{server.server_port}/r.git"],
-                           env=env, capture_output=True, text=True, timeout=60)
-        finally:
-            open_pr._drop_push_files(env)
-        self.assertEqual(seen.get("auth"), f"x-access-token:{token}")
+        open_pr._drop_push_files(env)
+        with self.assertRaises(open_pr.OpenPrError):  # the stand-in answers 404 once authenticated
+            open_pr.push(self.repo, "lane/x", token, url=url)
+        self.assertEqual(seen["auth"], [f"x-access-token:{token}"])
         self.assertGreater(seen["listed"], 5, "the process listing was read")
         self.assertFalse(seen["leaked"], "the token showed in a process's argv or environment")
         self.assertEqual(list(run_dir.iterdir()), [])
+
+    def test_a_pushurl_or_insteadof_in_the_checkout_cannot_redirect_the_push(self) -> None:
+        """Review of #17, item 2, attack one: a session rewrites the checkout's config. The push still goes only
+        to the explicit URL, from the lane's mirror."""
+        self.real_push()
+        token = "ghs_" + "Ab1" * 12
+        good, good_seen = self.server()
+        evil, evil_seen = self.server()
+        good_prefix, evil_prefix = good.rsplit("/", 1)[0] + "/", evil.rsplit("/", 1)[0] + "/"
+        for key, value in (("remote.origin.url", evil), ("remote.origin.pushurl", evil),
+                           (f"url.{evil_prefix}.insteadOf", good_prefix),
+                           (f"url.{evil_prefix}.pushInsteadOf", good_prefix),
+                           ("url.http://127.0.0.1:1/.insteadOf", "https://github.com/")):
+            subprocess.run(["git", "config", "--add", key, value], cwd=self._tmp, check=True)
+        with self.assertRaises(open_pr.OpenPrError):
+            open_pr.push(self.repo, "lane/x", token, url=good)
+        self.assertEqual(evil_seen["requests"], 0, "the checkout's config sent the push elsewhere")
+        self.assertEqual(good_seen["auth"], [f"x-access-token:{token}"])
+
+    def test_a_poisoned_environment_or_global_config_cannot_redirect_the_push(self) -> None:
+        self.real_push()
+        good, good_seen = self.server()
+        evil, evil_seen = self.server()
+        good_prefix, evil_prefix = good.rsplit("/", 1)[0] + "/", evil.rsplit("/", 1)[0] + "/"
+        rc = self.repo / "evil.gitconfig"
+        rc.write_text(f'[url "{evil_prefix}"]\n\tinsteadOf = {good_prefix}\n')
+        poison = {"GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": f"url.{evil_prefix}.insteadOf",
+                  "GIT_CONFIG_VALUE_0": good_prefix, "GIT_CONFIG_GLOBAL": str(rc),
+                  "GIT_CONFIG_PARAMETERS": f"'url.{evil_prefix}.insteadof'='{good_prefix}'"}
+        with mock.patch.dict(os.environ, poison), self.assertRaises(open_pr.OpenPrError):
+            open_pr.push(self.repo, "lane/x", "ghs_" + "Cd2" * 12, url=good)
+        self.assertEqual(evil_seen["requests"], 0)
+        self.assertEqual(len(good_seen["auth"]), 1)
+
+    def test_the_askpass_helper_answers_only_a_prompt_for_the_push_host(self) -> None:
+        """Review of #17, item 2, attack two: a prompt naming any other host gets nothing."""
+        token = "ghs_" + "Ef3" * 12
+        env = open_pr.push_env(token, open_pr._secret_dir(), open_pr.push_url())
+        self.addCleanup(open_pr._drop_push_files, env)
+        helper = env["GIT_ASKPASS"]
+
+        def ask(prompt):
+            return subprocess.run([helper, prompt], capture_output=True, text=True)
+
+        good = ask("Password for 'https://x-access-token@github.com': ")
+        self.assertEqual((good.returncode, good.stdout), (0, token))
+        self.assertEqual(ask("Username for 'https://github.com': ").stdout.strip(), "x-access-token")
+        for prompt in ("Password for 'https://x-access-token@evil.example': ",
+                       "Password for 'https://x-access-token@github.com.evil.example': ",
+                       "Password for 'http://x-access-token@github.com': ",
+                       "Password for 'https://someone@github.com': ",
+                       "Password for 'https://x-access-token@127.0.0.1:9': ", ""):
+            with self.subTest(prompt=prompt):
+                refused = ask(prompt)
+                self.assertNotEqual(refused.returncode, 0)
+                self.assertNotIn(token, refused.stdout + refused.stderr)
+
+    def test_the_default_push_url_is_the_explicit_github_url(self) -> None:
+        self.assertEqual(open_pr.push_url(), "https://x-access-token@github.com/lunate-agent/lunate.git")
+
+    def test_a_push_mirror_with_redirecting_config_is_refused_before_any_request(self) -> None:
+        self.real_push()
+        good, good_seen = self.server()
+        mirror = open_pr.push_mirror()
+        subprocess.run(["git", "-C", str(mirror), "config", "url.http://127.0.0.1:1/.insteadOf", good], check=True)
+        with self.assertRaises(open_pr.OpenPrError) as caught:
+            open_pr.push(self.repo, "lane/x", "t0ken", url=good)
+        self.assertIn("config it must not have", str(caught.exception))
+        self.assertEqual(good_seen["requests"], 0)
 
     def commit_on(self, branch, path, text):
         subprocess.run(["git", "switch", "-q", branch], cwd=self._tmp, check=True)

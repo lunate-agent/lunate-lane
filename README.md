@@ -205,9 +205,12 @@ delivers it (cron mail, or the orchestrator's own scheduler capturing stdout). B
   session's own sandbox. Two things it cannot do, and what covers them:
   - `sysctl(KERN_PROCARGS2)` is not mediated by the sandbox on this macOS, so a session can still read the
     argv and environment of any process of the same user. The lane therefore keeps secrets out of both: the
-    push's token reaches git through a `GIT_ASKPASS` helper that reads a mode-600 file in a denied directory
-    (the old URL rewrite put the token in `git-remote-https`'s argv, visible to plain `ps`). The model key is
-    in the session's own environment by design.
+    push's token reaches git through a `GIT_ASKPASS` helper that reads a mode-600 file in a denied directory,
+    and answers only a prompt for exactly `https://x-access-token@github.com`. The push itself goes from a
+    lane-private bare mirror (`<state>/push-mirror.git`, whose config is checked) to the explicit URL
+    `https://github.com/lunate-agent/lunate.git`, with system and global config off and hooks pointing nowhere,
+    so nothing a session writes into the checkout's config (a `pushurl`, an `insteadOf`) decides where the
+    token goes. The model key is in the session's own environment by design.
   - `sandbox-exec` is deprecated by Apple and the profile language is undocumented; a macOS update could change
     what it enforces. `tests/test_harness.py` checks the profile against the real `sandbox-exec` on every run.
   The session still runs with `--approve` as the lane's uid. Running sessions as a separate macOS user that

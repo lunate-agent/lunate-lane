@@ -19,6 +19,7 @@ import shlex
 import subprocess
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 
 try:  # imported as scripts.open_pr by the tests, or run as a script
@@ -82,12 +83,23 @@ def _api(token: str, method: str, path: str, payload: dict | None = None) -> dic
         raise OpenPrError(f"GitHub could not be reached for {method} {path} ({exc.__class__.__name__})") from exc
 
 
+# The token goes only to a prompt for exactly the push URL's host; any other prompt gets nothing (exit 1).
 ASKPASS = """#!/bin/sh
 case "$1" in
-  Username*) echo x-access-token ;;
-  *) cat {token_file} ;;
+  {password_prompt}) cat {token_file} ;;
+  {username_prompt}) echo x-access-token ;;
+  *) exit 1 ;;
 esac
 """
+# What the push mirror's own config may hold: what `git init --bare` writes, nothing that redirects or runs.
+MIRROR_KEYS = frozenset({"core.repositoryformatversion", "core.filemode", "core.bare", "core.ignorecase",
+                         "core.precomposeunicode", "core.logallrefupdates"})
+# Every git the lane runs here: no fsmonitor, no hooks, no credential helper, no system or global config.
+SAFE_GIT = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=")
+
+
+def push_url(host: str = "github.com") -> str:
+    return f"https://x-access-token@{host}/{SLUG}.git"
 
 
 def _secret_dir() -> pathlib.Path:
@@ -101,14 +113,27 @@ def _secret_dir() -> pathlib.Path:
     return path
 
 
-def push_env(token: str, run_dir: pathlib.Path, hooks_dir: pathlib.Path, host: str = "github.com") -> dict:
+def _git_env(extra: dict | None = None) -> dict:
+    """A clean environment for the lane's own git: no inherited GIT_*/GH_* settings, no system or global config."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("GIT_", "GH_", "GITHUB_"))}
+    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"})
+    env.update(extra or {})
+    return env
+
+
+def push_env(token: str, run_dir: pathlib.Path, url: str) -> dict:
     """The push's environment, and its askpass helper and token file in `run_dir` (mode 600).
 
     The token is in neither the environment nor any argv: git asks `GIT_ASKPASS` for the password, and the helper
-    reads the file. Any process of the same user can read another's argv and environment on macOS (`ps -E`,
-    `sysctl KERN_PROCARGS2`, which the session sandbox cannot block), but not that file: it sits in a directory
-    the sandbox denies. The old URL rewrite put the token in `git-remote-https`'s argv, visible to plain `ps`.
+    reads the file — only when git's prompt names exactly `url`'s scheme and host (git's prompt is
+    `Password for 'https://x-access-token@github.com': `). Any process of the same user can read another's argv
+    and environment on macOS, but not that file: it sits in a directory the session sandbox denies.
     """
+    parts = urllib.parse.urlsplit(url)
+    host = parts.hostname or ""
+    if parts.port:
+        host += f":{parts.port}"
+    origin = f"{parts.scheme}://x-access-token@{host}"
     stem = f"push-{os.getpid()}-{time.monotonic_ns()}"
     token_file, helper = run_dir / f"{stem}.token", run_dir / f"{stem}.askpass"
     try:
@@ -117,27 +142,16 @@ def push_env(token: str, run_dir: pathlib.Path, hooks_dir: pathlib.Path, host: s
             handle.write(token)
         fd = os.open(helper, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o700)
         with os.fdopen(fd, "w") as handle:
-            handle.write(ASKPASS.format(token_file=shlex.quote(str(token_file))))
+            handle.write(ASKPASS.format(
+                token_file=shlex.quote(str(token_file)),
+                password_prompt=shlex.quote(f"Password for '{origin}': "),
+                username_prompt=shlex.quote(f"Username for '{parts.scheme}://{host}': ")))
     except OSError as exc:
         for path in (token_file, helper):
             path.unlink(missing_ok=True)
         raise OpenPrError(f"the push's askpass files could not be written in {run_dir} ({exc.__class__.__name__})") from exc
-    env = {key: value for key, value in os.environ.items() if not key.startswith(("GIT_CONFIG_", "GH_", "GITHUB_"))}
-    env.update({
-        "GIT_ASKPASS": str(helper),
-        "SSH_ASKPASS": str(helper),
-        "GIT_TERMINAL_PROMPT": "0",
-        "GIT_CONFIG_COUNT": "3",
-        # the user name only — no secret in the URL, so none in the transport helper's argv
-        "GIT_CONFIG_KEY_0": f"url.https://x-access-token@{host}/.insteadOf",
-        "GIT_CONFIG_VALUE_0": f"https://{host}/",
-        "GIT_CONFIG_KEY_1": "credential.helper",
-        "GIT_CONFIG_VALUE_1": "",
-        "GIT_CONFIG_KEY_2": "core.hooksPath",
-        "GIT_CONFIG_VALUE_2": str(hooks_dir),
-        "LANE_PUSH_FILES": f"{token_file}{os.pathsep}{helper}",
-    })
-    return env
+    return _git_env({"GIT_ASKPASS": str(helper), "SSH_ASKPASS": str(helper),
+                     "LANE_PUSH_FILES": f"{token_file}{os.pathsep}{helper}"})
 
 
 def _drop_push_files(env: dict) -> None:
@@ -149,45 +163,62 @@ def _drop_push_files(env: dict) -> None:
                 pass
 
 
-def push(repo: pathlib.Path, branch: str, token: str, host: str = "github.com") -> None:
-    """Push the named local branch. The token never reaches the report, an argv, an environment, or the keychain.
-
-    Every credential helper is blanked (so no helper is consulted and nothing is stored in the login keychain),
-    hooks point at an empty directory, and the token reaches git only through the askpass helper (push_env).
-    """
+def _run_git(argv: list, cwd: pathlib.Path | None, env: dict, what: str, token: str = "") -> str:
     try:
-        exists = subprocess.run(
-            ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{branch}"],
-            capture_output=True, text=True, cwd=str(repo), timeout=60,
-        )
+        done = subprocess.run(["git", *SAFE_GIT, *argv], capture_output=True, text=True,
+                              cwd=str(cwd) if cwd else None, env=env, timeout=180)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise OpenPrError(f"{what} could not be run ({exc.__class__.__name__}: {exc})") from exc
+    if done.returncode != 0:
+        tail = (done.stderr or "") + (done.stdout or "")
+        raise OpenPrError(f"{what} was refused: {(tail.replace(token, '[REDACTED]') if token else tail).strip()[:200]}")
+    return done.stdout
+
+
+def push_mirror() -> pathlib.Path:
+    """`<state>/push-mirror.git`: a bare repository only the lane writes (the session sandbox denies the state
+    directory), whose config is checked to hold nothing but what `git init --bare` puts there."""
+    mirror = common.state_dir() / "push-mirror.git"
+    env = _git_env()
+    if not (mirror / "HEAD").exists():
+        _run_git(["init", "-q", "--bare", str(mirror)], None, env, "creating the push mirror")
+    keys = {line.split("=", 1)[0].lower()
+            for line in _run_git(["-C", str(mirror), "config", "--local", "--list"], None, env,
+                                 "reading the push mirror's config").splitlines() if line}
+    if keys - MIRROR_KEYS:
+        raise OpenPrError(f"the push mirror {mirror} has config it must not have ({', '.join(sorted(keys - MIRROR_KEYS))})"
+                          " — nothing was pushed; delete the mirror and the next push recreates it")
+    return mirror
+
+
+def push(repo: pathlib.Path, branch: str, token: str, url: str | None = None) -> None:
+    """Push the named local branch of `repo` (a worktree) to `url` — `https://github.com/<repo>.git` unless given.
+
+    The branch is first fetched into the lane's private bare mirror, and pushed from there to the explicit URL:
+    the worktree's config (which a session could write: a `pushurl`, an `insteadOf`) is never consulted for where
+    the push goes. System and global config are off, hooks point nowhere, no credential helper is asked, and the
+    token reaches git only through the askpass helper, for exactly that host (push_env). Never a force push (#8).
+    """
+    url = url or push_url()
+    env = _git_env()
+    try:
+        exists = subprocess.run(["git", *SAFE_GIT, "-C", str(repo), "rev-parse", "--verify", "--quiet",
+                                 f"refs/heads/{branch}"], capture_output=True, text=True, env=env, timeout=60)
     except (OSError, subprocess.SubprocessError) as exc:
         raise OpenPrError(f"git could not check {branch!r} in {repo} ({exc.__class__.__name__}: {exc})") from exc
+    if exists.returncode not in (0, 1):
+        raise OpenPrError(f"git could not check {branch!r} in {repo}: {exists.stderr.strip()[:160]}")
     if exists.returncode != 0:
         raise OpenPrError(f"there is no local branch {branch!r} in {repo} to push")
-    hooks_dir = pathlib.Path(os.environ.get("TMPDIR", "/tmp")) / f"lane-hooks-{os.getpid()}"
+    mirror = push_mirror()
+    ref = f"refs/heads/{branch}"
+    _run_git(["-C", str(mirror), "fetch", "-q", "--no-tags", "--no-write-fetch-head", str(repo), f"+{ref}:{ref}"],
+             None, env, f"copying {branch} into the push mirror")
+    secret_env = push_env(token, _secret_dir(), url)
     try:
-        hooks_dir.mkdir(parents=True, exist_ok=True)
-    except OSError as exc:
-        raise OpenPrError(f"the empty hooks directory {hooks_dir} could not be made: {exc}") from exc
-    env = push_env(token, _secret_dir(), hooks_dir, host)
-    try:
-        done = subprocess.run(
-            # never a force push (#8): a branch that moved is merged into, not overwritten, and a refused push is a
-            # named failure
-            ["git", "push", "origin", f"refs/heads/{branch}:refs/heads/{branch}"],
-            capture_output=True, text=True, cwd=str(repo), env=env, timeout=180,
-        )
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise OpenPrError(f"the push of {branch} could not be run ({exc.__class__.__name__})") from exc
+        _run_git(["-C", str(mirror), "push", url, f"{ref}:{ref}"], None, secret_env, f"the push of {branch}", token)
     finally:
-        _drop_push_files(env)
-        try:
-            hooks_dir.rmdir()
-        except OSError:
-            pass
-    if done.returncode != 0:
-        tail = ((done.stderr or "") + (done.stdout or "")).replace(token, "[REDACTED]")
-        raise OpenPrError(f"the push of {branch} was refused: {tail.strip()[:200]}")
+        _drop_push_files(secret_env)
 
 
 def _graphql(token: str, query: str, variables: dict, what: str) -> dict:
