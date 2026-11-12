@@ -189,10 +189,10 @@ def spec_neighbours(p: github.Pull, others) -> str:
     return "\n".join(lines)
 
 
-def remove_review_worktree(cfg: common.Config, worktree: pathlib.Path) -> None:
-    """Remove a review worktree a dead run left behind, and prune its registration. Only under <state>/reviews."""
-    if common.state_dir("reviews") not in worktree.parents:
-        raise LaneError(f"{worktree} is not a lane review worktree — left alone")
+def remove_review_worktree(cfg: common.Config, pr: int) -> None:
+    """Remove the review worktree of `pr` a dead run left behind, and prune its registration. The path is derived
+    from the number and resolved; a symlink or anything outside <state>/reviews is refused."""
+    worktree = common.inside_state(common.state_dir("reviews") / f"pr-{int(pr)}", "reviews")
     if (worktree / ".git").exists():
         common.git(cfg.checkout, "worktree", "remove", "--force", str(worktree))
     elif worktree.exists():
@@ -204,7 +204,7 @@ def remove_review_worktree(cfg: common.Config, worktree: pathlib.Path) -> None:
 
 
 def reap(cfg: common.Config, job: str) -> None:
-    for pr in harness.reap_reviews(lambda path: remove_review_worktree(cfg, path)):
+    for pr in harness.reap_reviews(lambda number: remove_review_worktree(cfg, number)):
         common.log(job, f"cleared the review of #{pr} that a dead run left behind (session and worktree)")
 
 

@@ -4,6 +4,7 @@ import io
 import json
 import os
 import pathlib
+import subprocess
 import sys
 import unittest
 from unittest import mock
@@ -117,6 +118,50 @@ class WorktreeTests(RepoCase):
         git(self.clone, "push", "-q", "origin", f"{sha}:refs/heads/main")
         git(self.clone, "fetch", "-q", "origin")
         self.assertTrue(worker.has_fragments(self.cfg, self.clone))
+
+
+class DriverGitTests(RepoCase):
+    """Review of #17, item 3: config a session could have written makes the driver's git run nothing."""
+
+    def test_fsmonitor_hooks_credential_helpers_and_global_filters_never_run(self) -> None:
+        marker = self.state.root / "ran"
+        # the branch, with a .gitattributes that names a filter, is made before any config is poisoned
+        git(self.clone, "switch", "-q", "-c", "wt/issue-3", "origin/main")
+        (self.clone / ".gitattributes").write_text("* filter=evil diff=evil\n")
+        (self.clone / "a.txt").write_text("a\n")
+        git(self.clone, "add", "-A")
+        git(self.clone, "commit", "-qm", "attrs")
+        git(self.clone, "push", "-q", "origin", "wt/issue-3")
+        git(self.clone, "switch", "-q", "--detach", "origin/main")
+        git(self.clone, "branch", "-q", "-D", "wt/issue-3")
+        evil = self.state.root / "evil.sh"
+        evil.write_text(f'#!/bin/sh\nexec </dev/null\necho "$0 $*" >> "{marker}"\nexit 1\n')
+        evil.chmod(0o755)
+        hooks = self.state.root / "hooks"
+        hooks.mkdir()
+        for name in ("post-checkout", "post-merge", "reference-transaction"):
+            (hooks / name).write_text(f'#!/bin/sh\necho hook >> "{marker}"\n')
+            (hooks / name).chmod(0o755)
+        config = self.clone / ".git" / "config"
+        # in the checkout's config (which the sandbox now keeps sessions from writing): what -c neutralises
+        config.write_text(config.read_text() + f'[core]\n\tfsmonitor = {evil}\n\thooksPath = {hooks}\n'
+                          f'[credential]\n\thelper = !{evil}\n')
+        home = self.state.root / "home"
+        home.mkdir()
+        # in the user's global config: filters and textconv too, all dropped with the global config
+        (home / ".gitconfig").write_text(f'[filter "evil"]\n\tsmudge = {evil}\n\tclean = {evil}\n'
+                                         f'[diff "evil"]\n\ttextconv = {evil}\n[core]\n\tfsmonitor = {evil}\n'
+                                         f'\thooksPath = {hooks}\n[credential]\n\thelper = !{evil}\n')
+        with mock.patch.dict(os.environ, {"HOME": str(home), "GIT_CONFIG_GLOBAL": str(home / ".gitconfig")}):
+            path = worker.prepare_worktree(self.cfg, 3)
+            (path / "a.txt").write_text("changed\n")
+            worker.problems(harness.Outcome(0, False, 1, False), path, "x")
+            worker.ref_exists(self.clone, "refs/heads/wt/issue-3")
+            worker.conflicts(self.cfg, path)
+            dispatch_card._count(path, "wt/issue-3")
+            common.git(path, "diff", "origin/main...HEAD")
+        self.assertFalse(marker.exists(), marker.read_text() if marker.exists() else "")
+        self.assertEqual((path / "a.txt").read_text(), "changed\n")
 
 
 class ConflictTests(RepoCase):

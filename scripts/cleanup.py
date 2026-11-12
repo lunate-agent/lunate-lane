@@ -67,6 +67,8 @@ def remove_card(cfg: common.Config, card: int) -> list[str]:
     """Remove the card's worktree, local branch and scratch directory. Returns what was removed."""
     removed = []
     path = common.state_dir("worktrees") / f"issue-{card}"
+    if path.exists() or path.is_symlink():
+        common.inside_state(path, "worktrees")
     if (path / ".git").exists():
         common.git(cfg.checkout, "worktree", "remove", "--force", str(path))
         removed.append(f"worktree {path}")
@@ -86,6 +88,7 @@ def remove_card(cfg: common.Config, card: int) -> list[str]:
 
 
 def _rmtree(path: pathlib.Path) -> None:
+    common.inside_state(path)
     try:
         shutil.rmtree(path)
     except OSError as exc:

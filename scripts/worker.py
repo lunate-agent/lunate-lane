@@ -35,8 +35,8 @@ WITHHELD = ("(Output withheld: the session's final message contained something s
 def ref_exists(repo: pathlib.Path, ref: str) -> bool:
     """Whether a ref exists. git's 'no' (exit 1) is an answer; any other failure raises."""
     try:
-        done = subprocess.run(["git", "-C", str(repo), "rev-parse", "--verify", "--quiet", ref],
-                              capture_output=True, text=True, timeout=60)
+        done = subprocess.run(common.git_argv(repo, "rev-parse", "--verify", "--quiet", ref),
+                              capture_output=True, text=True, timeout=60, env=common.git_env())
     except (OSError, subprocess.SubprocessError) as exc:
         raise GitError(f"git could not check {ref} in {repo} ({exc.__class__.__name__})") from exc
     if done.returncode not in (0, 1):
@@ -120,8 +120,9 @@ def log_tail(cfg: common.Config, job_id: int) -> str:
 def conflicts(cfg: common.Config, worktree: pathlib.Path) -> list[str]:
     """The files that conflict when origin/<base> is merged into the branch, without touching the worktree."""
     try:
-        done = subprocess.run(["git", "-C", str(worktree), "merge-tree", "--write-tree", "--name-only",
-                               "--no-messages", f"origin/{cfg.base}", "HEAD"], capture_output=True, text=True, timeout=120)
+        done = subprocess.run(common.git_argv(worktree, "merge-tree", "--write-tree", "--name-only", "--no-messages",
+                                              f"origin/{cfg.base}", "HEAD"),
+                              capture_output=True, text=True, timeout=120, env=common.git_env())
     except (OSError, subprocess.SubprocessError) as exc:
         raise GitError(f"git merge-tree could not be run in {worktree} ({exc.__class__.__name__})") from exc
     if done.returncode not in (0, 1):

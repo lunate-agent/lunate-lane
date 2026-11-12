@@ -94,8 +94,7 @@ esac
 # What the push mirror's own config may hold: what `git init --bare` writes, nothing that redirects or runs.
 MIRROR_KEYS = frozenset({"core.repositoryformatversion", "core.filemode", "core.bare", "core.ignorecase",
                          "core.precomposeunicode", "core.logallrefupdates"})
-# Every git the lane runs here: no fsmonitor, no hooks, no credential helper, no system or global config.
-SAFE_GIT = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=")
+SAFE_GIT = common.SAFE_GIT
 
 
 def push_url(host: str = "github.com") -> str:
@@ -113,12 +112,7 @@ def _secret_dir() -> pathlib.Path:
     return path
 
 
-def _git_env(extra: dict | None = None) -> dict:
-    """A clean environment for the lane's own git: no inherited GIT_*/GH_* settings, no system or global config."""
-    env = {key: value for key, value in os.environ.items() if not key.startswith(("GIT_", "GH_", "GITHUB_"))}
-    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"})
-    env.update(extra or {})
-    return env
+_git_env = common.git_env
 
 
 def push_env(token: str, run_dir: pathlib.Path, url: str) -> dict:

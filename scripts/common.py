@@ -172,8 +172,41 @@ def graphql(query: str, **variables: Any) -> dict:
     return payload["data"]
 
 
+# Every git the lane runs (review of #17, item 3): a session can write a worktree's files, so nothing git would
+# execute on the lane's behalf may come from config — no fsmonitor, no hooks, no credential helper — and neither
+# system nor global config (a filter or merge driver there plus a .gitattributes in the branch would run
+# unsandboxed). The product repository is public: fetching needs no credential.
+SAFE_GIT = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=")
+
+
+def git_env(extra: dict | None = None) -> dict:
+    """The environment for the lane's own git: no inherited GIT_*/GH_* settings, no system or global config."""
+    env = {key: value for key, value in os.environ.items() if not key.startswith(("GIT_", "GH_", "GITHUB_"))}
+    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"})
+    env.update(extra or {})
+    return env
+
+
+def git_argv(repo: pathlib.Path, *args: str) -> list:
+    return ["git", *SAFE_GIT, "-C", str(repo), *args]
+
+
 def git(repo: pathlib.Path, *args: str, timeout: int = 300, env: dict | None = None) -> str:
-    return run(["git", "-C", str(repo), *args], error=GitError, timeout=timeout, env=env).strip()
+    return run(git_argv(repo, *args), error=GitError, timeout=timeout, env=git_env(env)).strip()
+
+
+def inside_state(path: pathlib.Path, under: str = "") -> pathlib.Path:
+    """`path`, resolved, if it lies strictly inside the state directory (or its `under` folder): no `..` in it, not
+    itself a symlink. Anything else — a forged record, a symlink a session planted — is a StateError, never a path
+    to delete (review of #17, item 3)."""
+    root = (config().state / under).resolve() if under else config().state.resolve()
+    given = pathlib.Path(path)
+    if ".." in given.parts or given.is_symlink():
+        raise StateError(f"{path} has a '..' or is a symlink — refusing to touch it")
+    resolved = given.resolve()
+    if resolved == root or root not in resolved.parents:
+        raise StateError(f"{path} resolves to {resolved}, outside {root} — refusing to touch it")
+    return resolved
 
 
 def rest(token: str, method: str, path: str, payload: dict | None = None) -> Any:

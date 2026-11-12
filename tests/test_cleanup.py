@@ -160,12 +160,39 @@ class ReviewReapTests(unittest.TestCase):
             review.reap(self.cfg, "review")
         self.assertTrue(worktree.exists())
 
-    def test_only_a_worktree_under_the_lanes_reviews_folder_is_removed(self) -> None:
-        elsewhere = self.state.root / "not-ours"
-        elsewhere.mkdir()
-        with self.assertRaises(common.LaneError):
-            review.remove_review_worktree(self.cfg, elsewhere)
-        self.assertTrue(elsewhere.exists())
+    def victim(self):
+        victim = self.state.root / "victim"
+        victim.mkdir()
+        (victim / "precious").write_text("keep\n")
+        return victim
+
+    def test_a_forged_record_cannot_make_cleanup_touch_anything_outside(self) -> None:
+        """Review of #17, item 3: `…/reviews/../../victim` in a record written by a session."""
+        victim = self.victim()
+        for forged in (common.state_dir("reviews") / ".." / ".." / "victim", victim):
+            with self.subTest(worktree=str(forged)):
+                record = self.cfg.state / "reviewing" / "77.json"
+                common.state_dir("reviewing")
+                record.write_text(json.dumps({"pr": 77, "pid": 999999, "worktree": str(forged)}))
+                with self.assertRaises(common.StateError):
+                    review.reap(self.cfg, "review")
+                self.assertEqual((victim / "precious").read_text(), "keep\n")
+                record.unlink()
+
+    def test_a_symlinked_review_worktree_is_refused_not_followed(self) -> None:
+        victim = self.victim()
+        (common.state_dir("reviews") / "pr-78").symlink_to(victim)
+        harness.record_review(78, 999999, self.cfg.state / "reviews" / "pr-78")
+        with self.assertRaises(common.StateError):
+            review.reap(self.cfg, "review")
+        self.assertEqual((victim / "precious").read_text(), "keep\n")
+
+    def test_a_symlinked_card_worktree_is_refused_not_followed(self) -> None:
+        victim = self.victim()
+        (common.state_dir("worktrees") / "issue-7").symlink_to(victim)
+        with self.assertRaises(common.StateError):
+            cleanup.remove_card(self.cfg, 7)
+        self.assertEqual((victim / "precious").read_text(), "keep\n")
 
     def test_the_review_run_records_itself_and_clears_its_record(self) -> None:
         seen = {}

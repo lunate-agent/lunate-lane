@@ -172,6 +172,48 @@ class SandboxTests(HarnessCase):
                 self.assertNotEqual(wrote.returncode, 0)
                 self.assertFalse((secret.parent / "planted").exists())
 
+    def test_a_session_cannot_write_lane_code_git_config_hooks_or_the_state_but_can_write_its_own(self) -> None:
+        """Review of #17, item 3: nothing the unsandboxed driver later runs or trusts is writable."""
+        from scripts import common
+
+        scratch, worktree = self.cfg.state / "scratch" / "issue-3", self.cfg.state / "worktrees" / "issue-3"
+        for folder in (scratch, worktree, self.cfg.state / "workers", self.cfg.checkout / ".git" / "hooks"):
+            folder.mkdir(parents=True, exist_ok=True)
+        profile = harness.write_profile(self.cfg, scratch, self.real_home, writable=(scratch, worktree))
+        blocked = [common.ROOT / "scripts" / "planted.py", common.ROOT / "lane-planted.json",
+                   self.cfg.checkout / ".git" / "config", self.cfg.checkout / ".git" / "hooks" / "pre-commit",
+                   self.cfg.state / "workers" / "9.json", self.cfg.state / "reviewing" / "planted.json",
+                   self.cfg.state / "push-mirror.git", self.real_home / ".gitconfig",
+                   self.real_home / ".config" / "git" / "attributes"]
+        for path in blocked:
+            existed = path.exists()
+            with self.subTest(path=str(path)):
+                done = subprocess.run(harness.sandboxed(
+                    ["/bin/sh", "-c", f'mkdir -p "{path.parent}" && echo x >> "{path}"'], profile),
+                    capture_output=True, text=True)
+                self.assertNotEqual(done.returncode, 0)
+                self.assertIn("Operation not permitted", done.stderr)
+                if not existed:
+                    self.assertFalse(path.exists())
+                    path.unlink(missing_ok=True)
+        for path in (scratch / "home" / "ok", worktree / "src" / "ok.cs"):
+            done = subprocess.run(harness.sandboxed(["/bin/sh", "-c", f'mkdir -p "{path.parent}" && echo x > "{path}"'],
+                                                    profile), capture_output=True, text=True)
+            self.assertEqual(done.returncode, 0, done.stderr)
+
+    def test_a_session_can_still_commit_in_its_worktree(self) -> None:
+        from tests.helpers import origin_and_clone
+
+        _, clone = origin_and_clone(self.state.root / "repos")
+        self.cfg = __import__("dataclasses").replace(self.cfg, checkout=clone)
+        worktree, scratch = self.cfg.state / "worktrees" / "issue-4", self.cfg.state / "scratch" / "issue-4"
+        scratch.mkdir(parents=True)
+        subprocess.run(["git", "-C", str(clone), "worktree", "add", "-q", "-b", "wt/issue-4", str(worktree)], check=True)
+        profile = harness.write_profile(self.cfg, scratch, self.real_home, writable=(scratch, worktree))
+        script = f'cd "{worktree}" && echo y > f && git add f && git -c user.name=w -c user.email=w@x commit -qm w'
+        done = subprocess.run(harness.sandboxed(["/bin/sh", "-c", script], profile), capture_output=True, text=True)
+        self.assertEqual(done.returncode, 0, done.stderr)
+
     def test_the_app_config_directory_is_denied_wherever_it_lives(self) -> None:
         key = self.cfg.app_config.parent / "lunate-reviewer.pem"
         key.parent.mkdir(parents=True, exist_ok=True)

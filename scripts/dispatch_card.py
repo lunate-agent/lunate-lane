@@ -64,8 +64,8 @@ def branch_for(repo: pathlib.Path, number: int) -> str:
     name = f"wt/issue-{number}"
     try:
         exists = subprocess.run(
-            ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{name}"],
-            capture_output=True, text=True, cwd=str(repo), timeout=60,
+            common.git_argv(repo, "rev-parse", "--verify", "--quiet", f"refs/heads/{name}"),
+            capture_output=True, text=True, timeout=60, env=common.git_env(),
         )
     except OSError as exc:
         raise CardError(f"git could not be run in {repo} ({exc.__class__.__name__})") from exc
@@ -90,8 +90,8 @@ def _count(repo: pathlib.Path, name: str) -> int:
     """
     try:
         done = subprocess.run(
-            ["git", "rev-list", "--count", f"{BASE}..{name}"],
-            capture_output=True, text=True, cwd=str(repo), timeout=60,
+            common.git_argv(repo, "rev-list", "--count", f"{BASE}..{name}"),
+            capture_output=True, text=True, timeout=60, env=common.git_env(),
         )
     except OSError as exc:
         raise CardError(f"git could not be run in {repo} ({exc.__class__.__name__})") from exc

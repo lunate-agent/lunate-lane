@@ -199,10 +199,22 @@ delivers it (cron mail, or the orchestrator's own scheduler capturing stdout). B
 ## Known limitations
 
 - **The sandbox is the v1 boundary; a separate macOS user is the follow-up.** Every Pi session — worker and
-  reviewer — runs under `sandbox-exec` with a profile (`harness.sandbox_profile`) that denies reading or writing
-  `~/.config/lunate-lane` (the App keys, `app.json`, the model key, the push's askpass files), `~/.hermes`,
-  `~/.ssh`, `~/.config/gh` and `~/Library/Keychains`, and denies process-info calls on any process outside the
-  session's own sandbox. Two things it cannot do, and what covers them:
+  reviewer — runs under `sandbox-exec` with a profile (`harness.sandbox_profile`) that:
+  - denies **reading** `~/.config/lunate-lane` (the App keys, `app.json`, the model key, the push's askpass
+    files), `~/.hermes`, `~/.ssh`, `~/.config/gh` and `~/Library/Keychains`;
+  - denies **writing** everything the unsandboxed lane later runs or trusts: the lane's own code (this checkout
+    and the main one), the whole state directory except the session's own scratch and worktree (so no worker,
+    attempts, review or rerun record, no other session's files, not the push mirror), the checkout's
+    `.git/config`, `.git/hooks` and per-worktree `config.worktree`, and the user's `~/.gitconfig` and
+    `~/.config/git`;
+  - denies process-info calls on any process outside the session's own sandbox.
+
+  The lane's own git never trusts what a session could have influenced anyway: every git it runs has
+  `core.fsmonitor`, `core.hooksPath` and the credential helper neutralised and runs without system or global
+  config. Every path the lane deletes is resolved and refused unless it lies inside the state directory, and a
+  review record must name exactly its own `reviews/pr-<n>`.
+
+  What it does not cover:
   - `sysctl(KERN_PROCARGS2)` is not mediated by the sandbox on this macOS, so a session can still read the
     argv and environment of any process of the same user. The lane therefore keeps secrets out of both: the
     push's token reaches git through a `GIT_ASKPASS` helper that reads a mode-600 file in a denied directory,
@@ -211,7 +223,13 @@ delivers it (cron mail, or the orchestrator's own scheduler capturing stdout). B
     `https://github.com/lunate-agent/lunate.git`, with system and global config off and hooks pointing nowhere,
     so nothing a session writes into the checkout's config (a `pushurl`, an `insteadOf`) decides where the
     token goes. The model key is in the session's own environment by design.
+  - Filters and diff drivers named by a branch's `.gitattributes` still run in the lane's git when the
+    checkout's own `.git/config` defines them; sessions cannot write that file, and the lane's git ignores the
+    global and system config where a planted one would otherwise sit.
+  - The login keychain's *service* (securityd) is reachable over Mach IPC even though its files are denied;
+    sessions get no git credential helper (see below), so nothing in them asks it for a GitHub credential.
   - `sandbox-exec` is deprecated by Apple and the profile language is undocumented; a macOS update could change
     what it enforces. `tests/test_harness.py` checks the profile against the real `sandbox-exec` on every run.
+
   The session still runs with `--approve` as the lane's uid. Running sessions as a separate macOS user that
-  cannot read the keys or the lane's processes remains the follow-up.
+  cannot read the keys, write the lane, or see the lane's processes remains the follow-up.

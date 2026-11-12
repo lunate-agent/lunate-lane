@@ -84,8 +84,8 @@ def _git_identity(cfg: common.Config) -> dict:
     found = {}
     for key in ("user.name", "user.email"):
         try:
-            done = subprocess.run(["git", "-C", str(cfg.checkout), "config", "--get", key],
-                                  capture_output=True, text=True, timeout=30)
+            done = subprocess.run(["git", *common.SAFE_GIT, "-C", str(cfg.checkout), "config", "--get", key],
+                                  capture_output=True, text=True, timeout=30)  # a config read: nothing runs
         except (OSError, subprocess.SubprocessError) as exc:
             raise HarnessError(f"git could not read {key} in {cfg.checkout} ({exc.__class__.__name__})") from exc
         if done.returncode not in (0, 1):
@@ -104,6 +104,8 @@ def session_home(cfg: common.Config, scratch: pathlib.Path, real_home: pathlib.P
     real_home = real_home or pathlib.Path.home()
     home = scratch / "home"
     try:
+        if home.is_symlink():  # a session could leave one; rmtree never follows the ones inside
+            raise HarnessError(f"the session home {home} is a symlink — refusing to clear it")
         if home.exists():
             shutil.rmtree(home)
         home.mkdir(parents=True)
@@ -153,24 +155,61 @@ def _sbpl(path: str) -> str:
     return '"' + path.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
-def denied_paths(cfg: common.Config, real_home: pathlib.Path | None = None) -> list[str]:
-    """The directories a session may not touch, each as given and as resolved (the sandbox matches real paths)."""
-    real_home = real_home or pathlib.Path.home()
+def _forms(paths) -> list[str]:
     found: list[str] = []
-    for path in [real_home / d for d in SANDBOX_DENY] + [cfg.app_config.parent]:
-        for form in (str(path), os.path.realpath(path)):
+    for path in paths:
+        for form in (os.path.abspath(path), os.path.realpath(path)):
             if form not in found:
                 found.append(form)
     return found
 
 
-def sandbox_profile(cfg: common.Config, real_home: pathlib.Path | None = None) -> str:
-    """The session's sandbox: everything allowed except the lane's and the user's secrets, and other processes'
-    information. On this macOS the kernel does not ask the sandbox about `sysctl(KERN_PROCARGS2)`, so another
-    process's argv and environment stay readable — the lane therefore keeps tokens out of both (open_pr.push)."""
+def denied_paths(cfg: common.Config, real_home: pathlib.Path | None = None) -> list[str]:
+    """The directories a session may neither read nor write, each as given and as resolved."""
+    real_home = real_home or pathlib.Path.home()
+    return _forms([real_home / d for d in SANDBOX_DENY] + [cfg.app_config.parent])
+
+
+def lane_repos() -> list[pathlib.Path]:
+    """The lane's own code: this checkout, and the main checkout whose .git it shares when it is a worktree."""
+    found = [common.ROOT]
+    try:
+        done = subprocess.run(["git", *common.SAFE_GIT, "-C", str(common.ROOT), "rev-parse", "--path-format=absolute",
+                               "--git-common-dir"], capture_output=True, text=True, timeout=30, env=common.git_env())
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise HarnessError(f"the lane's own repository could not be located ({exc.__class__.__name__})") from exc
+    if done.returncode == 0 and done.stdout.strip():
+        found.append(pathlib.Path(done.stdout.strip()).parent)
+    return found
+
+
+def write_denied(cfg: common.Config, real_home: pathlib.Path | None = None) -> tuple[list[str], list[str]]:
+    """(subpaths, single files) a session may not write (review of #17, item 3): the lane's code, the git config
+    the driver's git would read (the user's global config, the checkout's .git/config and hooks), and the whole
+    state directory — of which the session's own scratch and worktree are allowed again afterwards."""
+    real_home = real_home or pathlib.Path.home()
+    git_dir = cfg.checkout / ".git"
+    subpaths = _forms([*lane_repos(), cfg.state, git_dir / "hooks", real_home / ".config" / "git"])
+    files = _forms([git_dir / "config", real_home / ".gitconfig"])
+    return subpaths, files
+
+
+def sandbox_profile(cfg: common.Config, real_home: pathlib.Path | None = None, writable=()) -> str:
+    """The session's sandbox (reads: the lane's and the user's secrets denied; writes: everything the
+    unsandboxed driver later runs or trusts denied, except the session's own `writable` scratch and worktree;
+    process-info: only its own processes). On this macOS the kernel does not ask the sandbox about
+    `sysctl(KERN_PROCARGS2)`, so another process's argv and environment stay readable — the lane therefore keeps
+    tokens out of both (open_pr.push)."""
     deny = " ".join(f"(subpath {_sbpl(p)})" for p in denied_paths(cfg, real_home))
+    subpaths, files = write_denied(cfg, real_home)
+    no_write = " ".join([f"(subpath {_sbpl(p)})" for p in subpaths] + [f"(literal {_sbpl(p)})" for p in files])
+    git_dir = os.path.realpath(cfg.checkout / ".git")
+    worktree_config = f'(regex #"^{re.escape(git_dir)}/worktrees/[^/]+/config\\.worktree$")'
+    allow = " ".join(f"(subpath {_sbpl(p)})" for p in _forms(writable))
     return ("(version 1)\n(allow default)\n"
-            f"(deny file-read* file-write* {deny})\n"
+            f"(deny file-write* {no_write} {worktree_config})\n"
+            + (f"(allow file-write* {allow})\n" if allow else "")
+            + f"(deny file-read* file-write* {deny})\n"
             # deny, then allow the session's own sandbox: `(target others)` alone is not enforced on this macOS
             # (a probe still read the lane's pids); this form is, and it keeps a session's own children readable
             # (dotnet's test host watches them)
@@ -181,10 +220,11 @@ def sandboxed(command: list, profile: pathlib.Path) -> list:
     return [SANDBOX_EXEC, "-f", str(profile), *command]
 
 
-def write_profile(cfg: common.Config, scratch: pathlib.Path, real_home: pathlib.Path | None = None) -> pathlib.Path:
+def write_profile(cfg: common.Config, scratch: pathlib.Path, real_home: pathlib.Path | None = None,
+                  writable=()) -> pathlib.Path:
     path = scratch / "session.sb"
     try:
-        path.write_text(sandbox_profile(cfg, real_home), encoding="utf-8")
+        path.write_text(sandbox_profile(cfg, real_home, writable), encoding="utf-8")
     except OSError as exc:
         raise HarnessError(f"the sandbox profile {path} could not be written ({exc.__class__.__name__}: {exc})") from exc
     return path
@@ -212,7 +252,8 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
     timeout, idle = int(cfg.harness["session_timeout"]), int(cfg.harness["stall_idle"])
     session_id = f"{worktree.name}-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
     env = session_env(cfg, scratch, extra_env)
-    command = sandboxed(argv(cfg, model, scratch / "sessions", session_id, prompt), write_profile(cfg, scratch))
+    command = sandboxed(argv(cfg, model, scratch / "sessions", session_id, prompt),
+                        write_profile(cfg, scratch, writable=(scratch, worktree)))
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         out_file = log_path.open("ab")
@@ -501,21 +542,25 @@ def review_alive(pid: int) -> bool:
     return command is not None and "review.py" in command
 
 
-def reap_reviews(remove_worktree: Callable[[pathlib.Path], None]) -> list[int]:
+def reap_reviews(remove_worktree: Callable[[int], None]) -> list[int]:
     """Clear every review whose driver is dead: kill the session it left (only that exact session id), remove its
     worktree, drop the record. Returns the pull requests cleared. An unreadable record raises."""
     cleared = []
     for path in _listing(common.state_dir("reviewing")):
         try:
             data = json.loads(path.read_text())
-            pr, pid, worktree = int(data["pr"]), int(data["pid"]), pathlib.Path(data["worktree"])
+            pr, pid, worktree = int(data["pr"]), int(data["pid"]), pathlib.Path(str(data["worktree"]))
             pgid, session_id = data.get("session_pgid"), data.get("session_id")
         except (OSError, ValueError, KeyError, TypeError) as exc:
             raise StateError(f"the review record {path} could not be read: {exc}") from exc
         if review_alive(pid):
             continue
+        expected = common.state_dir("reviews") / f"pr-{pr}"
+        if os.path.abspath(worktree) != os.path.abspath(expected):
+            raise StateError(f"the review record {path} names {worktree}, not {expected} — a forged record; "
+                             "nothing was touched")
         reap_session(pr, (int(pgid), str(session_id)) if pgid and session_id else None)
-        remove_worktree(worktree)
+        remove_worktree(pr)
         try:
             path.unlink(missing_ok=True)
         except OSError as exc:
