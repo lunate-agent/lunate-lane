@@ -1,0 +1,173 @@
+"""Reviewer dispatch: what is skipped, what a verdict must look like, and the re-check before posting."""
+
+import io
+import json
+import pathlib
+import sys
+import unittest
+from unittest import mock
+
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+from scripts import common, github, harness, identity, review  # noqa: E402
+from scripts.common import LaneError  # noqa: E402
+from tests.helpers import REQUIRED, TempState, pull  # noqa: E402
+from tests.helpers import review as a_review  # noqa: E402
+
+
+class SkipTests(unittest.TestCase):
+    def reason(self, p, running=None):
+        return review.skip_reason(p, REQUIRED, running or {}, "lunate-reviewer")
+
+    def test_a_green_unreviewed_pull_request_is_due(self) -> None:
+        self.assertIsNone(self.reason(pull(1, 9)))
+
+    def test_merged_or_closed_pull_requests_are_never_reviewed(self) -> None:
+        self.assertEqual(self.reason(pull(1, 9, state="MERGED")), "is merged")
+        self.assertEqual(self.reason(pull(1, 9, state="CLOSED")), "is closed")
+
+    def test_drafts_and_running_workers_wait(self) -> None:
+        self.assertEqual(self.reason(pull(1, 9, draft=True)), "is a draft")
+        self.assertIn("worker on #9 is still running", self.reason(pull(1, 9), {9: frozenset()}))
+
+    def test_checks_that_are_not_green_wait(self) -> None:
+        self.assertIn("pending", self.reason(pull(1, 9, checks=[("ci-ok", "IN_PROGRESS", "")])))
+        self.assertIn("failing", self.reason(pull(1, 9, checks=[("ci-ok", "COMPLETED", "FAILURE")])))
+        self.assertIn("pending", self.reason(pull(1, 9, checks=[])))
+
+    def test_a_head_already_reviewed_is_skipped_but_a_new_head_is_due(self) -> None:
+        self.assertIn("already reviewed", self.reason(pull(1, 9, reviews=[a_review("APPROVED")])))
+        self.assertIsNone(self.reason(pull(1, 9, head="h2", reviews=[a_review("CHANGES_REQUESTED", commit="h1")])))
+
+    def test_a_pull_request_with_no_card_is_not_reviewed(self) -> None:
+        self.assertIn("no card", self.reason(pull(1, None)))
+
+
+class VerdictTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.state = TempState()
+        self.path = self.state.root / "verdict.json"
+
+    def tearDown(self) -> None:
+        self.state.close()
+
+    def test_a_missing_verdict_is_never_a_pass(self) -> None:
+        with self.assertRaises(review.ReviewError):
+            review.read_verdict(self.path)
+
+    def test_a_malformed_verdict_is_never_a_pass(self) -> None:
+        for text in ("{", json.dumps({"event": "COMMENT", "body": "x"}), json.dumps({"event": "APPROVE"}),
+                     json.dumps({"event": "APPROVE", "body": "  "}), json.dumps(["APPROVE"])):
+            with self.subTest(text=text):
+                self.path.write_text(text)
+                with self.assertRaises(review.ReviewError):
+                    review.read_verdict(self.path)
+
+    def test_a_well_formed_verdict_is_read(self) -> None:
+        self.path.write_text(json.dumps({"event": "REQUEST_CHANGES", "body": "1. not met — x.cs:3"}))
+        self.assertEqual(review.read_verdict(self.path), ("REQUEST_CHANGES", "1. not met — x.cs:3"))
+
+
+class PostTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.state = TempState()
+        self.reviewed = pull(5, 9, head="h1")
+        self.patches = [mock.patch.object(common, "rest"), mock.patch("sys.stdout", new=io.StringIO()),
+                        mock.patch.object(identity, "installation_token", return_value="ghs_reviewer")]
+        self.rest, _, self.mint = [patch.start() for patch in self.patches]
+
+    def tearDown(self) -> None:
+        for patch in reversed(self.patches):
+            patch.stop()
+        self.state.close()
+
+    def test_a_pull_request_merged_during_the_review_gets_no_review(self) -> None:
+        with mock.patch.object(github, "pull", return_value=pull(5, 9, state="MERGED")):
+            self.assertFalse(review.post(self.state.cfg, self.reviewed, "APPROVE", "ok"))
+        self.rest.assert_not_called()
+        self.mint.assert_not_called()
+
+    def test_a_pull_request_that_moved_during_the_review_gets_no_review(self) -> None:
+        with mock.patch.object(github, "pull", return_value=pull(5, 9, head="h2")):
+            self.assertFalse(review.post(self.state.cfg, self.reviewed, "APPROVE", "ok"))
+        self.rest.assert_not_called()
+
+    def test_the_verdict_is_posted_as_a_real_review_pinned_to_the_reviewed_head(self) -> None:
+        with mock.patch.object(github, "pull", return_value=pull(5, 9, head="h1")):
+            self.assertTrue(review.post(self.state.cfg, self.reviewed, "REQUEST_CHANGES", "fix x"))
+        self.mint.assert_called_once_with("reviewer")
+        token, method, path, payload = self.rest.call_args.args
+        self.assertEqual((token, method, path), ("ghs_reviewer", "POST", "/repos/lunate-agent/lunate/pulls/5/reviews"))
+        self.assertEqual((payload["commit_id"], payload["event"]), ("h1", "REQUEST_CHANGES"))
+        self.assertTrue(payload["body"].startswith("fix x"))
+
+    def test_an_unreadable_state_before_posting_posts_nothing(self) -> None:
+        with mock.patch.object(github, "pull", side_effect=common.GhError("#5 could not be read")):
+            with self.assertRaises(common.GhError):
+                review.post(self.state.cfg, self.reviewed, "APPROVE", "ok")
+        self.rest.assert_not_called()
+
+    def test_a_reviewer_that_cannot_mint_is_a_named_failure(self) -> None:
+        self.mint.side_effect = identity.IdentityError("the token exchange was refused (401)")
+        with mock.patch.object(github, "pull", return_value=pull(5, 9, head="h1")):
+            with self.assertRaises(review.ReviewError):
+                review.post(self.state.cfg, self.reviewed, "APPROVE", "ok")
+
+
+class TickTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.state = TempState()
+        self.patches = [
+            mock.patch.object(github, "required_checks", return_value=REQUIRED),
+            mock.patch.object(harness, "running_workers", return_value={}),
+            mock.patch.object(github, "open_pulls", return_value=[pull(5, 9), pull(6, 10), pull(7, 11, author="x")]),
+            mock.patch.object(github, "pull", side_effect=lambda cfg, n: pull(n, n + 4)),
+            mock.patch("sys.stdout", new=io.StringIO()),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self) -> None:
+        for patch in reversed(self.patches):
+            patch.stop()
+        self.state.close()
+
+    def test_one_failed_review_does_not_stop_the_next_but_the_run_fails(self) -> None:
+        posted = []
+
+        def run_review(cfg, p):
+            if p.number == 5:
+                raise review.ReviewError("the reviewer wrote no verdict")
+            return "APPROVE", "ok"
+
+        with mock.patch.object(review, "run_review", side_effect=run_review), \
+                mock.patch.object(review, "post", side_effect=lambda cfg, p, e, b: posted.append(p.number) or True):
+            self.assertEqual(review.main(), 1)
+        self.assertEqual(posted, [6])
+        log = (self.state.cfg.state / "logs" / "review.log").read_text()
+        self.assertIn("#5 FAILED — the reviewer wrote no verdict", log)
+
+    def test_unreadable_required_checks_review_nothing(self) -> None:
+        github.required_checks.side_effect = common.GhError("no required status checks found")
+        with mock.patch.object(review, "run_review") as run_review:
+            self.assertEqual(review.main(), 1)
+        run_review.assert_not_called()
+
+    def test_only_the_worker_identitys_pull_requests_are_considered(self) -> None:
+        with mock.patch.object(review, "run_review", return_value=("APPROVE", "ok")) as run_review, \
+                mock.patch.object(review, "post", return_value=True):
+            review.main()
+        self.assertEqual([c.args[1].number for c in run_review.call_args_list], [5, 6])
+
+    def test_a_dry_run_reviews_nothing(self) -> None:
+        with mock.patch.object(review, "run_review") as run_review, mock.patch.object(sys, "argv", ["r", "--dry-run"]):
+            self.assertEqual(review.main(), 0)
+        run_review.assert_not_called()
+
+
+class ErrorTypeTests(unittest.TestCase):
+    def test_review_errors_are_lane_errors(self) -> None:
+        self.assertTrue(issubclass(review.ReviewError, LaneError))
+
+
+if __name__ == "__main__":
+    unittest.main()
