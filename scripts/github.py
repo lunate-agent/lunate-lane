@@ -139,7 +139,7 @@ def open_pulls(cfg: common.Config) -> list[Pull]:
 
 PULL = """query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){pullRequest(number:$n){
 number title state isDraft createdAt headRefName headRefOid mergeable author{login} autoMergeRequest{enabledAt}
-closingIssuesReferences(first:10){pageInfo{hasNextPage} nodes{number labels(first:50){nodes{name}}}}
+closingIssuesReferences(first:10){pageInfo{hasNextPage} nodes{number labels(first:50){pageInfo{hasNextPage} nodes{name}}}}
 reviews(last:100){pageInfo{hasPreviousPage} nodes{author{login} state body commit{oid}}}
 commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:100){pageInfo{hasNextPage}
 nodes{__typename ... on CheckRun{name status conclusion} ... on StatusContext{context state}}}}}}}}}}"""
@@ -165,7 +165,8 @@ def pull(cfg: common.Config, number: int) -> Pull:
         draft=bool(node["isDraft"]), created=str(node["createdAt"]), author=login(node.get("author")),
         branch=str(node["headRefName"]), head=str(node["headRefOid"]), mergeable=str(node.get("mergeable") or ""),
         auto_merge=node.get("autoMergeRequest") is not None, cards=tuple(i["number"] for i in issues),
-        labels=frozenset(label["name"] for i in issues for label in i["labels"]["nodes"]),
+        labels=frozenset(label["name"] for i in issues
+                         for label in _complete(i["labels"], f"#{number}'s issue #{i['number']}'s labels")),
         reviews=tuple(Review(login(r.get("author")), str(r["state"]), str((r.get("commit") or {}).get("oid") or ""),
                              str(r.get("body") or "")) for r in node["reviews"]["nodes"]),
         checks=checks,

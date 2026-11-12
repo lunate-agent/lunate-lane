@@ -61,7 +61,7 @@ class PullTests(unittest.TestCase):
         node = {"number": 5, "title": "t", "state": "OPEN", "isDraft": False, "createdAt": "2026-11-12T00:00:00Z",
                 "headRefName": "wt/issue-9", "headRefOid": "abc", "mergeable": "MERGEABLE",
                 "author": {"login": "lunate-worker"}, "autoMergeRequest": None,
-                "closingIssuesReferences": page([{"number": 9, "labels": {"nodes": [{"name": "area/tui"}]}}]),
+                "closingIssuesReferences": page([{"number": 9, "labels": page([{"name": "area/tui"}])}]),
                 "reviews": {"pageInfo": {"hasPreviousPage": False},
                             "nodes": [{"author": {"login": "lunate-reviewer"}, "state": "APPROVED", "body": "ok",
                                        "commit": {"oid": "abc"}}]},
@@ -84,6 +84,14 @@ class PullTests(unittest.TestCase):
         with mock.patch.object(common, "graphql", return_value=many):
             with self.assertRaises(GhError):
                 github.pull(CFG, 5)
+
+    def test_a_truncated_closing_issue_label_list_is_refused(self) -> None:
+        """A dropped area/ label would weaken the one-card-per-area rule: refuse rather than use part of the list."""
+        cut = self.node(closingIssuesReferences=page([{"number": 9, "labels": page([{"name": "x"}], more=True)}]))
+        with mock.patch.object(common, "graphql", return_value=cut):
+            with self.assertRaises(GhError) as caught:
+                github.pull(CFG, 5)
+        self.assertIn("#9's labels", str(caught.exception))
 
     def test_a_missing_pull_request_is_a_named_failure(self) -> None:
         with mock.patch.object(common, "graphql", return_value={"repository": {"pullRequest": None}}):
