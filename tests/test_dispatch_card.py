@@ -16,6 +16,11 @@ class CardTests(unittest.TestCase):
         self._tmp = tempfile.mkdtemp(prefix="lane-card-")
         self.repo = pathlib.Path(self._tmp)
         subprocess.run(["git", "init", "-q", "-b", "main"], cwd=self._tmp, capture_output=True)
+        subprocess.run(["git", "config", "user.email", "lane@example.invalid"], cwd=self._tmp, capture_output=True)
+        subprocess.run(["git", "config", "user.name", "lane test"], cwd=self._tmp, capture_output=True)
+        (self.repo / "seed.txt").write_text("seed\n")
+        subprocess.run(["git", "add", "seed.txt"], cwd=self._tmp, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=self._tmp, capture_output=True)
         self.saved = (dispatch_card.gh, open_pr.open_pr)
 
     def tearDown(self) -> None:
