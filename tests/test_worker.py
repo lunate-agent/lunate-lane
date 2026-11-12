@@ -516,8 +516,16 @@ class DriveTests(RepoCase):
                 session.side_effect = lambda *a, **k: order.append(("session",)) or real(*a, **k)
                 worker.drive(self.cfg, 3, 77)
         self.assertEqual(order[:2], [("draft", "wt/issue-3", 77), ("session",)])
-        self.assertEqual(harness.rework_rounds(3, 77), 1, "a rework round is counted when it starts (#9)")
+        self.assertEqual(harness.rework_rounds(3, 77), 0, "drive counts nothing: the feeder or main already did")
         self.assertIn("#77 is a draft again", (self.cfg.state / "logs" / "worker-3.log").read_text())
+
+    def test_a_hand_started_rework_counts_its_round_before_anything_can_fail(self) -> None:
+        """Review of #17, item 5: the worktree cannot even be cut, and the round is counted all the same."""
+        with mock.patch.object(sys, "argv", ["worker.py", "--issue", "3", "--rework", "77"]), \
+                mock.patch.object(harness, "live_pid", return_value=None), \
+                mock.patch.object(worker, "prepare_worktree", side_effect=GitError("merge --ff-only failed (128)")):
+            self.assertEqual(worker.main(), 1)
+        self.assertEqual(harness.rework_rounds(3, 77), 1)
 
     def test_a_rework_that_keeps_adding_nothing_is_parked_on_its_pull_request(self) -> None:
         sha = self.push_branch("wt/issue-3", "first.cs")

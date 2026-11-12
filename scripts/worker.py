@@ -227,7 +227,7 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
     if rework_pr:
         # back to draft before the session: CI's heavy legs and the reviewer wait for the clean finish (#5)
         open_pr.return_to_draft(f"wt/issue-{number}", rework_pr)
-        rounds = harness.note_rework(number, rework_pr)
+        rounds = harness.rework_rounds(number, rework_pr)  # counted before this run started (feed, main)
         common.log(job, f"#{rework_pr} is a draft again for rework round {rounds} of {harness.REWORK_LIMIT}, "
                         "auto-merge off")
     scratch = common.state_dir("scratch", f"issue-{number}")
@@ -355,6 +355,8 @@ def main() -> int:
             common.log(job, f"worker {live} is already running this card — leaving")
             return 1
         if live is None:  # started by hand rather than by the feeder, which records the worker itself
+            if args.rework:  # the feeder counts its own reworks; a hand-started one counts here, before anything
+                harness.note_rework(args.issue, args.rework)
             labels = [label["name"] for label in dispatch_card.card(cfg.checkout, args.issue).get("labels") or []]
             harness.record_worker(args.issue, pid, cards.areas_of(labels, cfg.area_prefix), args.rework)
         try:

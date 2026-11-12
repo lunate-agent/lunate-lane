@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from scripts import cleanup, feed, github, harness  # noqa: E402
+from scripts import cleanup, common, feed, github, harness  # noqa: E402
 from scripts.common import GhError, StateError  # noqa: E402
 from tests.helpers import REQUIRED, TempState, card, pull, review  # noqa: E402
 
@@ -72,6 +72,26 @@ class FeedTests(unittest.TestCase):
             self.assertEqual(feed.main(), 0)
         self.assertEqual(harness.parked_details(), {})
         self.assertIn("would park card #9 instead of a rework of #50", (self.state.cfg.state / "logs" / "feed.log").read_text())
+
+    def test_a_rework_that_fails_before_it_starts_still_counts_and_is_parked_at_the_cap(self) -> None:
+        """Review of #17, item 5: every launch counts first, so a rework whose worker dies in its setup (a
+        diverged branch, a held worktree, a refused draft) is parked after three ticks instead of forever."""
+        from scripts import open_pr
+
+        comments = []
+        with mock.patch.object(open_pr, "comment", side_effect=lambda n, body: comments.append(n)):
+            for tick in range(1, 6):
+                feed.main()
+                rounds = harness.rework_rounds(9, 50)
+                self.assertEqual(rounds, min(tick, 3), f"tick {tick}")
+        self.assertEqual([l.rework_pr for l in self.started].count(50), 3)
+        self.assertEqual(harness.parked_details(), {9: "reworks"})
+        self.assertEqual(comments, [50])
+
+    def test_a_failed_start_still_counts_the_round(self) -> None:
+        feed.start.side_effect = common.LaneError("the worker for #9 could not be started (OSError)")
+        self.assertEqual(feed.main(), 1)
+        self.assertEqual(harness.rework_rounds(9, 50), 1)
 
     def test_two_rework_rounds_still_rework(self) -> None:
         for _ in range(2):

@@ -102,6 +102,10 @@ def tick(dry_run: bool = False) -> None:
         if dry_run:
             common.log(JOB, f"would start {what}")
             continue
+        if launch.rework_pr:
+            # counted before anything that can fail — the worker's own setup included — so a rework that keeps
+            # failing early still reaches the cap and is parked, instead of relaunching every tick
+            harness.note_rework(launch.card, launch.rework_pr)
         pid = start(cfg, launch)
         common.log(JOB, f"started {what} (pid {pid})")
     if not launches:
