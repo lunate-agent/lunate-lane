@@ -195,6 +195,42 @@ class SessionTests(HarnessCase):
         with self.assertRaises(ProcessLookupError):
             os.kill(pid, 0)
 
+    def test_a_sigterm_to_the_driver_kills_the_session_group(self) -> None:
+        """What `kill <worker pid>` does: the handler raises SystemExit, run_session kills Pi's group on the way out."""
+        import signal
+        import threading
+
+        self.fake_pi("echo $$ > \"$TMPDIR/pid\"\n(sleep 60) &\necho $! > \"$TMPDIR/child\"\n"
+                     "while true; do echo tick; sleep 0.1; done\n")
+        scratch = self.state.root / "scratch"
+        saved = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+        self.addCleanup(lambda: [signal.signal(sig, handler) for sig, handler in saved.items()])
+        harness.exit_on_signals()
+
+        def term_when_started():
+            for _ in range(100):
+                if (scratch / "child").exists() and (scratch / "child").read_text().strip():
+                    break
+                time.sleep(0.05)
+            os.kill(os.getpid(), signal.SIGTERM)
+
+        threading.Thread(target=term_when_started, daemon=True).start()
+        with self.assertRaises(SystemExit) as caught:
+            self.run_fake()
+        self.assertEqual(caught.exception.code, 128 + signal.SIGTERM)
+        for name in ("pid", "child"):
+            with self.subTest(process=name):
+                pid = int((scratch / name).read_text())
+                time.sleep(0.2)
+                with self.assertRaises(ProcessLookupError):
+                    os.kill(pid, 0)
+
+    def test_on_start_gets_the_session_group(self) -> None:
+        self.fake_pi("echo $$ > \"$TMPDIR/pid\"\necho done\n")
+        seen = []
+        self.run_fake(on_start=seen.append)
+        self.assertEqual(seen, [int((self.state.root / "scratch" / "pid").read_text())])
+
     def test_an_unreadable_log_is_a_named_failure_not_an_empty_message(self) -> None:
         with self.assertRaises(harness.HarnessError):
             harness.last_text(self.state.root / "absent.jsonl")
@@ -210,6 +246,53 @@ class WorkerRecordTests(HarnessCase):
         self.assertEqual(harness.running_workers(), {5: frozenset({"area/tui"})})
         self.assertFalse((self.cfg.state / "workers" / "6.json").exists())
         self.assertEqual(harness.live_pid(5), proc.pid)
+
+    def orphan(self, session_id: str) -> subprocess.Popen:
+        """A stand-in Pi in its own group. A thread reaps it, as launchd reaps a real orphan once it dies."""
+        import threading
+
+        proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "--session-id", session_id],
+                                start_new_session=True)
+        threading.Thread(target=proc.wait, daemon=True).start()
+        self.addCleanup(lambda: proc.poll() is None and proc.kill())
+        time.sleep(0.2)
+        return proc
+
+    def test_a_session_left_by_a_killed_driver_is_killed_when_its_record_is_cleared(self) -> None:
+        pi = self.orphan("issue-5-20261112-120000-1")
+        harness.record_worker(5, 999999, frozenset(), None)
+        record = self.cfg.state / "workers" / "5.json"
+        record.write_text(json.dumps({**json.loads(record.read_text()), "session_pgid": pi.pid}))
+        self.assertEqual(harness.running_workers(), {})
+        self.assertIsNotNone(pi.wait(timeout=5), "the orphaned session must be gone")
+        self.assertFalse(record.exists())
+
+    def test_live_pid_also_clears_an_orphaned_session(self) -> None:
+        pi = self.orphan("issue-6-x")
+        harness.record_worker(6, 999999, frozenset(), None)
+        harness.note_session(6, 999999, pi.pid)
+        self.assertIsNone(harness.live_pid(6))
+        self.assertIsNotNone(pi.wait(timeout=5))
+
+    def test_a_recycled_session_pgid_running_something_else_is_left_alone(self) -> None:
+        other = self.orphan("issue-55-x")  # card 5's record must not touch card 55's session
+        harness.record_worker(5, 999999, frozenset(), None)
+        harness.note_session(5, 999999, other.pid)
+        self.assertEqual(harness.running_workers(), {})
+        self.assertIsNone(other.poll())
+
+    def test_a_session_is_noted_only_on_the_drivers_own_record(self) -> None:
+        harness.record_worker(5, 111, frozenset(), None)
+        with self.assertRaises(StateError):
+            harness.note_session(5, 222, 333)
+
+    def test_an_unreadable_attempts_record_raises_rather_than_reading_as_not_parked(self) -> None:
+        (self.cfg.state / "attempts").mkdir(parents=True, exist_ok=True)
+        (self.cfg.state / "attempts" / "5.json").write_text("{")
+        with self.assertRaises(StateError):
+            harness.parked_cards()
+        with self.assertRaises(StateError):
+            harness.note_run(5, False)
 
     def test_a_recycled_pid_running_something_else_is_not_the_worker(self) -> None:
         proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)", "worker.py", "--issue", "55"])

@@ -35,7 +35,7 @@ def decide(cfg: common.Config) -> tuple[list[cards.Launch], list[str]]:
     running = harness.running_workers()
     pins = cards.load_pins(cfg.pins)
     return cards.plan(cards=milestone, open_pulls=pulls, worker_pulls=worker_pulls, running=running,
-                      rules=rules(cfg), pins=pins)
+                      rules=rules(cfg), pins=pins, parked=harness.parked_cards())
 
 
 def start(cfg: common.Config, launch: cards.Launch) -> int:

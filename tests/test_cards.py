@@ -15,10 +15,10 @@ RULES = cards.Rules(wip_limit=5, worker_app="lunate-worker", reviewer_app="lunat
                     bug_label="kind/bug", area_prefix="area/")
 
 
-def plan(cards_, open_pulls=(), worker_pulls=(), running=None, pins=(), rules=RULES):
+def plan(cards_, open_pulls=(), worker_pulls=(), running=None, pins=(), rules=RULES, parked=frozenset()):
     worker_pulls = list(worker_pulls)
     return cards.plan(cards=list(cards_), open_pulls=list(open_pulls) or worker_pulls, worker_pulls=worker_pulls,
-                      running=running or {}, rules=rules, pins=tuple(pins))
+                      running=running or {}, rules=rules, pins=tuple(pins), parked=frozenset(parked))
 
 
 def started(launches):
@@ -157,6 +157,21 @@ class ReworkTests(unittest.TestCase):
         launches, notes = plan([], worker_pulls=[orphan])
         self.assertEqual(launches, [])
         self.assertTrue(any("#101 needs rework but carries no card" in note for note in notes))
+
+
+class ParkedTests(unittest.TestCase):
+    def test_a_parked_card_is_not_started_and_the_next_one_is(self) -> None:
+        launches, notes = plan([card(1, "kind/bug"), card(2)], parked={1})
+        self.assertEqual(started(launches), [(2, None)])
+        self.assertIn("#1 is parked after runs with no new commit — left for a person", notes)
+
+    def test_a_parked_card_is_not_sent_back_for_rework_but_still_counts_as_in_flight(self) -> None:
+        sent_back = pull(101, 1, reviews=[review("CHANGES_REQUESTED")])
+        rules = cards.Rules(1, "lunate-worker", "lunate-reviewer", "kind/bug", "area/")
+        launches, notes = plan([card(5)], worker_pulls=[sent_back], parked={1}, rules=rules)
+        self.assertEqual(started(launches), [])
+        self.assertIn("#101 needs rework but card #1 is parked — left for a person", notes)
+        self.assertIn("WIP 1 of 1 — no new card", notes)
 
 
 if __name__ == "__main__":

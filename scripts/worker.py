@@ -149,8 +149,10 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
 
     session_log = common.state_dir("sessions") / f"issue-{number}-{os.getpid()}.jsonl"
     common.log(job, f"session on {cfg.worker_model}" + (f", rework of #{rework_pr}" if rework_pr else ""))
+    driver = os.getpid()
     outcome = harness.run_session(cfg, model=cfg.worker_model, worktree=worktree, prompt=text, scratch=scratch,
-                                  log_path=session_log, extra_env={"LANE_PR_FILE": str(pr_file)}, on_tick=open_early)
+                                  log_path=session_log, extra_env={"LANE_PR_FILE": str(pr_file)}, on_tick=open_early,
+                                  on_start=lambda pgid: harness.note_session(number, driver, pgid))
     return finish(cfg, number, worktree, outcome, start_head, session_log)
 
 
@@ -158,8 +160,13 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
            session_log: pathlib.Path) -> int:
     job = f"worker-{number}"
     found = problems(outcome, worktree, start_head)
+    idle, parked_now = harness.note_run(number, common.git(worktree, "rev-parse", "HEAD") != start_head)
+    if idle:
+        common.log(job, f"no new commit — idle run {idle} of {harness.IDLE_RUN_LIMIT}")
     if dispatch_card._count(worktree, f"wt/issue-{number}") == 0:
         common.log(job, "the session ended with no commits — no pull request. " + "; ".join(found))
+        if parked_now:
+            park(cfg, number, number, idle)
         return 1
     result = dispatch_card.dispatch(worktree, number, arm=not found)
     head = common.git(worktree, "rev-parse", "HEAD")[:9]
@@ -176,7 +183,19 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
     open_pr.comment(result["number"], "\n".join(lines)[:COMMENT_LIMIT])
     common.log(job, f"#{result['number']} pushed at {head}, auto-merge {result['auto_merge']}"
                + (f" — {'; '.join(found)}" if found else ""))
+    if parked_now:
+        park(cfg, number, result["number"], idle)
     return 1 if found else 0
+
+
+def park(cfg: common.Config, card: int, target: int, idle: int) -> None:
+    """Say, on the pull request (or the issue when there is none), that the lane stops relaunching this card."""
+    record = cfg.state / "attempts" / f"{card}.json"
+    open_pr.comment(target, (
+        f"**Lane: card #{card} is parked.** {idle} worker runs in a row ended with no new commit, so the feeder "
+        f"will not start it again (cap: {harness.IDLE_RUN_LIMIT}). It needs a person: split or clarify the card, "
+        f"or push a fix. To let the lane pick it up again, delete `{record}` on the lane host."))
+    common.log(f"worker-{card}", f"parked after {idle} idle runs — commented on #{target}")
 
 
 def main() -> int:
@@ -185,6 +204,7 @@ def main() -> int:
     parser.add_argument("--rework", type=int, help="the pull request whose requested changes to address")
     args = parser.parse_args()
     job, pid = f"worker-{args.issue}", os.getpid()
+    harness.exit_on_signals()
     try:
         cfg = common.config()
         live = harness.live_pid(args.issue)

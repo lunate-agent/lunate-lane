@@ -67,12 +67,13 @@ def needs_rework(p: Pull, reviewer_app: str) -> bool:
 
 
 def plan(*, cards: list[Card], open_pulls: list[Pull], worker_pulls: list[Pull], running: dict,
-         rules: Rules, pins: tuple = ()) -> tuple[list[Launch], list[str]]:
+         rules: Rules, pins: tuple = (), parked: frozenset = frozenset()) -> tuple[list[Launch], list[str]]:
     """What to start this tick: reworks first, then new cards while there is room. Returns (launches, notes).
 
     `open_pulls` is every open pull request (any author): a card one of them carries or closes is never started.
     `worker_pulls` are the worker identity's open pull requests, in full. `running` maps the card of each
-    running worker to its areas.
+    running worker to its areas. A `parked` card (too many runs with no new commit) is neither reworked nor
+    started; its open pull request still counts as in flight.
     """
     by_number = {card.number: card for card in cards}
 
@@ -87,10 +88,13 @@ def plan(*, cards: list[Card], open_pulls: list[Pull], worker_pulls: list[Pull],
     taken = {n for p in open_pulls for n in (p.card, *p.cards) if n is not None} | set(running)
 
     launches = [Launch(p.card, p.number, pull_areas(p)) for p in sorted(worker_pulls, key=lambda p: p.number)
-                if p.card is not None and p.card not in running and needs_rework(p, rules.reviewer_app)]
+                if p.card is not None and p.card not in running and p.card not in parked
+                and needs_rework(p, rules.reviewer_app)]
     for p in worker_pulls:
         if p.card is None and needs_rework(p, rules.reviewer_app):
             notes.append(f"#{p.number} needs rework but carries no card — left for the orchestrator")
+        elif p.card in parked and p.card not in running and needs_rework(p, rules.reviewer_app):
+            notes.append(f"#{p.number} needs rework but card #{p.card} is parked — left for a person")
 
     wip = len(in_flight)
     for card in order(cards, pins, rules.bug_label):
@@ -99,6 +103,9 @@ def plan(*, cards: list[Card], open_pulls: list[Pull], worker_pulls: list[Pull],
             break
         areas = areas_of(card.labels, rules.area_prefix)
         if card.number in taken:
+            continue
+        if card.number in parked:
+            notes.append(f"#{card.number} is parked after runs with no new commit — left for a person")
             continue
         if card.blocked_by:
             notes.append(f"#{card.number} waits on " + ", ".join(f"#{n}" for n in card.blocked_by))

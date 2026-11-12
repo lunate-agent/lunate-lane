@@ -139,8 +139,13 @@ def argv(cfg: common.Config, model: str, session_dir: pathlib.Path, session_id: 
 
 def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, prompt: str, scratch: pathlib.Path,
                 log_path: pathlib.Path, extra_env: dict | None = None, on_tick: Callable[[], None] | None = None,
-                tick: float = 30.0) -> Outcome:
-    """Run Pi to completion in `worktree`, killing it when its event stream stalls or it passes the hard cap."""
+                on_start: Callable[[int], None] | None = None, tick: float = 30.0) -> Outcome:
+    """Run Pi to completion in `worktree`, killing it when its event stream stalls or it passes the hard cap.
+
+    Pi runs in a process group of its own; `on_start` gets its id, so a record can name it for clean-up if this
+    driver is killed outright. Any exception here — including the SystemExit `exit_on_signals` raises on
+    SIGTERM — kills that group before it propagates.
+    """
     timeout, idle = int(cfg.harness["session_timeout"]), int(cfg.harness["stall_idle"])
     session_id = f"{worktree.name}-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
     command = argv(cfg, model, scratch / "sessions", session_id, prompt)
@@ -155,6 +160,8 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
         started = last_activity = time.monotonic()
         size, stalled = -1, False
         try:
+            if on_start is not None:
+                on_start(proc.pid)
             while proc.poll() is None:
                 time.sleep(tick)
                 now = time.monotonic()
@@ -171,6 +178,16 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
             _kill_group(proc)  # never leave a session running behind a driver that is going away
             raise
     return Outcome(proc.returncode, stalled, int(time.monotonic() - started), leaked_markup(log_path))
+
+
+def exit_on_signals() -> None:
+    """SIGTERM, SIGHUP and SIGINT become SystemExit, so a killed driver still runs its clean-up — the session's
+    group is killed (run_session) and its record cleared — instead of leaving Pi running behind it."""
+    def leave(signum, _frame):
+        raise SystemExit(128 + signum)
+
+    for sig in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT):
+        signal.signal(sig, leave)
 
 
 def _kill_group(proc: subprocess.Popen) -> None:
@@ -248,14 +265,75 @@ def _record(card: int) -> pathlib.Path:
 
 
 def record_worker(card: int, pid: int, areas: frozenset, rework_pr: int | None) -> None:
-    path = _record(card)
+    _write_record(_record(card), {"card": card, "pid": pid, "areas": sorted(areas), "rework_pr": rework_pr,
+                                  "started": time.time()})
+
+
+def _write_record(path: pathlib.Path, data: dict) -> None:
     tmp = path.with_suffix(".tmp")
-    data = {"card": card, "pid": pid, "areas": sorted(areas), "rework_pr": rework_pr, "started": time.time()}
     try:
         tmp.write_text(json.dumps(data))
         os.replace(tmp, path)
     except OSError as exc:
         raise StateError(f"the worker record {path} could not be written: {exc}") from exc
+
+
+def note_session(card: int, pid: int, session_pgid: int) -> None:
+    """Add the running session's process group to this driver's own record (another driver's is left alone)."""
+    path = _record(card)
+    try:
+        data = json.loads(path.read_text())
+    except (OSError, ValueError) as exc:
+        raise StateError(f"the worker record {path} could not be read: {exc}") from exc
+    if data.get("pid") != pid:
+        raise StateError(f"the worker record {path} belongs to pid {data.get('pid')}, not {pid}")
+    data["session_pgid"] = int(session_pgid)
+    _write_record(path, data)
+
+
+def _command(pid: int) -> str | None:
+    """The command line of a live pid, or None if it is gone. ps failing for another reason raises."""
+    try:
+        done = subprocess.run(["ps", "-o", "command=", "-p", str(pid)], capture_output=True, text=True, timeout=30)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise StateError(f"ps could not be run to check pid {pid} ({exc.__class__.__name__})") from exc
+    if done.returncode == 1 and not done.stdout.strip():
+        return None
+    if done.returncode != 0:
+        raise StateError(f"ps failed ({done.returncode}) checking pid {pid}: {done.stderr.strip()[:120]}")
+    return done.stdout.strip()
+
+
+def reap_session(card: int, session_pgid: int | None, grace: float = 10.0) -> bool:
+    """Kill the Pi session a dead driver left behind. Only a group whose leader is still this card's session is
+    touched — a recycled pid running something else is not. Returns whether a session was killed."""
+    if not session_pgid:
+        return False
+    command = _command(session_pgid)
+    if command is None or f"--session-id issue-{int(card)}-" not in command:
+        return False
+    try:
+        for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, grace)):
+            try:
+                os.killpg(session_pgid, sig)
+            except ProcessLookupError:
+                return True
+            deadline = time.monotonic() + wait
+            while time.monotonic() < deadline:
+                try:
+                    os.killpg(session_pgid, 0)
+                except ProcessLookupError:
+                    return True
+                time.sleep(0.1)
+    except PermissionError as exc:
+        raise StateError(f"the orphaned session of card #{card} (group {session_pgid}) could not be signalled: "
+                         f"{exc}") from exc
+    raise StateError(f"the orphaned session of card #{card} (group {session_pgid}) survived SIGKILL")
+
+
+def _clear_dead(path: pathlib.Path, card: int, session_pgid: int | None) -> None:
+    reap_session(card, session_pgid)
+    path.unlink(missing_ok=True)
 
 
 def clear_worker(card: int, pid: int) -> None:
@@ -290,30 +368,79 @@ def worker_alive(pid: int, card: int) -> bool:
 def _read_record(path: pathlib.Path) -> tuple:
     try:
         data = json.loads(path.read_text())
-        return int(data["card"]), int(data["pid"]), frozenset(data["areas"])
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+        pgid = data.get("session_pgid")
+        return int(data["card"]), int(data["pid"]), frozenset(data["areas"]), int(pgid) if pgid else None
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise StateError(f"the worker record {path} could not be read: {exc}") from exc
 
 
 def live_pid(card: int) -> int | None:
-    """The pid of the live worker for this card, or None. A dead record is removed; an unreadable one raises."""
+    """The pid of the live worker for this card, or None. A dead record is removed, after killing any session
+    its driver left running; an unreadable one raises."""
     path = _record(card)
     if not path.exists():
         return None
-    _, pid, _ = _read_record(path)
+    _, pid, _, session_pgid = _read_record(path)
     if worker_alive(pid, card):
         return pid
-    path.unlink(missing_ok=True)
+    _clear_dead(path, card, session_pgid)
     return None
 
 
 def running_workers() -> dict:
-    """card -> areas for every live worker. A record that cannot be read raises; a dead one is removed."""
+    """card -> areas for every live worker. A record that cannot be read raises; a dead one is removed, and the
+    session its driver left running is killed first."""
     found = {}
     for path in sorted(common.state_dir("workers").glob("*.json")):
-        card, pid, areas = _read_record(path)
+        card, pid, areas, session_pgid = _read_record(path)
         if worker_alive(pid, card):
             found[card] = areas
         else:
-            path.unlink(missing_ok=True)
+            _clear_dead(path, card, session_pgid)
     return found
+
+
+# --- idle runs: a card whose runs leave no new commit is parked after IDLE_RUN_LIMIT of them ---
+
+IDLE_RUN_LIMIT = 3
+
+
+def _attempts(card: int) -> pathlib.Path:
+    return common.state_dir("attempts") / f"{int(card)}.json"
+
+
+def _read_attempts(path: pathlib.Path) -> dict:
+    if not path.exists():
+        return {"idle_runs": 0, "parked": False}
+    try:
+        data = json.loads(path.read_text())
+        return {"idle_runs": int(data["idle_runs"]), "parked": bool(data["parked"])}
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise StateError(f"the attempts record {path} could not be read: {exc}") from exc
+
+
+def note_run(card: int, new_commit: bool) -> tuple[int, bool]:
+    """Count a finished run: a new commit resets the count, none adds one. Returns (idle runs, parked just now)."""
+    path = _attempts(card)
+    data = _read_attempts(path)
+    if new_commit:
+        path.unlink(missing_ok=True)
+        return 0, False
+    idle = data["idle_runs"] + 1
+    parked = idle >= IDLE_RUN_LIMIT
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps({"idle_runs": idle, "parked": parked, "updated": time.time()}))
+        os.replace(tmp, path)
+    except OSError as exc:
+        raise StateError(f"the attempts record {path} could not be written: {exc}") from exc
+    return idle, parked and not data["parked"]
+
+
+def parked_cards() -> frozenset:
+    """Cards the feeder must not start again until a person deletes their attempts record."""
+    found = set()
+    for path in sorted(common.state_dir("attempts").glob("*.json")):
+        if _read_attempts(path)["parked"]:
+            found.add(int(path.stem))
+    return frozenset(found)

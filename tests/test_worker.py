@@ -1,6 +1,8 @@
 """The worker driver against real temporary repositories; GitHub and the session itself are replaced."""
 
 import io
+import json
+import os
 import pathlib
 import sys
 import unittest
@@ -281,6 +283,48 @@ class DriveTests(RepoCase):
                 log = (self.cfg.state / "logs" / "worker-3.log").read_text()
                 self.assertIn(f"shaped like a {kind} — not posted", log)
                 self.assertNotIn(token, log)
+
+    def test_three_runs_without_a_new_commit_park_the_card_once_and_say_so_on_the_issue(self) -> None:
+        for run in range(1, 5):
+            with self.fake_session(commit=False):
+                self.assertEqual(worker.drive(self.cfg, 3, None), 1)
+            self.assertEqual(harness.parked_cards(), frozenset({3}) if run >= 3 else frozenset())
+        self.assertEqual(len(self.comments), 1, "one parking comment, not one per idle run")
+        target, body = self.comments[0]
+        self.assertEqual(target, 3, "no pull request exists, so the issue gets the comment")
+        self.assertIn("card #3 is parked", body)
+        self.assertIn("attempts/3.json", body)
+        self.assertIn("parked after 3 idle runs", (self.cfg.state / "logs" / "worker-3.log").read_text())
+
+    def test_a_rework_that_keeps_adding_nothing_is_parked_on_its_pull_request(self) -> None:
+        sha = self.push_branch("wt/issue-3", "first.cs")
+        with mock.patch.object(github, "pull", return_value=pull(77, 3, head=sha,
+                                                                 reviews=[review("CHANGES_REQUESTED", commit=sha)])):
+            for _ in range(3):
+                with self.fake_session(commit=False):
+                    worker.drive(self.cfg, 3, 77)
+        parking = [c for c in self.comments if "is parked" in c[1]]
+        self.assertEqual([c[0] for c in parking], [77])
+
+    def test_a_new_commit_resets_the_idle_count(self) -> None:
+        for commit in (False, False, True, False, False):
+            with self.fake_session(commit=commit):
+                worker.drive(self.cfg, 3, None)
+        self.assertEqual(harness.parked_cards(), frozenset())
+        self.assertEqual(harness.note_run(3, False), (3, True))
+
+    def test_the_session_group_is_recorded_for_clean_up(self) -> None:
+        harness.record_worker(3, os.getpid(), frozenset(), None)
+
+        def run(cfg, *, on_start, log_path, **_):
+            on_start(4242)
+            log_path.write_text("")
+            return harness.Outcome(0, False, 1, False)
+
+        with mock.patch.object(harness, "run_session", side_effect=run):
+            worker.drive(self.cfg, 3, None)
+        record = json.loads((self.cfg.state / "workers" / "3.json").read_text())
+        self.assertEqual(record["session_pgid"], 4242)
 
     def test_a_closed_issue_is_never_worked(self) -> None:
         dispatch_card.card.side_effect = dispatch_card.CardError("issue #3 is CLOSED, not open")
