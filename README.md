@@ -50,21 +50,33 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    - **limits**: total WIP ≤ `wip_limit`, where WIP is the cards in flight — each open worker pull request plus
      each running worker, a worker and its own pull request counted once — and at most one card in flight per
      `area/*` label. A card without an area label has no area limit.
+   - **parked cards**: a card whose worker runs ended with no new commit three times in a row (new card or
+     rework) is parked. The feeder no longer starts or reworks it, its open pull request still counts toward
+     WIP, and the run that parked it says so in a comment on the pull request (on the issue if there is none). A
+     new commit resets the count. To give a parked card back to the lane, delete `<state>/attempts/<card>.json`.
 2. **Worker** (`scripts/worker.py --issue N [--rework PR]`, started detached by the feeder). Cuts or continues
    the worktree `<state>/worktrees/issue-N` of the checkout on `wt/issue-N`, renders `templates/worker-brief.md`
    with the issue body, and runs one Pi session on the worker model. The session has no GitHub credential; the
    lane pushes. At the branch's first commit the pull request is opened **without** auto-merge (so the worker can
    name its `changes/<pr>.md` fragment); when the session ends with commits the branch is pushed again, the
    session's final report is posted on the pull request, and auto-merge is armed — only if the run was clean (exit
-   0, not stalled, nothing uncommitted, a new commit, a real final message). Otherwise it stays unarmed with a
-   comment naming why, and the orchestrator takes over.
+   0, not stalled, nothing uncommitted, a new commit, a real final message). Otherwise auto-merge is left off — and
+   turned **off** before the push when a rework lands on a pull request that was armed — with a comment naming
+   why, and the orchestrator takes over. The auto-merge state in the comment and the log is read back from
+   GitHub, never assumed. The final report is scanned before posting: anything token- or key-shaped (GitHub
+   tokens, `sk-` keys, private-key blocks, AWS keys, JWTs, `key=…`/`token=…` assignments, long opaque strings, or
+   the model credential itself) replaces it with a fixed "output withheld" note, and the worker log says so.
+   Stopping a worker with `kill <pid>` (SIGTERM, also SIGHUP or SIGINT) kills its Pi session's process group on
+   the way out. If the driver is SIGKILLed, its record names the session's group, and the next feeder or
+   reviewer tick that finds the driver dead kills that session before clearing the record.
 3. **Reviewer** (`scripts/review.py`, every 10 minutes). For each open worker pull request that is not a draft,
    has no running worker, has every *required* check green on its head, and has no review from
    `lunate-reviewer` at that head: runs a Pi session on the reviewer model (the config refuses one equal to the
    worker's) in a detached worktree at the head, with the diff and the issue in `templates/review-brief.md`. The
    session writes a JSON verdict; the lane re-reads the pull request and, only if it is still open at the same
-   head, posts a real review — `APPROVE` or `REQUEST_CHANGES` with the findings — as `lunate-reviewer`. A missing
-   or malformed verdict posts nothing.
+   head, posts a real review — `APPROVE` or `REQUEST_CHANGES` with the findings — as `lunate-reviewer`. It then
+   reads the review back, and if GitHub names any other author the run exits non-zero. A submitted review cannot
+   be deleted, so a person has to dismiss it. A missing or malformed verdict posts nothing.
 4. **Merging** is GitHub's: the ruleset (one approval, code-owner review for `adr/`, required checks, merge queue)
    plus the auto-merge the worker armed.
 5. **Digest** (`scripts/digest.py`, daily). One short message on stdout and in `<state>/digest/latest.md`: open
@@ -79,7 +91,7 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
 | `scripts/common.py` | Config loading, the named errors, `gh`/`git`/GraphQL/REST calls that raise instead of returning empty, templates, logs, locks, the cron job wrapper. |
 | `scripts/github.py` | Reads of GitHub's state: milestone cards with dependency edges, open pull requests, one pull request in full, required checks; the check and review verdicts. |
 | `scripts/cards.py` | The feeder's pure decisions: order, pins, WIP and area limits, rework before new work. |
-| `scripts/harness.py` | Runs one headless Pi session with a minimal environment and a stall watchdog; the running-worker records. |
+| `scripts/harness.py` | Runs one headless Pi session with a minimal environment, its own HOME and a stall watchdog; the secret-shape scan; the running-worker records, orphan clean-up and idle-run counts. |
 | `scripts/feed.py` | Cron entry point: the feeder. |
 | `scripts/worker.py` | The detached driver for one card's worker session. |
 | `scripts/review.py` | Cron entry point: reviewer dispatch. |
@@ -99,8 +111,14 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
   change the order only, never the limits. Absent means no pins; a malformed file stops the feeder.
 - The model credential for Pi: `harness.credential_file` (a dotenv file) under `harness.credential_key`; it is
   exported to the session as `harness.credential_env` and never logged or put in argv.
-- State: `~/.local/state/lunate-lane/` — `locks/`, `logs/`, `workers/` (one pid file per running worker),
-  `worktrees/`, `reviews/`, `scratch/`, `sessions/` (Pi event logs), `digest/`.
+- State: `~/.local/state/lunate-lane/`: `locks/`, `logs/`, `workers/` (one pid file per running worker, with
+  its session's process group), `attempts/` (idle-run counts; a parked card's file is deleted to unpark it),
+  `worktrees/`, `reviews/`, `scratch/` (each session's TMPDIR and its own `home/`), `sessions/` (Pi event logs),
+  `digest/`.
+- The session's HOME: `<scratch>/home`, wiped and reseeded before every session. It gets copies of
+  `~/.pi/agent/settings.json`, `models-store.json` and `bin/fd` (not `auth.json`; the credential is passed in the
+  environment), and a `.gitconfig` holding only the checkout's `user.name` and `user.email`. `NUGET_PACKAGES`
+  points at the real `~/.nuget/packages` cache.
 
 ## Tests
 
@@ -131,3 +149,13 @@ the orchestrating user's crontab (`crontab -e`):
 delivers it (cron mail, or the orchestrator's own scheduler capturing stdout). Before the first real tick, run
 `feed.py --dry-run` and `review.py --dry-run` by hand and read what they would do. Then retire the old jobs in
 `~/.hermes` that feed, review or label the same repository, so two lanes never drive it at once.
+
+## Known limitations
+
+- **Sessions run as the same macOS user as the lane.** A session has its own HOME and no GitHub credential in
+  its environment, but it runs with `--approve` and the lane's uid. It could still read
+  `~/.config/lunate-lane/app.json` and the App private keys by absolute path, mint a reviewer token and approve
+  its own pull request. It could also read a push's environment (`ps -E`) while the push runs. The output scan
+  and the review author read-back catch some misuse after the fact, but neither is a boundary. The fix is to run
+  sessions as a separate macOS user that cannot read the keys or the lane's processes. That is deferred to a
+  later round.
