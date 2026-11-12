@@ -387,11 +387,20 @@ def live_pid(card: int) -> int | None:
     return None
 
 
+def _listing(folder: pathlib.Path) -> list[pathlib.Path]:
+    """The `*.json` records in a state folder. A folder that cannot be listed is a failure, never 'no records'."""
+    try:
+        with os.scandir(folder) as entries:
+            return sorted(pathlib.Path(e.path) for e in entries if e.name.endswith(".json") and e.is_file())
+    except OSError as exc:
+        raise StateError(f"the state folder {folder} could not be listed: {exc}") from exc
+
+
 def running_workers() -> dict:
     """card -> areas for every live worker. A record that cannot be read raises; a dead one is removed, and the
     session its driver left running is killed first."""
     found = {}
-    for path in sorted(common.state_dir("workers").glob("*.json")):
+    for path in _listing(common.state_dir("workers")):
         card, pid, areas, session_pgid = _read_record(path)
         if worker_alive(pid, card):
             found[card] = areas
@@ -440,7 +449,7 @@ def note_run(card: int, new_commit: bool) -> tuple[int, bool]:
 def parked_cards() -> frozenset:
     """Cards the feeder must not start again until a person deletes their attempts record."""
     found = set()
-    for path in sorted(common.state_dir("attempts").glob("*.json")):
+    for path in _listing(common.state_dir("attempts")):
         if _read_attempts(path)["parked"]:
             found.add(int(path.stem))
     return frozenset(found)

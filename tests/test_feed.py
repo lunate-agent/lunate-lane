@@ -90,5 +90,54 @@ class StartTests(unittest.TestCase):
         self.assertIn("area/tui", record)
 
 
+class UnreadableStateTests(unittest.TestCase):
+    """A state folder that cannot be listed stops the tick: nothing starts on a count it could not read."""
+
+    def setUp(self) -> None:
+        self.state = TempState()
+        self.started = []
+        self.patches = [
+            mock.patch.object(github, "milestone_cards", return_value=[card(1), card(2)]),
+            mock.patch.object(github, "open_pulls", return_value=[]),
+            mock.patch.object(feed, "start", side_effect=lambda cfg, launch: self.started.append(launch) or 1),
+            mock.patch.object(sys, "argv", ["feed.py"]),
+            mock.patch("sys.stdout", new=io.StringIO()),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self) -> None:
+        for patch in reversed(self.patches):
+            patch.stop()
+        self.state.close()
+
+    def lock(self, name: str) -> pathlib.Path:
+        folder = self.state.cfg.state / name
+        folder.mkdir(parents=True, exist_ok=True)
+        folder.chmod(0)
+        self.addCleanup(folder.chmod, 0o755)
+        return folder
+
+    def assert_nothing_started(self, name: str) -> None:
+        self.assertEqual(feed.main(), 1)
+        self.assertEqual(self.started, [])
+        log = (self.state.cfg.state / "logs" / "feed.log").read_text()
+        self.assertIn("FAILED — the state folder", log)
+        self.assertIn(name, log)
+
+    def test_an_unreadable_attempts_folder_starts_nothing(self) -> None:
+        folder = self.lock("attempts")
+        with self.assertRaises(StateError):
+            harness.parked_cards()
+        with mock.patch.object(harness, "running_workers", return_value={}):
+            self.assert_nothing_started(str(folder))
+
+    def test_an_unreadable_workers_folder_starts_nothing(self) -> None:
+        folder = self.lock("workers")
+        with self.assertRaises(StateError):
+            harness.running_workers()
+        self.assert_nothing_started(str(folder))
+
+
 if __name__ == "__main__":
     unittest.main()
