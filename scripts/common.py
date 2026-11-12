@@ -62,7 +62,8 @@ class Config:
     worker_app: str
     reviewer_app: str
     worker_model: str
-    reviewer_model: str
+    reviewer_full: str  # any pull request touching code, tests, specs or CI (#15)
+    reviewer_light: str  # docs-only pull requests
     bug_label: str
     area_prefix: str
     harness: dict
@@ -101,7 +102,9 @@ def load_config(path: pathlib.Path | None = None) -> Config:
         slug=str(_need(data, "repo")), milestone=str(_need(data, "milestone")), base=str(_need(data, "base")),
         wip_limit=int(_need(data, "wip_limit")),
         worker_app=str(_need(data, "apps", "worker")), reviewer_app=str(_need(data, "apps", "reviewer")),
-        worker_model=str(_need(data, "models", "worker")), reviewer_model=str(_need(data, "models", "reviewer")),
+        worker_model=str(_need(data, "models", "worker")),
+        reviewer_full=str(_need(data, "models", "reviewer", "full")),
+        reviewer_light=str(_need(data, "models", "reviewer", "light")),
         bug_label=str(_need(data, "labels", "bug")), area_prefix=str(_need(data, "labels", "area_prefix")),
         harness=dict(_need(data, "harness")),
         checkout=expand("paths", "checkout"), state=expand("paths", "state"),
@@ -111,8 +114,9 @@ def load_config(path: pathlib.Path | None = None) -> Config:
         raise ConfigError(f"repo must be owner/name, not {cfg.slug!r}")
     if cfg.wip_limit < 1:
         raise ConfigError("wip_limit must be at least 1")
-    if cfg.worker_model == cfg.reviewer_model:
-        raise ConfigError("the reviewer model must differ from the worker model")
+    for kind, model in (("full", cfg.reviewer_full), ("light", cfg.reviewer_light)):
+        if model == cfg.worker_model:
+            raise ConfigError(f"the {kind} reviewer model must differ from the worker model ({model})")
     for key in ("binary", "credential_file", "credential_key", "credential_env", "session_timeout", "stall_idle"):
         _need(data, "harness", key)
     return cfg

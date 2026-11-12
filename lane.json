@@ -9,7 +9,10 @@
   },
   "models": {
     "worker": "opencode-go/deepseek-v4.1-flash",
-    "reviewer": "opencode-go/glm-5.3-flash"
+    "reviewer": {
+      "full": "opencode-go/gpt-6-luna",
+      "light": "opencode-go/glm-5.3-flash"
+    }
   },
   "labels": {
     "bug": "kind/bug",

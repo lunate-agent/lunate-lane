@@ -98,8 +98,10 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    has no running worker, has every *required* check green on its head, has no review from
    `lunate-reviewer` at that head, and is not held back by an *older* open pull request (any author) that changes
    the same OpenSpec capability (`openspec/specs/<cap>/…` or a change's `specs/<cap>/…` delta) — the older one
-   lands first: runs a Pi session on the reviewer model (the config refuses one equal to the
-   worker's) in a detached worktree at the head, with the diff and the issue in `templates/review-brief.md`. The
+   lands first: runs a Pi session on a reviewer model — `models.reviewer.full` (`opencode-go/gpt-6-luna`) for any
+   pull request touching `src/`, `tests/`, `openspec/` or `.github/` (or whose file list is empty), and
+   `models.reviewer.light` (`opencode-go/glm-5.3-flash`) for docs-only; the config refuses either one equal to the
+   worker's, and the posted review names the model it ran on — in a detached worktree at the head, with the diff and the issue in `templates/review-brief.md`. The
    brief also carries the other open pull requests on the same capabilities and the worker's session report: the
    reviewer compares the spec delta with main's spec and with theirs, and checks the worker's **Intent
    decisions** (the grill-me questions it answered itself). The worker's brief says a conflict in
@@ -121,7 +123,7 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
 
 | File | What it does |
 | --- | --- |
-| `lane.json` | The one config: repo slug, milestone, base, WIP limit, App slugs, worker and reviewer models, labels, Pi harness settings, paths. |
+| `lane.json` | The one config: repo slug, milestone, base, WIP limit, App slugs, the worker model and the full and light reviewer models, labels, Pi harness settings, paths. |
 | `scripts/common.py` | Config loading, the named errors, `gh`/`git`/GraphQL/REST calls that raise instead of returning empty, templates, logs, locks, the cron job wrapper. |
 | `scripts/github.py` | Reads of GitHub's state: milestone cards with dependency edges, open pull requests, one pull request in full, required checks; the check and review verdicts. |
 | `scripts/cards.py` | The feeder's pure decisions: order, pins, WIP and area limits, rework before new work. |

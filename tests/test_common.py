@@ -28,7 +28,9 @@ class ConfigTests(unittest.TestCase):
     def test_the_checked_in_config_loads(self) -> None:
         cfg = common.load_config()
         self.assertEqual((cfg.owner, cfg.name), ("lunate-agent", "lunate"))
-        self.assertNotEqual(cfg.worker_model, cfg.reviewer_model)
+        self.assertEqual((cfg.reviewer_full, cfg.reviewer_light),
+                         ("opencode-go/gpt-6-luna", "opencode-go/glm-5.3-flash"))
+        self.assertNotIn(cfg.worker_model, (cfg.reviewer_full, cfg.reviewer_light))
         self.assertTrue(cfg.state.is_absolute())
 
     def test_a_missing_key_is_a_named_failure_not_a_default(self) -> None:
@@ -37,10 +39,20 @@ class ConfigTests(unittest.TestCase):
             common.load_config(self.write(self.data))
         self.assertIn("models.reviewer", str(caught.exception))
 
-    def test_the_reviewer_model_must_differ_from_the_workers(self) -> None:
-        self.data["models"]["reviewer"] = self.data["models"]["worker"]
-        with self.assertRaises(ConfigError):
+    def test_both_reviewer_models_must_differ_from_the_workers(self) -> None:
+        for kind in ("full", "light"):
+            with self.subTest(kind=kind):
+                data = json.loads(json.dumps(self.data))
+                data["models"]["reviewer"][kind] = data["models"]["worker"]
+                with self.assertRaises(ConfigError) as caught:
+                    common.load_config(self.write(data))
+                self.assertIn(f"the {kind} reviewer model must differ", str(caught.exception))
+
+    def test_the_old_single_reviewer_model_is_refused_by_name(self) -> None:
+        self.data["models"]["reviewer"] = "opencode-go/glm-5.3-flash"
+        with self.assertRaises(ConfigError) as caught:
             common.load_config(self.write(self.data))
+        self.assertIn("models.reviewer.full", str(caught.exception))
 
     def test_an_unreadable_config_is_a_named_failure(self) -> None:
         with self.assertRaises(ConfigError):

@@ -57,6 +57,17 @@ def skip_reason(p: github.Pull, required: frozenset, running: dict, reviewer: st
     return None
 
 
+FULL_REVIEW = ("src/", "tests/", "openspec/", ".github/")
+
+
+def reviewer_model(cfg: common.Config, p: github.Pull) -> str:
+    """The full model for anything touching code, tests, specs or CI; the light one for docs-only (#15). A file
+    list that was not read, or is empty, gets the full model — never the lighter review by default."""
+    if not p.files or any(path.startswith(FULL_REVIEW) for path in p.files):
+        return cfg.reviewer_full
+    return cfg.reviewer_light
+
+
 def due(cfg: common.Config) -> list[github.Pull]:
     required = github.required_checks(cfg)
     running = harness.running_workers()
@@ -90,7 +101,7 @@ def read_verdict(path: pathlib.Path) -> tuple[str, str]:
     return data["event"], body.strip()
 
 
-def post(cfg: common.Config, p: github.Pull, event: str, body: str) -> bool:
+def post(cfg: common.Config, p: github.Pull, event: str, body: str, model: str) -> bool:
     """Post the review as the reviewer identity — only if the pull request is still open at the reviewed head."""
     now = github.pull(cfg, p.number)
     if now.state != "OPEN":
@@ -103,7 +114,7 @@ def post(cfg: common.Config, p: github.Pull, event: str, body: str) -> bool:
         token = identity.installation_token("reviewer")
     except identity.IdentityError as exc:
         raise ReviewError(f"the reviewer identity could not mint a token: {exc}") from exc
-    footer = f"\n\n---\nReviewed at `{p.head[:9]}` on `{cfg.reviewer_model}`."
+    footer = f"\n\n---\nReviewed at `{p.head[:9]}` on `{model}`."
     posted = common.rest(token, "POST", f"/repos/{cfg.slug}/pulls/{p.number}/reviews",
                          {"commit_id": p.head, "event": event, "body": body + footer})
     review_id = posted.get("id") if isinstance(posted, dict) else None
@@ -118,8 +129,9 @@ def post(cfg: common.Config, p: github.Pull, event: str, body: str) -> bool:
     return True
 
 
-def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str]:
-    """Run the reviewer session at the head and return its verdict."""
+def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str, str]:
+    """Run the reviewer session at the head and return its verdict and the model it ran on."""
+    model = reviewer_model(cfg, p)
     repo, worktree = cfg.checkout, common.state_dir("reviews") / f"pr-{p.number}"
     scratch = common.state_dir("scratch", f"review-{p.number}")
     verdict_file, diff_file = scratch / "verdict.json", scratch / "diff.patch"
@@ -149,12 +161,12 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str]:
                                SPEC_NEIGHBOURS=spec_neighbours(p, github.open_pulls(cfg)), WORKER_REPORT=report,
                                BODY=(issue.get("body") or "").strip())
         log_path = common.state_dir("sessions") / f"review-{p.number}-{p.head[:8]}.jsonl"
-        outcome = harness.run_session(cfg, model=cfg.reviewer_model, worktree=worktree, prompt=prompt,
+        outcome = harness.run_session(cfg, model=model, worktree=worktree, prompt=prompt,
                                       scratch=scratch, log_path=log_path,
                                       on_start=lambda pgid, sid: harness.note_review_session(p.number, driver, pgid, sid))
         if outcome.stalled or outcome.rc != 0:
             raise ReviewError(f"the review session did not finish cleanly (rc {outcome.rc}, stalled {outcome.stalled})")
-        return read_verdict(verdict_file)
+        return (*read_verdict(verdict_file), model)
     finally:
         common.git(repo, "worktree", "remove", "--force", str(worktree))
         harness.clear_review(p.number, driver)
@@ -206,12 +218,12 @@ def tick(dry_run: bool = False) -> None:
         common.log(JOB, "nothing due for review")
     for p in pulls:
         if dry_run:
-            common.log(JOB, f"#{p.number} would be reviewed at {p.head[:8]}")
+            common.log(JOB, f"#{p.number} would be reviewed at {p.head[:8]} on {reviewer_model(cfg, p)}")
             continue
         try:
-            event, body = run_review(cfg, p)
-            if post(cfg, p, event, body):
-                common.log(JOB, f"#{p.number} reviewed at {p.head[:8]}: {event}")
+            event, body, model = run_review(cfg, p)
+            if post(cfg, p, event, body, model):
+                common.log(JOB, f"#{p.number} reviewed at {p.head[:8]} on {model}: {event}")
         except LaneError as exc:
             common.log(JOB, f"#{p.number} FAILED — {exc}")
             failed.append(p.number)

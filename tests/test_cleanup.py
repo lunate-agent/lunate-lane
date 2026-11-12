@@ -170,7 +170,8 @@ class ReviewReapTests(unittest.TestCase):
     def test_the_review_run_records_itself_and_clears_its_record(self) -> None:
         seen = {}
 
-        def session(cfg, *, on_start, worktree, log_path, scratch, **_):
+        def session(cfg, *, on_start, worktree, log_path, scratch, model, **_):
+            seen["model"] = model
             on_start(4242, "review-5-x")
             seen["record"] = json.loads((self.cfg.state / "reviewing" / "5.json").read_text())
             (scratch / "verdict.json").write_text(json.dumps({"event": "APPROVE", "body": "ok"}))
@@ -182,7 +183,9 @@ class ReviewReapTests(unittest.TestCase):
                 mock.patch.object(review.dispatch_card, "card", return_value={"body": "b"}), \
                 mock.patch.object(github, "worker_report", return_value=""), \
                 mock.patch.object(github, "open_pulls", return_value=[]):
-            self.assertEqual(review.run_review(self.cfg, pull(5, 9, head=head))[0], "APPROVE")
+            result = review.run_review(self.cfg, pull(5, 9, head=head, files=("docs/a.md",)))
+        self.assertEqual(result, ("APPROVE", "ok", self.cfg.reviewer_light))
+        self.assertEqual(seen["model"], self.cfg.reviewer_light, "the session ran on the model the review names")
         self.assertEqual((seen["record"]["pid"], seen["record"]["session_pgid"]), (os.getpid(), 4242))
         self.assertFalse((self.cfg.state / "reviewing" / "5.json").exists())
 
