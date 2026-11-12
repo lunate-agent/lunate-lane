@@ -193,8 +193,8 @@ class StuckTests(unittest.TestCase):
     def test_an_infra_failure_is_rerun_first_and_reworked_only_when_it_fails_again_on_that_head(self) -> None:
         from scripts import github
 
-        runs = (github.Run("ci-ok", "FAILURE", 1, "u", 9, True), github.Run("verify", "CANCELLED", 2, "u", 9))
-        p = pull(101, 1, checks=RED, runs=runs)
+        runs = (github.Run("ci-ok", "CANCELLED", 1, "u", 9), github.Run("verify", "CANCELLED", 2, "u", 9))
+        p = pull(101, 1, checks=(("ci-ok", "COMPLETED", "CANCELLED"),), runs=runs)
         self.assertEqual(started(cards.plan(cards=[], open_pulls=[p], worker_pulls=[p], running={}, rules=RULES,
                                             required=REQUIRED)[0]), [])
         launches, _ = cards.plan(cards=[], open_pulls=[p], worker_pulls=[p], running={}, rules=RULES,

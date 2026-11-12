@@ -262,12 +262,22 @@ class FailureKindTests(unittest.TestCase):
             p = github.pull(CFG, 5)
         return github.failure_kind(p, frozenset({"ci-ok"})), p
 
-    def test_cancelled_legs_behind_a_failed_roll_up_are_infra_and_name_their_run(self) -> None:
-        kind, p = self.kind(self.run_node("ci-ok", "FAILURE", steps=("SUCCESS", "FAILURE")),
+    def test_cancelled_legs_and_a_cancelled_required_check_are_infra_and_name_their_run(self) -> None:
+        kind, p = self.kind(self.run_node("ci-ok", "CANCELLED", steps=("SUCCESS", "CANCELLED")),
                             self.run_node("verify (macos, 2/4)", "CANCELLED", steps=("SUCCESS", "CANCELLED")),
                             self.run_node("verify (macos, 3/4)", "TIMED_OUT", steps=()))
         self.assertEqual(kind, "infra")
         self.assertEqual(github.infra_runs(p), (77,))
+
+    def test_a_required_check_that_failed_for_real_is_never_infra_even_behind_cancelled_legs(self) -> None:
+        """Review of #17, round two, item 4: #813's shape — ci-ok FAILURE, the legs under it cancelled."""
+        for own in (self.run_node("ci-ok", "FAILURE", steps=("SUCCESS", "FAILURE")),
+                    self.run_node("ci-ok", "FAILURE", steps=("SUCCESS",)),
+                    self.run_node("ci-ok", "CANCELLED", steps=("FAILURE",))):
+            with self.subTest(own=(own["conclusion"], [s["conclusion"] for s in own["steps"]["nodes"]])):
+                kind, _ = self.kind(own, self.run_node("verify (macos, 2/4)", "CANCELLED"),
+                                    self.run_node("verify (macos, 3/4)", "TIMED_OUT", steps=()))
+                self.assertEqual(kind, "real")
 
     def test_a_required_check_that_itself_failed_to_start_is_infra(self) -> None:
         self.assertEqual(self.kind(self.run_node("ci-ok", "STARTUP_FAILURE", steps=()))[0], "infra")

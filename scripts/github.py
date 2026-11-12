@@ -352,8 +352,9 @@ def _disarmed_by(node: dict, worker_app: str) -> str:
 def failure_kind(p: Pull, required: frozenset) -> str | None:
     """'infra' or 'real' for a head whose required checks are failing, else None (#1 of the review of #17).
 
-    Infra: every failing check run was cancelled, timed out or failed to start, with no failing step — and a
-    required roll-up (`ci-ok` aggregates the legs) that failed only because such legs did counts as infra too.
+    Infra: every failing check run — the required ones included — was cancelled, timed out or failed to start,
+    with no failing step. A required check that failed for real is never infra, even when other legs were
+    cancelled (review of #17, round two, item 4): `ci-ok` failing as the roll-up of cancelled legs is real too.
     Anything else is real, and so is a failure the lane cannot attribute (a failing status context, a run whose
     steps or workflow run could not be read): a rerun is only for what is plainly the runner's fault.
     """
@@ -366,13 +367,10 @@ def failure_kind(p: Pull, required: frozenset) -> str | None:
     def infra(r: Run) -> bool:
         return r.conclusion in INFRA and not r.failed_step and r.run_id > 0
 
-    legs = [r for r in failing if r.name not in required]
-    if any(not infra(r) for r in legs):
-        return "real"
-    if legs:
-        return "infra"
     own = [r for r in failing if r.name in required]
-    return "infra" if own and all(infra(r) for r in own) else "real"
+    if any(not infra(r) for r in own):
+        return "real"  # a required check failed for real, whatever its legs did
+    return "infra" if failing and all(infra(r) for r in failing) else "real"
 
 
 def infra_runs(p: Pull) -> tuple:

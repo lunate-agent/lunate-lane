@@ -48,8 +48,9 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      (neither queued nor armed, and the queue's latest removal was of the current head — one from before the last
      push does not count; when a person turned auto-merge off last, that is their decision and not a rework) — with the failing check names and the tail
      of each failing job's log, the conflicting files, or the queue's reason in the brief. A failure that is the
-     runner's fault — every failing run cancelled, timed out or failed to start with no failing step (the
-     `ci-ok` roll-up failing only because such legs did counts too) — is not a rework: the feeder reruns the
+     runner's fault — every failing run, the required ones included, cancelled, timed out or failed to start
+     with no failing step — is not a rework (a required check that failed for real, `ci-ok` failing as the roll-up
+     of cancelled legs included, always is): the feeder reruns the
      failed jobs once for that head (`gh run rerun <id> --failed`, recorded in `<state>/reruns/`), and only a
      second such failure on the same head, or any real failing step, goes back to a worker. Conflicts are resolved
      by merging `origin/main` into the branch, never by rebasing; the lane never force-pushes (a rewritten branch

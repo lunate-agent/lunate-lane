@@ -306,8 +306,8 @@ class BriefTests(unittest.TestCase):
         self.assertLess(text.index("build-and-test` — failure"), text.index("ci-ok` — failure"))
 
     def test_an_infra_failure_rerun_once_that_failed_again_goes_back_saying_so(self) -> None:
-        runs = (github.Run("ci-ok", "FAILURE", 1, "u", 9, True), github.Run("verify (macos, 2/4)", "CANCELLED", 2, "u", 9))
-        p = pull(12, 3, checks=RED, runs=runs)
+        runs = (github.Run("ci-ok", "CANCELLED", 1, "u", 9), github.Run("verify (macos, 2/4)", "CANCELLED", 2, "u", 9))
+        p = pull(12, 3, checks=(("ci-ok", "COMPLETED", "CANCELLED"),), runs=runs)
         with mock.patch.object(github, "pull", return_value=p), mock.patch.object(common, "gh", return_value="log"):
             with self.assertRaises(LaneError):
                 worker.rework_findings(self.cfg, 12)  # not rerun yet: nothing to rework, the feeder reruns it

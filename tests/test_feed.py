@@ -173,8 +173,8 @@ class FeedTests(unittest.TestCase):
         self.assertIn(50, [l.rework_pr for l in self.started])
 
     def infra_pull(self):
-        runs = (github.Run("ci-ok", "FAILURE", 1, "u", 4321, True), github.Run("verify", "TIMED_OUT", 2, "u", 4321))
-        return pull(50, 9, checks=(("ci-ok", "COMPLETED", "FAILURE"),), runs=runs)
+        runs = (github.Run("ci-ok", "CANCELLED", 1, "u", 4321), github.Run("verify", "TIMED_OUT", 2, "u", 4321))
+        return pull(50, 9, checks=(("ci-ok", "COMPLETED", "CANCELLED"),), runs=runs)
 
     def test_an_infra_failure_is_rerun_once_then_reworked_if_it_fails_again(self) -> None:
         """Review of #17, item 1: `gh run rerun --failed`, recorded and logged, not a rework round."""
