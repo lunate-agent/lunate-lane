@@ -4,7 +4,10 @@ No network: every GitHub call is replaced, so a failure is the only thing that c
 """
 
 import pathlib
+import shutil
+import subprocess
 import sys
+import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
@@ -17,12 +20,16 @@ def fake_api(monkey_self=None, **_):
 
 class FailurePathTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.repo = pathlib.Path("/tmp/does-not-matter")
+        # a real repository, so a failure can only come from the branch being absent
+        self._tmp = tempfile.mkdtemp(prefix="lane-test-")
+        self.repo = pathlib.Path(self._tmp)
+        subprocess.run(["git", "init", "-q", "-b", "main"], cwd=self._tmp, capture_output=True)
         self.saved = (open_pr._api, open_pr.identity.installation_token, open_pr.push)
         open_pr.identity.installation_token = lambda name: "token-for-tests"  # type: ignore[assignment]
 
     def tearDown(self) -> None:
         open_pr._api, open_pr.identity.installation_token, open_pr.push = self.saved
+        shutil.rmtree(self._tmp, ignore_errors=True)
 
     def test_auto_merge_refused_is_a_failure_not_a_pass(self) -> None:
         """A PR that opens but cannot arm auto-merge must raise."""
