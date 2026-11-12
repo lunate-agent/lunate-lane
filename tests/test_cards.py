@@ -190,6 +190,20 @@ class StuckTests(unittest.TestCase):
             with self.subTest(p=p):
                 self.assertEqual(started(plan([], worker_pulls=[p])[0]), [])
 
+    def test_an_infra_failure_is_rerun_first_and_reworked_only_when_it_fails_again_on_that_head(self) -> None:
+        from scripts import github
+
+        runs = (github.Run("ci-ok", "FAILURE", 1, "u", 9, True), github.Run("verify", "CANCELLED", 2, "u", 9))
+        p = pull(101, 1, checks=RED, runs=runs)
+        self.assertEqual(started(cards.plan(cards=[], open_pulls=[p], worker_pulls=[p], running={}, rules=RULES,
+                                            required=REQUIRED)[0]), [])
+        launches, _ = cards.plan(cards=[], open_pulls=[p], worker_pulls=[p], running={}, rules=RULES,
+                                 required=REQUIRED, reran=frozenset({(101, "h1")}))
+        self.assertEqual(launches[0].reason, "required checks cancelled or timed out again after a rerun")
+        moved = cards.plan(cards=[], open_pulls=[p], worker_pulls=[p], running={}, rules=RULES, required=REQUIRED,
+                           reran=frozenset({(101, "h0")}))[0]
+        self.assertEqual(started(moved), [], "a rerun of an older head does not count for this one")
+
     def test_changes_requested_wins_the_reason_when_the_head_is_also_red(self) -> None:
         launches, _ = plan([], worker_pulls=[pull(101, 1, checks=RED, reviews=[review("CHANGES_REQUESTED")])])
         self.assertEqual(launches[0].reason, "changes requested")

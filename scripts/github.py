@@ -9,12 +9,26 @@ from __future__ import annotations
 
 import dataclasses
 import re
+import typing
 
 from scripts import common
 from scripts.common import GhError
 
 BRANCH = re.compile(r"^wt/issue-(\d+)$")
 PASSED = {"SUCCESS", "NEUTRAL", "SKIPPED"}
+
+
+class Run(typing.NamedTuple):
+    """One check run on a head. `failed_step` is True when a step failed, or the steps could not all be read."""
+    name: str
+    conclusion: str
+    job: int = 0  # the Actions job id, 0 for another app's check
+    url: str = ""
+    run_id: int = 0  # the workflow run it belongs to, for a rerun
+    failed_step: bool = False
+
+
+INFRA = frozenset({"CANCELLED", "TIMED_OUT", "STARTUP_FAILURE"})
 
 
 @dataclasses.dataclass(frozen=True)
@@ -54,7 +68,7 @@ class Pull:
     files: tuple | None = None  # changed paths; None means not read
     in_queue: bool = False  # in the merge queue now
     queue_removal: str = ""  # why the merge queue last removed it, if it did
-    runs: tuple = ()  # (name, conclusion, job id or 0, details url) of every check run on the head
+    runs: tuple = ()  # Run, for every check run on the head
 
     @property
     def capabilities(self) -> frozenset:
@@ -202,7 +216,8 @@ closingIssuesReferences(first:10){pageInfo{hasNextPage} nodes{number labels(firs
 reviews(last:100){pageInfo{hasPreviousPage} nodes{author{login} state body commit{oid}}}
 files(first:100){pageInfo{hasNextPage} nodes{path}}
 commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:100){pageInfo{hasNextPage}
-nodes{__typename ... on CheckRun{name status conclusion databaseId detailsUrl} ... on StatusContext{context state}}}}}}}}}}"""
+nodes{__typename ... on CheckRun{name status conclusion databaseId detailsUrl checkSuite{workflowRun{databaseId}}
+steps(first:100){pageInfo{hasNextPage} nodes{conclusion}}} ... on StatusContext{context state}}}}}}}}}}"""
 
 
 def pull(cfg: common.Config, number: int) -> Pull:
@@ -233,8 +248,7 @@ def pull(cfg: common.Config, number: int) -> Pull:
         in_queue=bool(node.get("isInMergeQueue")),
         queue_removal=next((str(e.get("reason") or "removed") for e in
                             ((node.get("timelineItems") or {}).get("nodes") or [])[-1:]), ""),
-        runs=tuple((c["name"], c.get("conclusion") or "", int(c.get("databaseId") or 0), str(c.get("detailsUrl") or ""))
-                   for c in contexts if c["__typename"] == "CheckRun"),
+        runs=tuple(_run(c) for c in contexts if c["__typename"] == "CheckRun"),
     )
 
 
@@ -299,7 +313,47 @@ def worker_report(cfg: common.Config, number: int) -> str:
     return found[-1] if found else ""
 
 
-def stuck_reason(p: Pull, required: frozenset, reviewer: str) -> str | None:
+def _run(c: dict) -> Run:
+    steps = c.get("steps") or {}
+    unread = (steps.get("pageInfo") or {}).get("hasNextPage") or "nodes" not in steps
+    failed = unread or any((s or {}).get("conclusion") == "FAILURE" for s in steps.get("nodes") or [])
+    run_id = ((c.get("checkSuite") or {}).get("workflowRun") or {}).get("databaseId")
+    return Run(str(c["name"]), str(c.get("conclusion") or ""), int(c.get("databaseId") or 0),
+               str(c.get("detailsUrl") or ""), int(run_id or 0), bool(failed))
+
+
+def failure_kind(p: Pull, required: frozenset) -> str | None:
+    """'infra' or 'real' for a head whose required checks are failing, else None (#1 of the review of #17).
+
+    Infra: every failing check run was cancelled, timed out or failed to start, with no failing step — and a
+    required roll-up (`ci-ok` aggregates the legs) that failed only because such legs did counts as infra too.
+    Anything else is real, and so is a failure the lane cannot attribute (a failing status context, a run whose
+    steps or workflow run could not be read): a rerun is only for what is plainly the runner's fault.
+    """
+    if check_state(p, required) != "failing":
+        return None
+    failing = [r for r in p.runs if r.conclusion and r.conclusion not in PASSED]
+    if any(c[0] in required and c[0] not in {r.name for r in p.runs} for c in p.checks if c[2] not in PASSED):
+        return "real"  # a required status context, not a check run: nothing to rerun
+
+    def infra(r: Run) -> bool:
+        return r.conclusion in INFRA and not r.failed_step and r.run_id > 0
+
+    legs = [r for r in failing if r.name not in required]
+    if any(not infra(r) for r in legs):
+        return "real"
+    if legs:
+        return "infra"
+    own = [r for r in failing if r.name in required]
+    return "infra" if own and all(infra(r) for r in own) else "real"
+
+
+def infra_runs(p: Pull) -> tuple:
+    """The workflow runs to rerun for an infra failure: those of the failing check runs, each once."""
+    return tuple(sorted({r.run_id for r in p.runs if r.conclusion and r.conclusion not in PASSED and r.run_id}))
+
+
+def stuck_reason(p: Pull, required: frozenset, reviewer: str, reran: frozenset = frozenset()) -> str | None:
     """Why an open, ready pull request is stuck and goes back to a worker (#8), or None.
 
     Red on a required check, CONFLICTING with the base, or approved at its head but neither in the merge queue nor
@@ -310,7 +364,11 @@ def stuck_reason(p: Pull, required: frozenset, reviewer: str) -> str | None:
     if p.mergeable == "CONFLICTING":
         return "conflicts with the base branch"
     if check_state(p, required) == "failing":
-        return "required checks failing"
+        if failure_kind(p, required) == "real":
+            return "required checks failing"
+        if (p.number, p.head) in reran:  # `reran`: (pull request, head) pairs already rerun once
+            return "required checks cancelled or timed out again after a rerun"
+        return None  # the feeder reruns it once instead
     if reviewer_verdict(p, reviewer) == "APPROVED" and not p.in_queue and not p.auto_merge and p.queue_removal:
         return f"out of the merge queue after approval ({p.queue_removal.lower()})"
     return None

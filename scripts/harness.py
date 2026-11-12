@@ -524,6 +524,28 @@ def reap_reviews(remove_worktree: Callable[[pathlib.Path], None]) -> list[int]:
     return cleared
 
 
+# --- reruns: an infra failure is rerun once per head; <state>/reruns/<pr>.json names the head it was for ---
+
+def _rerun_record(pr: int) -> pathlib.Path:
+    return common.state_dir("reruns") / f"{int(pr)}.json"
+
+
+def note_rerun(pr: int, head: str, runs: tuple) -> None:
+    _write_record(_rerun_record(pr), {"pr": int(pr), "head": str(head), "runs": list(runs), "at": time.time()})
+
+
+def reran() -> frozenset:
+    """(pull request, head) for every head whose infra failure was already rerun once."""
+    found = set()
+    for path in _listing(common.state_dir("reruns")):
+        try:
+            data = json.loads(path.read_text())
+            found.add((int(data["pr"]), str(data["head"])))
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise StateError(f"the rerun record {path} could not be read: {exc}") from exc
+    return frozenset(found)
+
+
 # --- attempts: a card is parked after IDLE_RUN_LIMIT runs with no new commit, or after REWORK_LIMIT rework rounds
 #     on one pull request (#9). Deleting <state>/attempts/<card>.json unparks it and clears both counts.
 

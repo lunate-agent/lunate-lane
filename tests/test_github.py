@@ -186,6 +186,50 @@ class WorkerReportTests(unittest.TestCase):
             self.assertEqual(github.worker_report(CFG, 5), "")
 
 
+class FailureKindTests(unittest.TestCase):
+    """Review of #17, item 1: what is the runner's fault (rerun once) and what is a real failure (rework)."""
+
+    def run_node(self, name, conclusion, *, steps=("SUCCESS",), more=False, run_id=77):
+        return {"__typename": "CheckRun", "name": name, "status": "COMPLETED", "conclusion": conclusion,
+                "databaseId": 5, "detailsUrl": "u", "checkSuite": {"workflowRun": {"databaseId": run_id}},
+                "steps": {"pageInfo": {"hasNextPage": more}, "nodes": [{"conclusion": c} for c in steps]}}
+
+    def kind(self, *contexts):
+        node = PullTests().node(commits={"nodes": [{"commit": {"oid": "abc", "statusCheckRollup": {
+            "contexts": page(list(contexts))}}}]})
+        with mock.patch.object(common, "graphql", return_value=node):
+            p = github.pull(CFG, 5)
+        return github.failure_kind(p, frozenset({"ci-ok"})), p
+
+    def test_cancelled_legs_behind_a_failed_roll_up_are_infra_and_name_their_run(self) -> None:
+        kind, p = self.kind(self.run_node("ci-ok", "FAILURE", steps=("SUCCESS", "FAILURE")),
+                            self.run_node("verify (macos, 2/4)", "CANCELLED", steps=("SUCCESS", "CANCELLED")),
+                            self.run_node("verify (macos, 3/4)", "TIMED_OUT", steps=()))
+        self.assertEqual(kind, "infra")
+        self.assertEqual(github.infra_runs(p), (77,))
+
+    def test_a_required_check_that_itself_failed_to_start_is_infra(self) -> None:
+        self.assertEqual(self.kind(self.run_node("ci-ok", "STARTUP_FAILURE", steps=()))[0], "infra")
+
+    def test_a_failing_step_or_a_failed_leg_is_real(self) -> None:
+        for legs in ([self.run_node("verify", "FAILURE", steps=("FAILURE",))],
+                     [self.run_node("verify", "CANCELLED", steps=("FAILURE", "CANCELLED"))],
+                     [self.run_node("verify", "CANCELLED"), self.run_node("lint", "FAILURE", steps=("FAILURE",))],
+                     []):
+            with self.subTest(legs=[l["name"] + "=" + l["conclusion"] for l in legs]):
+                self.assertEqual(self.kind(self.run_node("ci-ok", "FAILURE", steps=("FAILURE",)), *legs)[0], "real")
+
+    def test_what_cannot_be_attributed_is_real(self) -> None:
+        unread = self.run_node("verify", "CANCELLED", more=True)
+        no_run = self.run_node("verify", "CANCELLED", run_id=None)
+        for leg in (unread, no_run):
+            with self.subTest(leg=leg["steps"]["pageInfo"]):
+                self.assertEqual(self.kind(self.run_node("ci-ok", "FAILURE"), leg)[0], "real")
+
+    def test_green_or_pending_is_neither(self) -> None:
+        self.assertIsNone(self.kind(self.run_node("ci-ok", "SUCCESS"))[0])
+
+
 class LandedTests(unittest.TestCase):
     def answer(self, state, oid="abc", parents=1):
         commit = {"oid": oid, "parents": {"totalCount": parents}} if oid else None

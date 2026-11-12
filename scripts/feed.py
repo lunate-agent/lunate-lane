@@ -29,14 +29,40 @@ def rules(cfg: common.Config) -> cards.Rules:
 
 def decide(cfg: common.Config) -> tuple[list[cards.Launch], list[str]]:
     """Read everything the decision needs, then decide. Every read raises on failure."""
+    launches, notes, _ = decide_all(cfg)
+    return launches, notes
+
+
+def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[github.Pull]]:
+    """The launches and notes, and the worker pull requests whose required checks failed for infra reasons and
+    have not been rerun on their head yet: those are rerun once, not reworked."""
     milestone = github.milestone_cards(cfg)
     pulls = github.open_pulls(cfg)
     worker_pulls = [github.pull(cfg, p.number) for p in pulls if p.author == cfg.worker_app]
     running = harness.running_workers()
     pins = cards.load_pins(cfg.pins)
     required = github.required_checks(cfg)
-    return cards.plan(cards=milestone, open_pulls=pulls, worker_pulls=worker_pulls, running=running,
-                      rules=rules(cfg), pins=pins, parked=harness.parked_cards(), required=required)
+    reran, parked = harness.reran(), harness.parked_cards()
+    launches, notes = cards.plan(cards=milestone, open_pulls=pulls, worker_pulls=worker_pulls, running=running,
+                                 rules=rules(cfg), pins=pins, parked=parked, required=required, reran=reran)
+    rerun = [p for p in worker_pulls if p.state == "OPEN" and not p.draft and p.card not in running
+             and p.card not in parked and (p.number, p.head) not in reran
+             and github.failure_kind(p, required) == "infra"]
+    return launches, notes, rerun
+
+
+def rerun(cfg: common.Config, p: github.Pull, dry_run: bool) -> None:
+    """Rerun the failed jobs of an infra failure, once per head, and record it before anything else can fail."""
+    runs = github.infra_runs(p)
+    what = f"#{p.number}'s required checks were cancelled or timed out at {p.head[:8]}"
+    if dry_run:
+        common.log(JOB, f"would rerun the failed jobs of run(s) {', '.join(map(str, runs))} — {what}")
+        return
+    harness.note_rerun(p.number, p.head, runs)
+    for run_id in runs:
+        common.gh("run", "rerun", str(run_id), "--failed", "-R", cfg.slug)
+    common.log(JOB, f"reran the failed jobs of run(s) {', '.join(map(str, runs))} — {what}; a second such failure "
+                    "on this head is a rework")
 
 
 def start(cfg: common.Config, launch: cards.Launch) -> int:
@@ -57,7 +83,9 @@ def start(cfg: common.Config, launch: cards.Launch) -> int:
 
 def tick(dry_run: bool = False) -> None:
     cfg = common.config()
-    launches, notes = decide(cfg)
+    launches, notes, reruns = decide_all(cfg)
+    for p in reruns:
+        rerun(cfg, p, dry_run)
     # the launches first, in the order they were chosen, then the notes on why nothing else was (#3)
     for launch in launches:
         what = (f"rework of #{launch.rework_pr} for card #{launch.card} ({launch.reason})" if launch.rework_pr

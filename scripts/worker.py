@@ -142,16 +142,20 @@ def rework_findings(cfg: common.Config, pr: int, worktree: pathlib.Path | None =
              and r.state == "CHANGES_REQUESTED"]
     if found:
         sections.append("### The reviewer requested changes\n\n" + found[-1].strip())
-    stuck = github.stuck_reason(p, required, cfg.reviewer_app)
-    if stuck == "required checks failing":
+    stuck = github.stuck_reason(p, required, cfg.reviewer_app, harness.reran())
+    if stuck and stuck.startswith("required checks"):
         failing = [r for r in p.runs if r[1] not in github.PASSED and r[1]]
         failing.sort(key=lambda r: (r[0] in required, r[0]))  # the jobs first, the required roll-up last
         parts = [f"Required checks failing on `{p.head[:9]}`: "
                  + ", ".join(sorted(n for n in required if github.check_state(
                      dataclasses.replace(p, checks=tuple(c for c in p.checks if c[0] == n)), frozenset({n})) == "failing"))
                  + ". Failing check runs: " + ", ".join(f"`{r[0]}` ({r[1].lower()})" for r in failing) + "."]
-        for name, conclusion, job, url in failing[:MAX_FAILING_LOGS]:
+        for name, conclusion, job, url, *_ in failing[:MAX_FAILING_LOGS]:
             parts.append(f"#### `{name}` — {conclusion.lower()}\n{url}\n\n```\n{log_tail(cfg, job)}\n```")
+        if stuck != "required checks failing":
+            parts.insert(0, "They were cancelled or timed out, were rerun once on this head, and failed the same "
+                            "way again: look for what makes them hang or run out of time (a test that never ends, "
+                            "a step that waits on input), not only for a failing assertion.")
         sections.append("### Checks are failing\n\n" + "\n\n".join(parts))
     elif stuck == "conflicts with the base branch":
         files = conflicts(cfg, worktree) if worktree is not None else []

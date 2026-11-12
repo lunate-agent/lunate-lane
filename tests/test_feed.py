@@ -79,6 +79,38 @@ class FeedTests(unittest.TestCase):
         feed.main()
         self.assertIn(50, [l.rework_pr for l in self.started])
 
+    def infra_pull(self):
+        runs = (github.Run("ci-ok", "FAILURE", 1, "u", 4321, True), github.Run("verify", "TIMED_OUT", 2, "u", 4321))
+        return pull(50, 9, checks=(("ci-ok", "COMPLETED", "FAILURE"),), runs=runs)
+
+    def test_an_infra_failure_is_rerun_once_then_reworked_if_it_fails_again(self) -> None:
+        """Review of #17, item 1: `gh run rerun --failed`, recorded and logged, not a rework round."""
+        from scripts import common
+
+        github.pull.return_value = self.infra_pull()
+        with mock.patch.object(common, "gh", return_value="") as gh:
+            self.assertEqual(feed.main(), 0)
+            self.assertEqual(gh.call_args_list[0].args, ("run", "rerun", "4321", "--failed", "-R", "lunate-agent/lunate"))
+            self.assertNotIn(50, [l.rework_pr for l in self.started])
+            self.assertEqual(harness.reran(), frozenset({(50, "h1")}))
+            self.assertEqual(harness.rework_rounds(9, 50), 0)
+            feed.main()  # the rerun failed the same way on the same head
+            self.assertEqual(gh.call_count, 1, "rerun once per head, never twice")
+        self.assertIn(50, [l.rework_pr for l in self.started])
+        log = (self.state.cfg.state / "logs" / "feed.log").read_text()
+        self.assertIn("reran the failed jobs of run(s) 4321", log)
+        self.assertIn("(required checks cancelled or timed out again after a rerun)", log)
+
+    def test_a_dry_run_only_says_it_would_rerun(self) -> None:
+        from scripts import common
+
+        github.pull.return_value = self.infra_pull()
+        with mock.patch.object(sys, "argv", ["feed.py", "--dry-run"]), mock.patch.object(common, "gh") as gh:
+            feed.main()
+        gh.assert_not_called()
+        self.assertEqual(harness.reran(), frozenset())
+        self.assertIn("would rerun the failed jobs of run(s) 4321", (self.state.cfg.state / "logs" / "feed.log").read_text())
+
     def test_a_stuck_pull_request_is_reworked_and_the_log_says_why(self) -> None:
         github.pull.return_value = pull(50, 9, mergeable="CONFLICTING")
         with mock.patch.object(sys, "argv", ["feed.py", "--dry-run"]):

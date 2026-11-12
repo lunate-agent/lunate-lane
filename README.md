@@ -46,7 +46,11 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      a worker on the same branch, with the review's findings in the brief. So does a **stuck** one — ready (not a
      draft) and red on a required check, `CONFLICTING` with main, or approved but removed from the merge queue
      (neither queued nor armed, with the queue's removal on record) — with the failing check names and the tail
-     of each failing job's log, the conflicting files, or the queue's reason in the brief. Conflicts are resolved
+     of each failing job's log, the conflicting files, or the queue's reason in the brief. A failure that is the
+     runner's fault — every failing run cancelled, timed out or failed to start with no failing step (the
+     `ci-ok` roll-up failing only because such legs did counts too) — is not a rework: the feeder reruns the
+     failed jobs once for that head (`gh run rerun <id> --failed`, recorded in `<state>/reruns/`), and only a
+     second such failure on the same head, or any real failing step, goes back to a worker. Conflicts are resolved
      by merging `origin/main` into the branch, never by rebasing; the lane never force-pushes (a rewritten branch
      is refused). Then the named tests, the push, and a new review (the ruleset dismisses the stale approval). A
      rework does not add to WIP — its card is already in flight;

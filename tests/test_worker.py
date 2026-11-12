@@ -14,7 +14,8 @@ from scripts.common import GitError, LaneError  # noqa: E402
 from tests.helpers import REQUIRED, TempState, git, origin_and_clone, pull, review  # noqa: E402
 
 RED = (("ci-ok", "COMPLETED", "FAILURE"), ("build-and-test", "COMPLETED", "FAILURE"))
-RED_RUNS = (("ci-ok", "FAILURE", 0, "https://ci/ok"), ("build-and-test", "FAILURE", 4242, "https://ci/4242"))
+RED_RUNS = (github.Run("ci-ok", "FAILURE", 0, "https://ci/ok", 9, True),
+            github.Run("build-and-test", "FAILURE", 4242, "https://ci/4242", 9, True))
 
 ISSUE = {"number": 3, "title": "Fix the thing", "state": "OPEN", "labels": [], "milestone": None,
          "body": "## Acceptance\n1. the {thing} works, even with {{TITLE}} in the text"}
@@ -187,6 +188,16 @@ class BriefTests(unittest.TestCase):
         self.assertNotIn("2026-11-12T10:00", text, "timestamps are stripped")
         self.assertEqual(gh.call_args.args[:2], ("api", "repos/lunate-agent/lunate/actions/jobs/4242/logs"))
         self.assertLess(text.index("build-and-test` — failure"), text.index("ci-ok` — failure"))
+
+    def test_an_infra_failure_rerun_once_that_failed_again_goes_back_saying_so(self) -> None:
+        runs = (github.Run("ci-ok", "FAILURE", 1, "u", 9, True), github.Run("verify (macos, 2/4)", "CANCELLED", 2, "u", 9))
+        p = pull(12, 3, checks=RED, runs=runs)
+        with mock.patch.object(github, "pull", return_value=p), mock.patch.object(common, "gh", return_value="log"):
+            with self.assertRaises(LaneError):
+                worker.rework_findings(self.cfg, 12)  # not rerun yet: nothing to rework, the feeder reruns it
+            harness.note_rerun(12, "h1", (9,))
+            text = worker.rework_findings(self.cfg, 12)
+        self.assertIn("were rerun once on this head, and failed the same way again", text)
 
     def test_a_log_that_cannot_be_read_is_said_so_in_the_findings(self) -> None:
         with mock.patch.object(github, "pull", return_value=pull(12, 3, checks=RED, runs=RED_RUNS)), \

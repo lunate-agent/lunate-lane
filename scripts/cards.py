@@ -62,12 +62,13 @@ def order(cards: list[Card], pins: tuple, bug_label: str) -> list[Card]:
     return sorted(cards, key=key)
 
 
-def rework_reason(p: Pull, reviewer_app: str, required: frozenset = frozenset()) -> str | None:
+def rework_reason(p: Pull, reviewer_app: str, required: frozenset = frozenset(),
+                  reran: frozenset = frozenset()) -> str | None:
     """Why this pull request goes back to a worker: the reviewer's request for changes on the current head (a
     push since then clears it), or a stuck pull request — red, conflicting, or out of the queue (#8)."""
     if reviewer_verdict(p, reviewer_app) == "CHANGES_REQUESTED":
         return "changes requested"
-    return stuck_reason(p, required, reviewer_app)
+    return stuck_reason(p, required, reviewer_app, reran)
 
 
 def needs_rework(p: Pull, reviewer_app: str, required: frozenset = frozenset()) -> bool:
@@ -76,7 +77,7 @@ def needs_rework(p: Pull, reviewer_app: str, required: frozenset = frozenset()) 
 
 def plan(*, cards: list[Card], open_pulls: list[Pull], worker_pulls: list[Pull], running: dict,
          rules: Rules, pins: tuple = (), parked: frozenset = frozenset(),
-         required: frozenset = frozenset()) -> tuple[list[Launch], list[str]]:
+         required: frozenset = frozenset(), reran: frozenset = frozenset()) -> tuple[list[Launch], list[str]]:
     """What to start this tick: reworks first, then new cards while there is room. Returns (launches, notes).
 
     `open_pulls` is every open pull request (any author): a card one of them carries or closes is never started.
@@ -96,7 +97,7 @@ def plan(*, cards: list[Card], open_pulls: list[Pull], worker_pulls: list[Pull],
     occupied = frozenset().union(*(pull_areas(p) for p in worker_pulls), *running.values())
     taken = {n for p in open_pulls for n in (p.card, *p.cards) if n is not None} | set(running)
 
-    reasons = {p.number: rework_reason(p, rules.reviewer_app, required) for p in worker_pulls}
+    reasons = {p.number: rework_reason(p, rules.reviewer_app, required, reran) for p in worker_pulls}
     launches = [Launch(p.card, p.number, pull_areas(p), reasons[p.number])
                 for p in sorted(worker_pulls, key=lambda p: p.number)
                 if p.card is not None and p.card not in running and p.card not in parked and reasons[p.number]]
