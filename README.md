@@ -1,6 +1,10 @@
 # lunate-lane
 
-The Lunate delivery lane: one loop, in one sentence.
+**The tooling that drives Lunate's AI workers.** It is not part of the product: it is what decides which
+card a worker picks up, opens the pull request as the `lunate-worker` identity, has `lunate-reviewer` review it,
+and lets GitHub's merge queue land it. License: MIT.
+
+The lane is one loop, in one sentence.
 
 **card → worker → PR → CI → review → auto-merge**, and Daniel steps in only when something fails.
 
