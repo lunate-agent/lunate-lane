@@ -52,7 +52,7 @@ def _api(token: str, method: str, path: str, payload: dict | None = None) -> dic
         raise OpenPrError(f"GitHub could not be reached for {method} {path} ({exc.__class__.__name__})") from exc
 
 
-def push(repo: pathlib.Path, branch: str, token: str, remote: str = "https://github.com") -> None:
+def push(repo: pathlib.Path, branch: str, token: str, host: str = "github.com") -> None:
     """Push the branch with the worker's token. The token never reaches the report.
 
     The token is passed by git config rewrite rather than in argv, so it cannot show up in a process listing.
@@ -63,8 +63,9 @@ def push(repo: pathlib.Path, branch: str, token: str, remote: str = "https://git
             "GIT_ASKPASS": "echo",
             "GIT_TERMINAL_PROMPT": "0",
             "GIT_CONFIG_COUNT": "1",
-            "GIT_CONFIG_KEY_0": f"url.https://x-access-token:{token}@{remote}/{SLUG}.git.insteadOf",
-            "GIT_CONFIG_VALUE_0": f"{remote}/{SLUG}.git",
+            # a prefix rewrite: the token is in the config, not argv, so it cannot show in a process listing
+            "GIT_CONFIG_KEY_0": f"url.https://x-access-token:{token}@{host}/.insteadOf",
+            "GIT_CONFIG_VALUE_0": f"https://{host}/",
         }
     )
     done = subprocess.run(
