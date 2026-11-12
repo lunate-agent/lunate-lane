@@ -9,9 +9,12 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from scripts import dispatch_card, github, harness, identity, open_pr, worker  # noqa: E402
+from scripts import common, dispatch_card, github, harness, identity, open_pr, worker  # noqa: E402
 from scripts.common import GitError, LaneError  # noqa: E402
-from tests.helpers import TempState, git, origin_and_clone, pull, review  # noqa: E402
+from tests.helpers import REQUIRED, TempState, git, origin_and_clone, pull, review  # noqa: E402
+
+RED = (("ci-ok", "COMPLETED", "FAILURE"), ("build-and-test", "COMPLETED", "FAILURE"))
+RED_RUNS = (("ci-ok", "FAILURE", 0, "https://ci/ok"), ("build-and-test", "FAILURE", 4242, "https://ci/4242"))
 
 ISSUE = {"number": 3, "title": "Fix the thing", "state": "OPEN", "labels": [], "milestone": None,
          "body": "## Acceptance\n1. the {thing} works, even with {{TITLE}} in the text"}
@@ -115,10 +118,40 @@ class WorktreeTests(RepoCase):
         self.assertTrue(worker.has_fragments(self.cfg, self.clone))
 
 
+class ConflictTests(RepoCase):
+    def test_a_conflicting_branch_goes_back_with_the_conflicting_files_and_the_worktree_untouched(self) -> None:
+        path = worker.prepare_worktree(self.cfg, 3)
+        for repo, text in ((path, "branch\n"), (self.clone, "main\n")):
+            git(repo, "config", "user.email", "w@example.invalid")
+            git(repo, "config", "user.name", "w")
+        (path / "README").write_text("branch\n")
+        git(path, "commit", "-qam", "branch edit")
+        git(self.clone, "switch", "-q", "main")
+        (self.clone / "README").write_text("main\n")
+        git(self.clone, "commit", "-qam", "main edit")
+        git(self.clone, "push", "-q", "origin", "main")
+        git(self.clone, "fetch", "-q", "origin")
+        head = git(path, "rev-parse", "HEAD")
+        with mock.patch.object(github, "pull", return_value=pull(12, 3, mergeable="CONFLICTING")), \
+                mock.patch.object(github, "required_checks", return_value=REQUIRED):
+            text = worker.rework_findings(self.cfg, 12, path)
+        self.assertIn("The branch conflicts with `main`", text)
+        self.assertIn("- `README`", text)
+        self.assertEqual(git(path, "rev-parse", "HEAD"), head)
+        self.assertEqual(git(path, "status", "--porcelain"), "")
+
+    def test_a_branch_that_merges_cleanly_has_no_conflicting_files(self) -> None:
+        path = worker.prepare_worktree(self.cfg, 4)
+        self.assertEqual(worker.conflicts(self.cfg, path), [])
+
+
 class BriefTests(unittest.TestCase):
     def setUp(self) -> None:
         self.state = TempState()
         self.cfg = self.state.cfg
+        self.required = mock.patch.object(github, "required_checks", return_value=REQUIRED)
+        self.required.start()
+        self.addCleanup(self.required.stop)
 
     def tearDown(self) -> None:
         self.state.close()
@@ -140,6 +173,40 @@ class BriefTests(unittest.TestCase):
         self.assertIn("grill-me", text)
         self.assertIn("**Intent decisions**", text)
 
+    def test_failing_checks_go_back_with_their_names_and_log_tails(self) -> None:
+        """#8: the failing job's log tail is in the findings; the required roll-up is named too."""
+        log = "\n".join(f"2026-11-12T10:00:{i:02d}.0000000Z line {i}" for i in range(100)) + "\nerror CS0103: x"
+        with mock.patch.object(github, "pull", return_value=pull(12, 3, checks=RED, runs=RED_RUNS)), \
+                mock.patch.object(common, "gh", return_value=log) as gh:
+            text = worker.rework_findings(self.cfg, 12)
+        self.assertIn("Required checks failing on `h1`: ci-ok.", text)
+        self.assertIn("`build-and-test` (failure)", text)
+        self.assertIn("error CS0103: x", text)
+        self.assertIn("line 99", text)
+        self.assertNotIn("line 10\n", text, "only the tail of the log")
+        self.assertNotIn("2026-11-12T10:00", text, "timestamps are stripped")
+        self.assertEqual(gh.call_args.args[:2], ("api", "repos/lunate-agent/lunate/actions/jobs/4242/logs"))
+        self.assertLess(text.index("build-and-test` — failure"), text.index("ci-ok` — failure"))
+
+    def test_a_log_that_cannot_be_read_is_said_so_in_the_findings(self) -> None:
+        with mock.patch.object(github, "pull", return_value=pull(12, 3, checks=RED, runs=RED_RUNS)), \
+                mock.patch.object(common, "gh", side_effect=common.GhError("gh api failed (1): HTTP 410")):
+            text = worker.rework_findings(self.cfg, 12)
+        self.assertIn("(the log could not be read: gh api failed (1): HTTP 410)", text)
+
+    def test_a_queue_removal_goes_back_with_its_reason(self) -> None:
+        p = pull(12, 3, reviews=[review("APPROVED")], queue_removal="FAILED_CHECKS")
+        with mock.patch.object(github, "pull", return_value=p):
+            text = worker.rework_findings(self.cfg, 12)
+        self.assertIn("out of the merge queue after approval (failed_checks)", text)
+
+    def test_the_rework_brief_says_merge_never_rebase_never_force(self) -> None:
+        text = worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), 12, "### Checks are failing", True)
+        self.assertIn("`git merge origin/main`", text)
+        self.assertIn("Never `git rebase`", text)
+        self.assertIn("without force", text)
+        self.assertIn("run the named tests again", text)
+
     def test_a_rework_names_its_pull_request_fragment_and_findings(self) -> None:
         text = worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), 12, "1. not met — x.cs:3", True)
         self.assertIn("It is #12.", text)
@@ -158,7 +225,7 @@ class BriefTests(unittest.TestCase):
             with self.assertRaises(LaneError):
                 worker.rework_findings(self.cfg, 12)
         with mock.patch.object(github, "pull", return_value=pull(12, 3, reviews=[review("CHANGES_REQUESTED", body="b")])):
-            self.assertEqual(worker.rework_findings(self.cfg, 12), "b")
+            self.assertEqual(worker.rework_findings(self.cfg, 12), "### The reviewer requested changes\n\nb")
         with mock.patch.object(github, "pull", return_value=pull(12, 3, state="MERGED")):
             with self.assertRaises(LaneError):
                 worker.rework_findings(self.cfg, 12)
@@ -178,6 +245,7 @@ class DriveTests(RepoCase):
             mock.patch.object(harness, "read_credential", return_value="model-credential-value-1234"),
             mock.patch.object(open_pr, "return_to_draft", side_effect=lambda branch, pr: self.drafted.append(pr)),
             mock.patch.object(open_pr, "_worker_token", side_effect=AssertionError("no live token in tests")),
+            mock.patch.object(github, "required_checks", return_value=REQUIRED),
         ]
         self.drafted = []
         for patch in self.patches:

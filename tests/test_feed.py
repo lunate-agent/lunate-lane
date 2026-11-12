@@ -9,7 +9,7 @@ from unittest import mock
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from scripts import feed, github, harness  # noqa: E402
 from scripts.common import GhError, StateError  # noqa: E402
-from tests.helpers import TempState, card, pull, review  # noqa: E402
+from tests.helpers import REQUIRED, TempState, card, pull, review  # noqa: E402
 
 
 class FeedTests(unittest.TestCase):
@@ -21,6 +21,7 @@ class FeedTests(unittest.TestCase):
             mock.patch.object(github, "open_pulls", return_value=[pull(50, 9)]),
             mock.patch.object(github, "pull", return_value=pull(50, 9, reviews=[review("CHANGES_REQUESTED")])),
             mock.patch.object(harness, "running_workers", return_value={}),
+            mock.patch.object(github, "required_checks", return_value=REQUIRED),
             mock.patch.object(feed, "start", side_effect=lambda cfg, launch: self.started.append(launch) or 1),
             mock.patch("sys.stdout", new=io.StringIO()),
         ]
@@ -31,6 +32,18 @@ class FeedTests(unittest.TestCase):
         for patch in reversed(self.patches):
             patch.stop()
         self.state.close()
+
+    def test_a_stuck_pull_request_is_reworked_and_the_log_says_why(self) -> None:
+        github.pull.return_value = pull(50, 9, mergeable="CONFLICTING")
+        with mock.patch.object(sys, "argv", ["feed.py", "--dry-run"]):
+            self.assertEqual(feed.main(), 0)
+        self.assertIn("would start rework of #50 for card #9 (conflicts with the base branch)",
+                      (self.state.cfg.state / "logs" / "feed.log").read_text())
+
+    def test_unreadable_required_checks_start_nothing(self) -> None:
+        github.required_checks.side_effect = GhError("no required status checks found on main")
+        self.assertEqual(feed.main(), 1)
+        self.assertEqual(self.started, [])
 
     def test_rework_starts_before_new_cards_and_bugs_before_others(self) -> None:
         self.assertEqual(feed.main(), 0)
@@ -112,6 +125,7 @@ class UnreadableStateTests(unittest.TestCase):
         self.patches = [
             mock.patch.object(github, "milestone_cards", return_value=[card(1), card(2)]),
             mock.patch.object(github, "open_pulls", return_value=[]),
+            mock.patch.object(github, "required_checks", return_value=REQUIRED),
             mock.patch.object(feed, "start", side_effect=lambda cfg, launch: self.started.append(launch) or 1),
             mock.patch.object(sys, "argv", ["feed.py"]),
             mock.patch("sys.stdout", new=io.StringIO()),

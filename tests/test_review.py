@@ -48,6 +48,9 @@ class SkipTests(unittest.TestCase):
         unrelated = pull(7, 10, files=("openspec/specs/print-mode/spec.md",))
         self.assertIsNone(review.skip_reason(unrelated, REQUIRED, {}, "lunate-reviewer", [older, newer, unrelated]))
 
+    def test_a_conflicting_pull_request_is_not_reviewed(self) -> None:
+        self.assertIn("conflicts with the base branch", self.reason(pull(1, 9, mergeable="CONFLICTING")))
+
     def test_a_pull_request_with_no_card_is_not_reviewed(self) -> None:
         self.assertIn("no card", self.reason(pull(1, None)))
 

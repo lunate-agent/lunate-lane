@@ -34,8 +34,9 @@ def decide(cfg: common.Config) -> tuple[list[cards.Launch], list[str]]:
     worker_pulls = [github.pull(cfg, p.number) for p in pulls if p.author == cfg.worker_app]
     running = harness.running_workers()
     pins = cards.load_pins(cfg.pins)
+    required = github.required_checks(cfg)
     return cards.plan(cards=milestone, open_pulls=pulls, worker_pulls=worker_pulls, running=running,
-                      rules=rules(cfg), pins=pins, parked=harness.parked_cards())
+                      rules=rules(cfg), pins=pins, parked=harness.parked_cards(), required=required)
 
 
 def start(cfg: common.Config, launch: cards.Launch) -> int:
@@ -59,7 +60,8 @@ def tick(dry_run: bool = False) -> None:
     launches, notes = decide(cfg)
     # the launches first, in the order they were chosen, then the notes on why nothing else was (#3)
     for launch in launches:
-        what = f"rework of #{launch.rework_pr} for card #{launch.card}" if launch.rework_pr else f"card #{launch.card}"
+        what = (f"rework of #{launch.rework_pr} for card #{launch.card} ({launch.reason})" if launch.rework_pr
+                else f"card #{launch.card}")
         if dry_run:
             common.log(JOB, f"would start {what}")
             continue

@@ -14,8 +14,10 @@ returns its pull request to draft before the session.
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import os
 import pathlib
+import re
 import subprocess
 import sys
 
@@ -97,16 +99,73 @@ def has_fragments(cfg: common.Config, repo: pathlib.Path) -> bool:
     return bool(common.git(repo, "ls-tree", "--name-only", f"origin/{cfg.base}", "--", "changes"))
 
 
-def rework_findings(cfg: common.Config, pr: int) -> str:
-    """The reviewer's request for changes on the pull request's current head. None is a refusal to rework."""
+LOG_TAIL_LINES = 60
+LOG_TAIL_CHARS = 6000
+MAX_FAILING_LOGS = 5
+
+
+def log_tail(cfg: common.Config, job_id: int) -> str:
+    """The last lines of a GitHub Actions job's log. Supporting material for a brief: a log that cannot be read
+    is said so in the brief (the decision to rework was made on readable state), never left out silently."""
+    if not job_id:
+        return "(not a GitHub Actions job — no log to fetch; see the check's page)"
+    try:
+        raw = common.gh("api", f"repos/{cfg.slug}/actions/jobs/{int(job_id)}/logs", timeout=120)
+    except LaneError as exc:
+        return f"(the log could not be read: {exc})"
+    lines = [re.sub(r"^\d{4}-\d\d-\d\dT[\d:.]+Z ", "", line) for line in raw.splitlines()]
+    return "\n".join(lines[-LOG_TAIL_LINES:])[-LOG_TAIL_CHARS:]
+
+
+def conflicts(cfg: common.Config, worktree: pathlib.Path) -> list[str]:
+    """The files that conflict when origin/<base> is merged into the branch, without touching the worktree."""
+    try:
+        done = subprocess.run(["git", "-C", str(worktree), "merge-tree", "--write-tree", "--name-only",
+                               "--no-messages", f"origin/{cfg.base}", "HEAD"], capture_output=True, text=True, timeout=120)
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GitError(f"git merge-tree could not be run in {worktree} ({exc.__class__.__name__})") from exc
+    if done.returncode not in (0, 1):
+        raise GitError(f"git merge-tree failed in {worktree}: {done.stderr.strip()[:160]}")
+    return [line for line in done.stdout.splitlines()[1:] if line.strip()] if done.returncode == 1 else []
+
+
+def rework_findings(cfg: common.Config, pr: int, worktree: pathlib.Path | None = None) -> str:
+    """Everything that sends this pull request back, read now: the reviewer's request for changes on the head,
+    the failing checks with their log tails, the conflicting files, the merge queue's removal (#8). None of them
+    is a refusal to rework."""
     p = github.pull(cfg, pr)
     if p.state != "OPEN":
         raise LaneError(f"#{pr} is {p.state.lower()} — nothing to rework")
+    required = github.required_checks(cfg)
+    sections = []
     found = [r.body for r in p.reviews if r.author == cfg.reviewer_app and r.commit == p.head
              and r.state == "CHANGES_REQUESTED"]
-    if not found:
-        raise LaneError(f"#{pr} has no request for changes on its head {p.head[:8]} — nothing to rework")
-    return found[-1]
+    if found:
+        sections.append("### The reviewer requested changes\n\n" + found[-1].strip())
+    stuck = github.stuck_reason(p, required, cfg.reviewer_app)
+    if stuck == "required checks failing":
+        failing = [r for r in p.runs if r[1] not in github.PASSED and r[1]]
+        failing.sort(key=lambda r: (r[0] in required, r[0]))  # the jobs first, the required roll-up last
+        parts = [f"Required checks failing on `{p.head[:9]}`: "
+                 + ", ".join(sorted(n for n in required if github.check_state(
+                     dataclasses.replace(p, checks=tuple(c for c in p.checks if c[0] == n)), frozenset({n})) == "failing"))
+                 + ". Failing check runs: " + ", ".join(f"`{r[0]}` ({r[1].lower()})" for r in failing) + "."]
+        for name, conclusion, job, url in failing[:MAX_FAILING_LOGS]:
+            parts.append(f"#### `{name}` — {conclusion.lower()}\n{url}\n\n```\n{log_tail(cfg, job)}\n```")
+        sections.append("### Checks are failing\n\n" + "\n\n".join(parts))
+    elif stuck == "conflicts with the base branch":
+        files = conflicts(cfg, worktree) if worktree is not None else []
+        sections.append(f"### The branch conflicts with `{cfg.base}`\n\n"
+                        + ("Conflicting files when `origin/" + cfg.base + "` is merged in:\n"
+                           + "\n".join(f"- `{f}`" for f in files) if files else
+                           "GitHub reports a conflict; merge `origin/" + cfg.base + "` to see it."))
+    elif stuck:
+        sections.append(f"### It is {stuck}\n\nThe merge queue tests the branch together with what lands before "
+                        f"it. Merge `origin/{cfg.base}`, find what breaks in combination, and fix it.")
+    if not sections:
+        raise LaneError(f"#{pr} has no request for changes on its head {p.head[:8]} and is not stuck — nothing "
+                        "to rework")
+    return "\n\n".join(sections)
 
 
 def brief(cfg: common.Config, issue: dict, worktree: pathlib.Path, pr: int | None, findings: str,
@@ -126,9 +185,14 @@ def brief(cfg: common.Config, issue: dict, worktree: pathlib.Path, pr: int | Non
         fragment = "The `changes/` fragment convention is not on main yet: do not edit `CHANGELOG.md`, add nothing."
     rework = ""
     if findings:
-        rework = ("\n## This is a rework\n\nThe reviewer requested changes on this pull request. Address every "
-                  "finding on this same branch, then finish as below (the archive stays the last commit — "
-                  "redo it if your fixes land after it).\n\n" + findings.strip() + "\n")
+        rework = ("\n## This is a rework\n\nThis pull request went back to a worker for what follows. Address all of "
+                  "it on this same branch, then finish as below (the archive stays the last commit — redo it if your "
+                  f"fixes land after it).\n\n**Bring the branch up to date by merging, never by rebasing:** "
+                  f"`git merge origin/{cfg.base}` (the lane has fetched it), resolve every conflict in the files, and "
+                  "commit the merge. Never `git rebase`, never rewrite a pushed commit — the lane pushes without "
+                  "force, so rewritten history is refused. A conflict in `openspec/specs/**` is resolved by reverting "
+                  "the archive commit, merging, and re-archiving, never by hand. Then run the named tests again.\n\n"
+                  + findings.strip() + "\n")
     return common.render("worker-brief.md", NUMBER=str(number), REPO=cfg.slug, TITLE=issue["title"],
                          WORKTREE=str(worktree), BRANCH=f"wt/issue-{number}", BASE=cfg.base, PR_LINE=pr_line,
                          FRAGMENT_RULE=fragment, REWORK=rework, BODY=(issue.get("body") or "").strip())
@@ -154,7 +218,7 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
     job = f"worker-{number}"
     worktree = prepare_worktree(cfg, number)
     issue = dispatch_card.card(worktree, number)
-    findings = rework_findings(cfg, rework_pr) if rework_pr else ""
+    findings = rework_findings(cfg, rework_pr, worktree) if rework_pr else ""
     if rework_pr:
         # back to draft before the session: CI's heavy legs and the reviewer wait for the clean finish (#5)
         open_pr.return_to_draft(f"wt/issue-{number}", rework_pr)

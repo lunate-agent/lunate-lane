@@ -9,7 +9,7 @@ import unittest
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from scripts import cards  # noqa: E402
 from scripts.common import ConfigError  # noqa: E402
-from tests.helpers import card, pull, review  # noqa: E402
+from tests.helpers import REQUIRED, card, pull, review  # noqa: E402
 
 RULES = cards.Rules(wip_limit=5, worker_app="lunate-worker", reviewer_app="lunate-reviewer",
                     bug_label="kind/bug", area_prefix="area/")
@@ -18,7 +18,8 @@ RULES = cards.Rules(wip_limit=5, worker_app="lunate-worker", reviewer_app="lunat
 def plan(cards_, open_pulls=(), worker_pulls=(), running=None, pins=(), rules=RULES, parked=frozenset()):
     worker_pulls = list(worker_pulls)
     return cards.plan(cards=list(cards_), open_pulls=list(open_pulls) or worker_pulls, worker_pulls=worker_pulls,
-                      running=running or {}, rules=rules, pins=tuple(pins), parked=frozenset(parked))
+                      running=running or {}, rules=rules, pins=tuple(pins), parked=frozenset(parked),
+                      required=REQUIRED)
 
 
 def started(launches):
@@ -156,7 +157,42 @@ class ReworkTests(unittest.TestCase):
         orphan = pull(101, None, reviews=[review("CHANGES_REQUESTED")])
         launches, notes = plan([], worker_pulls=[orphan])
         self.assertEqual(launches, [])
-        self.assertTrue(any("#101 needs rework but carries no card" in note for note in notes))
+        self.assertTrue(any("#101 needs rework (changes requested) but carries no card" in note for note in notes))
+
+
+RED = (("ci-ok", "COMPLETED", "FAILURE"),)
+
+
+class StuckTests(unittest.TestCase):
+    """#8: a stuck worker pull request goes back to a worker like changes-requested, and adds nothing to WIP."""
+
+    def test_red_conflicting_and_dropped_from_the_queue_each_go_back_with_their_reason(self) -> None:
+        pulls = [pull(101, 1, checks=RED), pull(102, 2, mergeable="CONFLICTING"),
+                 pull(103, 3, reviews=[review("APPROVED")], queue_removal="MERGE_CONFLICT")]
+        launches, _ = plan([card(9)], worker_pulls=pulls, rules=cards.Rules(3, *list(vars(RULES).values())[1:]))
+        self.assertEqual([(l.card, l.rework_pr, l.reason) for l in launches], [
+            (1, 101, "required checks failing"), (2, 102, "conflicts with the base branch"),
+            (3, 103, "out of the merge queue after approval (merge_conflict)")])
+
+    def test_a_draft_a_running_card_or_a_parked_card_is_not_sent_back(self) -> None:
+        self.assertEqual(started(plan([], worker_pulls=[pull(101, 1, checks=RED, draft=True)])[0]), [])
+        self.assertEqual(started(plan([], worker_pulls=[pull(101, 1, checks=RED)], running={1: frozenset()})[0]), [])
+        launches, notes = plan([], worker_pulls=[pull(101, 1, mergeable="CONFLICTING")], parked={1})
+        self.assertEqual(started(launches), [])
+        self.assertIn("#101 needs rework (conflicts with the base branch) but card #1 is parked — left for a person",
+                      notes)
+
+    def test_green_pending_queued_armed_or_unknown_is_not_stuck(self) -> None:
+        for p in (pull(101, 1), pull(101, 1, checks=[("ci-ok", "IN_PROGRESS", "")]), pull(101, 1, mergeable="UNKNOWN"),
+                  pull(101, 1, reviews=[review("APPROVED")], in_queue=True, queue_removal="X"),
+                  pull(101, 1, reviews=[review("APPROVED")], auto_merge=True, queue_removal="X"),
+                  pull(101, 1, reviews=[review("APPROVED")])):
+            with self.subTest(p=p):
+                self.assertEqual(started(plan([], worker_pulls=[p])[0]), [])
+
+    def test_changes_requested_wins_the_reason_when_the_head_is_also_red(self) -> None:
+        launches, _ = plan([], worker_pulls=[pull(101, 1, checks=RED, reviews=[review("CHANGES_REQUESTED")])])
+        self.assertEqual(launches[0].reason, "changes requested")
 
 
 class ParkedTests(unittest.TestCase):
@@ -170,7 +206,7 @@ class ParkedTests(unittest.TestCase):
         rules = cards.Rules(1, "lunate-worker", "lunate-reviewer", "kind/bug", "area/")
         launches, notes = plan([card(5)], worker_pulls=[sent_back], parked={1}, rules=rules)
         self.assertEqual(started(launches), [])
-        self.assertIn("#101 needs rework but card #1 is parked — left for a person", notes)
+        self.assertIn("#101 needs rework (changes requested) but card #1 is parked — left for a person", notes)
         self.assertIn("WIP 1 of 1 — no new card", notes)
 
 

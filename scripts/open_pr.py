@@ -89,7 +89,9 @@ def push(repo: pathlib.Path, branch: str, token: str, host: str = "github.com") 
         }
     )
     done = subprocess.run(
-        ["git", "push", "--force-with-lease", "origin", f"refs/heads/{branch}:refs/heads/{branch}"],
+        # never a force push (#8): a branch that moved is merged into, not overwritten, and a refused push is a
+        # named failure
+        ["git", "push", "origin", f"refs/heads/{branch}:refs/heads/{branch}"],
         capture_output=True,
         text=True,
         cwd=str(repo),

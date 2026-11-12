@@ -42,8 +42,13 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
 1. **Feeder** (`scripts/feed.py`, every 10 minutes). Reads the open issues of the milestone, every open pull
    request, the worker identity's pull requests in full, and the running-worker records, then starts:
    - **rework first**: a worker pull request whose reviewer requested changes *on its current head* goes back to
-     a worker on the same branch, with the review's findings in the brief. It does not add to WIP — its card is
-     already in flight;
+     a worker on the same branch, with the review's findings in the brief. So does a **stuck** one — ready (not a
+     draft) and red on a required check, `CONFLICTING` with main, or approved but removed from the merge queue
+     (neither queued nor armed, with the queue's removal on record) — with the failing check names and the tail
+     of each failing job's log, the conflicting files, or the queue's reason in the brief. Conflicts are resolved
+     by merging `origin/main` into the branch, never by rebasing; the lane never force-pushes (a rewritten branch
+     is refused). Then the named tests, the push, and a new review (the ruleset dismisses the stale approval). A
+     rework does not add to WIP — its card is already in flight;
    - **then new cards**, in order: the pins file (if any), then `kind/bug`, then cards that other open issues
      depend on (native GitHub dependency edges), then oldest first. A card waiting on an open issue is skipped;
      so is a card any open pull request (any author) already carries or closes.

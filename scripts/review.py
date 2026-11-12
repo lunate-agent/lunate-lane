@@ -41,6 +41,8 @@ def skip_reason(p: github.Pull, required: frozenset, running: dict, reviewer: st
         return f"its worker on #{p.card} is still running"
     if p.card is None:
         return "carries no card to review against"
+    if p.mergeable == "CONFLICTING":
+        return "conflicts with the base branch — it goes back to a worker first"
     checks = github.check_state(p, required)
     if checks != "green":
         return f"required checks are {checks}"

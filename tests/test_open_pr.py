@@ -223,6 +223,27 @@ class FailurePathTests(unittest.TestCase):
         open_pr._api = lambda *a, **k: []
         self.assertIsNone(open_pr.find_open_pr("lane/x", "t"))
 
+    def test_the_push_never_forces_so_rewritten_history_is_refused(self) -> None:
+        """#8: a real push to a real (local) origin; a rewritten branch is a named failure, never overwritten."""
+        open_pr.push = self.saved[2]
+        origin = self.repo / "origin.git"
+        subprocess.run(["git", "init", "-q", "--bare", str(origin)], check=True)
+        work = self.repo / "work"
+        subprocess.run(["git", "clone", "-q", str(origin), str(work)], check=True, capture_output=True)
+        for args in (["config", "user.email", "w@example.invalid"], ["config", "user.name", "w"],
+                     ["switch", "-q", "-c", "wt/issue-3"], ["commit", "-q", "--allow-empty", "-m", "one"]):
+            subprocess.run(["git", "-C", str(work), *args], check=True)
+        open_pr.push(work, "wt/issue-3", "token-for-tests")
+        first = subprocess.run(["git", "-C", str(origin), "rev-parse", "wt/issue-3"], capture_output=True,
+                               text=True).stdout.strip()
+        subprocess.run(["git", "-C", str(work), "commit", "-q", "--amend", "--allow-empty", "-m", "rewritten"],
+                       check=True)
+        with self.assertRaises(open_pr.OpenPrError) as caught:
+            open_pr.push(work, "wt/issue-3", "token-for-tests")
+        self.assertIn("refused", str(caught.exception))
+        self.assertEqual(subprocess.run(["git", "-C", str(origin), "rev-parse", "wt/issue-3"], capture_output=True,
+                                        text=True).stdout.strip(), first)
+
     def test_a_branch_that_does_not_exist_is_refused_before_pushing(self) -> None:
         with self.assertRaises(open_pr.OpenPrError) as caught:
             open_pr.push(self.repo, "lane/never-created", "token-for-tests")

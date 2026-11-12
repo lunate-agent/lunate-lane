@@ -52,6 +52,9 @@ class Pull:
     reviews: tuple = ()  # Review, oldest first
     checks: tuple = ()  # (name, status, conclusion)
     files: tuple | None = None  # changed paths; None means not read
+    in_queue: bool = False  # in the merge queue now
+    queue_removal: str = ""  # why the merge queue last removed it, if it did
+    runs: tuple = ()  # (name, conclusion, job id or 0, details url) of every check run on the head
 
     @property
     def capabilities(self) -> frozenset:
@@ -193,11 +196,13 @@ def open_pulls(cfg: common.Config) -> list[Pull]:
 
 PULL = """query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){pullRequest(number:$n){
 number title state isDraft createdAt headRefName headRefOid mergeable author{login} autoMergeRequest{enabledAt}
+isInMergeQueue timelineItems(last:1,itemTypes:[REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{... on RemovedFromMergeQueueEvent{
+createdAt reason}}}
 closingIssuesReferences(first:10){pageInfo{hasNextPage} nodes{number labels(first:50){pageInfo{hasNextPage} nodes{name}}}}
 reviews(last:100){pageInfo{hasPreviousPage} nodes{author{login} state body commit{oid}}}
 files(first:100){pageInfo{hasNextPage} nodes{path}}
 commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:100){pageInfo{hasNextPage}
-nodes{__typename ... on CheckRun{name status conclusion} ... on StatusContext{context state}}}}}}}}}}"""
+nodes{__typename ... on CheckRun{name status conclusion databaseId detailsUrl} ... on StatusContext{context state}}}}}}}}}}"""
 
 
 def pull(cfg: common.Config, number: int) -> Pull:
@@ -225,6 +230,11 @@ def pull(cfg: common.Config, number: int) -> Pull:
         reviews=tuple(Review(login(r.get("author")), str(r["state"]), str((r.get("commit") or {}).get("oid") or ""),
                              str(r.get("body") or "")) for r in node["reviews"]["nodes"]),
         checks=checks, files=_files(cfg, int(number), node["files"]),
+        in_queue=bool(node.get("isInMergeQueue")),
+        queue_removal=next((str(e.get("reason") or "removed") for e in
+                            ((node.get("timelineItems") or {}).get("nodes") or [])[-1:]), ""),
+        runs=tuple((c["name"], c.get("conclusion") or "", int(c.get("databaseId") or 0), str(c.get("detailsUrl") or ""))
+                   for c in contexts if c["__typename"] == "CheckRun"),
     )
 
 
@@ -287,3 +297,20 @@ def worker_report(cfg: common.Config, number: int) -> str:
     found = [c["body"] for c in node["comments"]["nodes"]
              if login(c.get("author")) == cfg.worker_app and str(c.get("body") or "").startswith("**Worker session**")]
     return found[-1] if found else ""
+
+
+def stuck_reason(p: Pull, required: frozenset, reviewer: str) -> str | None:
+    """Why an open, ready pull request is stuck and goes back to a worker (#8), or None.
+
+    Red on a required check, CONFLICTING with the base, or approved at its head but neither in the merge queue nor
+    armed, with a removal by the queue on record (approved and unarmed without one is a person's choice). A draft is unfinished work, not stuck; UNKNOWN mergeability is not a conflict.
+    """
+    if p.state != "OPEN" or p.draft:
+        return None
+    if p.mergeable == "CONFLICTING":
+        return "conflicts with the base branch"
+    if check_state(p, required) == "failing":
+        return "required checks failing"
+    if reviewer_verdict(p, reviewer) == "APPROVED" and not p.in_queue and not p.auto_merge and p.queue_removal:
+        return f"out of the merge queue after approval ({p.queue_removal.lower()})"
+    return None
