@@ -224,8 +224,10 @@ autoMergeEvents:timelineItems(last:1,itemTypes:[AUTO_MERGE_ENABLED_EVENT,AUTO_ME
 closingIssuesReferences(first:10){pageInfo{hasNextPage} nodes{number labels(first:50){pageInfo{hasNextPage} nodes{name}}}}
 reviews(last:100){pageInfo{hasPreviousPage} nodes{author{login} state body commit{oid}}}
 files(first:100){pageInfo{hasNextPage} nodes{path}}
-commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:100){pageInfo{hasNextPage}
-nodes{__typename ... on CheckRun{name status conclusion databaseId detailsUrl checkSuite{workflowRun{databaseId}}
+commits(last:1){nodes{commit{oid checkSuites(first:50){pageInfo{hasNextPage} nodes{databaseId status createdAt
+workflowRun{databaseId runAttempt workflow{databaseId}}}} statusCheckRollup{contexts(first:100){pageInfo{hasNextPage}
+nodes{__typename ... on CheckRun{name status conclusion databaseId detailsUrl checkSuite{databaseId status createdAt
+workflowRun{databaseId runAttempt workflow{databaseId}}}
 steps(first:100){pageInfo{hasNextPage} nodes{name conclusion}}} ... on StatusContext{context state}}}}}}}}}}"""
 
 
@@ -241,9 +243,11 @@ def pull(cfg: common.Config, number: int) -> Pull:
     commits = node["commits"]["nodes"]
     rollup = (commits[0]["commit"].get("statusCheckRollup") if commits else None) or {}
     contexts = _complete(rollup["contexts"], f"#{number}'s checks") if rollup else []
-    checks = tuple((c["name"], c["status"], c.get("conclusion") or "") if c["__typename"] == "CheckRun"
-                   else (c["context"], "COMPLETED" if c["state"] not in ("PENDING", "EXPECTED") else c["state"],
-                         c["state"]) for c in contexts)
+    suites = _complete(commits[0]["commit"]["checkSuites"], f"#{number}'s check suites") if commits else []
+    newest = newest_runs([c for c in contexts if c["__typename"] == "CheckRun"], suites)
+    checks = tuple((c["name"], c["status"], c.get("conclusion") or "") for c in newest) + tuple(
+        (c["context"], "COMPLETED" if c["state"] not in ("PENDING", "EXPECTED") else c["state"], c["state"])
+        for c in contexts if c["__typename"] != "CheckRun")
     return Pull(
         number=int(node["number"]), title=str(node.get("title") or ""), state=str(node["state"]),
         draft=bool(node["isDraft"]), created=str(node["createdAt"]), author=login(node.get("author")),
@@ -257,7 +261,7 @@ def pull(cfg: common.Config, number: int) -> Pull:
         in_queue=bool(node.get("isInMergeQueue")),
         queue_removal=_queue_removal(node), disarmed_by=_disarmed_by(node, cfg.worker_app),
         node_id=str(node.get("id") or ""),
-        runs=tuple(_run(c) for c in contexts if c["__typename"] == "CheckRun"),
+        runs=tuple(_run(c) for c in newest),
     )
 
 
@@ -320,6 +324,51 @@ def worker_report(cfg: common.Config, number: int) -> str:
     found = [c["body"] for c in node["comments"]["nodes"]
              if login(c.get("author")) == cfg.worker_app and str(c.get("body") or "").startswith("**Worker session**")]
     return found[-1] if found else ""
+
+
+DONE = "COMPLETED"
+
+
+def _suite_key(suite: dict) -> tuple:
+    run = suite.get("workflowRun") or {}
+    return (str(suite.get("createdAt") or ""), int(run.get("runAttempt") or 0), int(suite.get("databaseId") or 0))
+
+
+def newest_runs(check_runs: list, suites: list) -> list:
+    """For each check name, its newest check run on the head — the latest created (check-run ids only grow, so a
+    rerun attempt's run and a newer workflow run's run both win) — as GitHub judges a head.
+
+    A check is still pending while a run or attempt of the same workflow that will produce it again is queued or
+    in progress: a newer check suite of that workflow, or the same suite re-queued for a rerun, that is not
+    completed. That is the state right after a pull request is marked ready: the draft run's deliberate `ci-ok`
+    failure is the newest `ci-ok` until the ready run creates its own. The returned runs are copies with
+    status IN_PROGRESS and no conclusion where that applies.
+    """
+    every_suite = {int(s.get("databaseId") or 0): s for s in suites}
+    for c in check_runs:
+        suite = c.get("checkSuite") or {}
+        every_suite.setdefault(int(suite.get("databaseId") or 0), suite)
+
+    def workflow(suite: dict):
+        return (((suite.get("workflowRun") or {}).get("workflow")) or {}).get("databaseId")
+
+    latest: dict = {}
+    for c in check_runs:
+        current = latest.get(c["name"])
+        if current is None or int(c.get("databaseId") or 0) > int(current.get("databaseId") or 0):
+            latest[c["name"]] = c
+    found = []
+    for name in sorted(latest):
+        c = latest[name]
+        own = c.get("checkSuite") or {}
+        flow = workflow(own)
+        coming = flow is not None and any(
+            workflow(s) == flow and s.get("status") not in (None, DONE) and _suite_key(s) >= _suite_key(own)
+            for s in every_suite.values())
+        if c.get("status") == DONE and coming:
+            c = {**c, "status": "IN_PROGRESS", "conclusion": None}
+        found.append(c)
+    return found
 
 
 def _run(c: dict) -> Run:

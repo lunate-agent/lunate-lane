@@ -145,7 +145,7 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
 | --- | --- |
 | `lane.json` | The one config: repo slug, milestone, base, WIP limit, App slugs, the worker model and the full and light reviewer models, labels, Pi harness settings, paths. |
 | `scripts/common.py` | Config loading, the named errors, `gh`/`git`/GraphQL/REST calls that raise instead of returning empty, templates, logs, locks, the cron job wrapper. |
-| `scripts/github.py` | Reads of GitHub's state: milestone cards with dependency edges, open pull requests, one pull request in full, required checks; the check and review verdicts. |
+| `scripts/github.py` | Reads of GitHub's state: milestone cards with dependency edges, open pull requests, one pull request in full, required checks; the check and review verdicts. Each check is judged by its newest check run on the head (a rerun attempt or a newer workflow run wins), and stays pending while a run or attempt of its workflow that will produce it again is queued or in progress — so the draft run's deliberate `ci-ok` failure stops counting once the pull request is ready. |
 | `scripts/cards.py` | The feeder's pure decisions: order, pins, WIP and area limits, rework before new work. |
 | `scripts/harness.py` | Runs one headless Pi session under `sandbox-exec` with a minimal environment, its own HOME and a stall watchdog; the running-worker records, orphan clean-up, idle-run and rework counts. |
 | `scripts/secret_scan.py` | The secret shapes, shared by the report scan and the scan before every push. |

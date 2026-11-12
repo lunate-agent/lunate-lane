@@ -7,6 +7,7 @@ from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from scripts import common, github  # noqa: E402
+from scripts import review as review_job  # noqa: E402
 from scripts.common import GhError  # noqa: E402
 from tests.helpers import REQUIRED, pull, review  # noqa: E402
 from tests.helpers import review as helper_review  # noqa: E402
@@ -67,7 +68,7 @@ class PullTests(unittest.TestCase):
                 "reviews": {"pageInfo": {"hasPreviousPage": False},
                             "nodes": [{"author": {"login": "lunate-reviewer"}, "state": "APPROVED", "body": "ok",
                                        "commit": {"oid": "abc"}}]},
-                "commits": {"nodes": [{"commit": {"oid": "abc", "statusCheckRollup": {"contexts": page([
+                "commits": {"nodes": [{"commit": {"oid": "abc", "checkSuites": page([]), "statusCheckRollup": {"contexts": page([
                     {"__typename": "CheckRun", "name": "ci-ok", "status": "COMPLETED", "conclusion": "SUCCESS"},
                     {"__typename": "StatusContext", "context": "legacy", "state": "PENDING"}])}}}]}}
         node.update(over)
@@ -200,6 +201,99 @@ class WorkerReportTests(unittest.TestCase):
             self.assertEqual(github.worker_report(CFG, 5), "")
 
 
+AGG = "Every required job succeeded"
+
+
+def suite(suite_id, status, created, run, attempt=1, workflow=7):
+    return {"databaseId": suite_id, "status": status, "createdAt": created,
+            "workflowRun": {"databaseId": run, "runAttempt": attempt, "workflow": {"databaseId": workflow}}}
+
+
+def check(name, status, conclusion, run_id, of, failing_step=None):
+    steps = [{"name": failing_step, "conclusion": "FAILURE"}] if failing_step else [{"name": "s", "conclusion": "SUCCESS"}]
+    return {"__typename": "CheckRun", "name": name, "status": status, "conclusion": conclusion, "databaseId": run_id,
+            "detailsUrl": "u", "checkSuite": of, "steps": {"pageInfo": {"hasNextPage": False}, "nodes": steps}}
+
+
+class NewestCheckTests(unittest.TestCase):
+    """Each required check is judged by its newest check run on the head, as GitHub does; a newer run or attempt
+    of the same workflow that is queued or in progress keeps it pending."""
+
+    REQUIRED = frozenset({"ci-ok"})
+
+    def read(self, suites, contexts):
+        node = PullTests().node(commits={"nodes": [{"commit": {"oid": "abc", "checkSuites": page(suites),
+                                                               "statusCheckRollup": {"contexts": page(contexts)}}}]},
+                                reviews={"pageInfo": {"hasPreviousPage": False}, "nodes": []})  # not reviewed yet
+        with mock.patch.object(common, "graphql", return_value=node):
+            return github.pull(CFG, 5)
+
+    def draft_run(self):
+        draft = suite(1, "COMPLETED", "2026-11-12T21:24:54Z", 43310020882)
+        return draft, [check("ci-ok", "COMPLETED", "FAILURE", 100, draft, AGG),
+                       check("verify (macos-latest, 1/4)", "COMPLETED", "SKIPPED", 101, draft)]
+
+    def test_815_and_813s_shape_reads_pending_while_the_ready_run_is_queued_or_running(self) -> None:
+        """Opened as a draft (ci-ok fails on purpose), then marked ready on the same head."""
+        draft, contexts = self.draft_run()
+        queued = suite(2, "QUEUED", "2026-11-12T21:25:58Z", 43310195848)
+        running = {**queued, "status": "IN_PROGRESS"}
+        for ready, extra in ((queued, []), (running, [check("verify (macos-latest, 1/4)", "IN_PROGRESS", None,
+                                                             200, running)])):
+            with self.subTest(ready=ready["status"]):
+                p = self.read([draft, ready], contexts + extra)
+                self.assertEqual(github.check_state(p, self.REQUIRED), "pending")
+                self.assertIsNone(github.stuck_reason(p, self.REQUIRED, "lunate-reviewer"))
+                self.assertIn("pending", review_job.skip_reason(p, self.REQUIRED, {}, "lunate-reviewer"))
+
+    def test_the_same_shape_reads_green_and_is_due_for_review_once_the_ready_run_passes(self) -> None:
+        draft, contexts = self.draft_run()
+        done = suite(2, "COMPLETED", "2026-11-12T21:25:58Z", 43310195848)
+        p = self.read([draft, done], contexts + [check("verify (macos-latest, 1/4)", "COMPLETED", "SUCCESS", 200, done),
+                                                 check("ci-ok", "COMPLETED", "SUCCESS", 201, done)])
+        self.assertEqual(github.check_state(p, self.REQUIRED), "green")
+        self.assertEqual([c for c in p.checks if c[0] == "ci-ok"], [("ci-ok", "COMPLETED", "SUCCESS")])
+        self.assertIsNone(review_job.skip_reason(p, self.REQUIRED, {}, "lunate-reviewer"))
+
+    def test_a_rerun_of_failed_jobs_is_pending_then_green_after_a_cancelled_first_attempt(self) -> None:
+        """Same workflow run, attempt 2: the suite is re-queued, attempt 1's runs stay on the head."""
+        first = [lambda s: check("verify (macos-latest, 2/4)", "COMPLETED", "CANCELLED", 90, s),
+                 lambda s: check("ci-ok", "COMPLETED", "FAILURE", 100, s, AGG)]
+        rerunning = suite(1, "IN_PROGRESS", "2026-11-12T21:24:54Z", 43310020882, attempt=2)
+        p = self.read([rerunning], [f(rerunning) for f in first])
+        self.assertEqual(github.check_state(p, self.REQUIRED), "pending")
+        rerun = suite(1, "COMPLETED", "2026-11-12T21:24:54Z", 43310020882, attempt=2)
+        p = self.read([rerun], [f(rerun) for f in first] + [
+            check("verify (macos-latest, 2/4)", "COMPLETED", "SUCCESS", 150, rerun),
+            check("ci-ok", "COMPLETED", "SUCCESS", 160, rerun)])
+        self.assertEqual(github.check_state(p, self.REQUIRED), "green")
+        self.assertEqual(sorted((r.name, r.conclusion) for r in p.runs),
+                         [("ci-ok", "SUCCESS"), ("verify (macos-latest, 2/4)", "SUCCESS")], "attempt 1 is superseded")
+
+    def test_a_newer_run_that_really_fails_is_failing_and_real(self) -> None:
+        draft, contexts = self.draft_run()
+        done = suite(2, "COMPLETED", "2026-11-12T21:25:58Z", 43310195848)
+        p = self.read([draft, done], contexts + [
+            check("verify (macos-latest, 1/4)", "COMPLETED", "FAILURE", 200, done, "Test slice"),
+            check("ci-ok", "COMPLETED", "FAILURE", 201, done, AGG)])
+        self.assertEqual(github.check_state(p, self.REQUIRED), "failing")
+        self.assertEqual(github.failure_kind(p, self.REQUIRED), "real")
+        self.assertEqual(github.stuck_reason(p, self.REQUIRED, "lunate-reviewer"), "required checks failing")
+
+    def test_another_workflow_still_running_does_not_hold_ci_ok_back(self) -> None:
+        draft, contexts = self.draft_run()
+        codeql = suite(3, "IN_PROGRESS", "2026-11-12T21:30:00Z", 99, workflow=8)
+        p = self.read([draft, codeql], contexts)
+        self.assertEqual(github.check_state(p, self.REQUIRED), "failing")
+
+    def test_more_check_suites_than_one_page_is_refused(self) -> None:
+        draft, contexts = self.draft_run()
+        node = PullTests().node(commits={"nodes": [{"commit": {"oid": "abc", "checkSuites": page([draft], more=True),
+                                                               "statusCheckRollup": {"contexts": page(contexts)}}}]})
+        with mock.patch.object(common, "graphql", return_value=node), self.assertRaises(GhError):
+            github.pull(CFG, 5)
+
+
 class QueueAndDisarmTests(unittest.TestCase):
     """Review of #17: only a queue removal of the current head counts; a person disarming is not a rework."""
 
@@ -303,7 +397,7 @@ class FailureKindTests(unittest.TestCase):
                 self.assertEqual(self.kind(*runs)[0], "real")
 
     def kind(self, *contexts):
-        node = PullTests().node(commits={"nodes": [{"commit": {"oid": "abc", "statusCheckRollup": {
+        node = PullTests().node(commits={"nodes": [{"commit": {"oid": "abc", "checkSuites": page([]), "statusCheckRollup": {
             "contexts": page(list(contexts))}}}]})
         with mock.patch.object(common, "graphql", return_value=node):
             p = github.pull(CFG, 5)
