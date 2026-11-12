@@ -311,8 +311,10 @@ def disarm_auto_merge(token: str, node_id: str) -> None:
     _graphql(token, query, {"id": node_id}, "disable auto-merge")
 
 
-STATE = ("query($id:ID!){node(id:$id){... on PullRequest{number isDraft "
+STATE = ("query($id:ID!){node(id:$id){... on PullRequest{number isDraft headRefOid "
          "autoMergeRequest{enabledAt mergeMethod}}}}")
+HEAD_WAIT = 120  # seconds GitHub gets to show the pushed commit as the pull request's head
+HEAD_POLL = 2.0
 
 
 def pr_state(token: str, node_id: str | None) -> dict:
@@ -324,7 +326,27 @@ def pr_state(token: str, node_id: str | None) -> dict:
         raise OpenPrError(f"pull request {node_id} came back without its draft and auto-merge state")
     request = node["autoMergeRequest"]
     method = (str(request.get("mergeMethod") or "") or None) if isinstance(request, dict) else None
-    return {"draft": node["isDraft"], "armed": request is not None, "merge_method": method}
+    return {"draft": node["isDraft"], "armed": request is not None, "merge_method": method,
+            "head": str(node.get("headRefOid") or "")}
+
+
+def wait_for_head(token: str, number: int, node_id: str | None, head: str) -> None:
+    """Return once GitHub shows `head` as the pull request's head; a named failure after HEAD_WAIT seconds.
+
+    Marking a pull request ready before GitHub has moved its head to a just-pushed commit sends the
+    `ready_for_review` event with the old head: its CI run is cancelled by the next one, and the new head keeps
+    only the `synchronize` run, which still saw a draft — #813's head was left with nothing but ci-ok's
+    deliberate draft failure.
+    """
+    deadline = time.monotonic() + HEAD_WAIT
+    while True:
+        seen = pr_state(token, node_id)["head"]
+        if seen == head:
+            return
+        if time.monotonic() >= deadline:
+            raise OpenPrError(f"#{number}: GitHub still shows {seen[:9] or 'no head'} as the head, not the pushed "
+                              f"{head[:9]}, after {HEAD_WAIT}s — not marked ready; the next clean finish tries again")
+        time.sleep(HEAD_POLL)
 
 
 def auto_merge_state(token: str, node_id: str | None) -> tuple[bool, str | None]:
@@ -366,7 +388,7 @@ def hold(token: str, number: int, node_id: str | None) -> None:
                           f"{'on' if after['armed'] else 'off'} — nothing was pushed")
 
 
-def _settle(token: str, number: int, node_id: str | None, arm: bool, base: str) -> dict:
+def _settle(token: str, number: int, node_id: str | None, arm: bool, base: str, head: str | None = None) -> dict:
     """After the push: a clean finish is marked ready, then armed with the queue's method; anything else stays a
     draft with auto-merge off. Then report what GitHub says — never the intent (#5, #6).
 
@@ -376,6 +398,8 @@ def _settle(token: str, number: int, node_id: str | None, arm: bool, base: str) 
     """
     queue = None
     if arm:
+        if head:
+            wait_for_head(token, number, node_id, head)  # ready_for_review must carry the pushed head
         if pr_state(token, node_id)["draft"]:
             mark_ready(token, node_id)  # type: ignore[arg-type]
         queue = queue_method(token, base)
@@ -431,6 +455,10 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
     `known` are values that must never leave (the model credential).
     """
     scan(repo, branch, base, title, body, known)
+    try:
+        head = common.git(repo, "rev-parse", "--verify", f"refs/heads/{branch}")
+    except common.GitError as exc:
+        raise OpenPrError(f"there is no local branch {branch!r} in {repo} to push") from exc
     token = _worker_token()
 
     # the author is checked before the push: never overwrite a branch whose PR belongs to someone else
@@ -442,7 +470,7 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
         # a re-dispatch usually carries new commits, and reuse must deliver them
         push(repo, branch, token)
         return {"number": number, "url": existing.get("html_url"), "author": author,
-                **_settle(token, number, existing.get("node_id"), arm, base), "reused": True}
+                **_settle(token, number, existing.get("node_id"), arm, base, head), "reused": True}
 
     push(repo, branch, token)
     try:
@@ -454,7 +482,7 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
         if raced:
             number, author = _owned(raced, branch)
             return {"number": number, "url": raced.get("html_url"), "author": author,
-                    **_settle(token, number, raced.get("node_id"), arm, base), "reused": True}
+                    **_settle(token, number, raced.get("node_id"), arm, base, head), "reused": True}
         raise
 
     number = pull.get("number")
@@ -471,7 +499,7 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
         raise OpenPrError(f"the pull request came back authored by {author!r}, not {WORKER_LOGIN}{closed}")
 
     return {"number": number, "url": pull.get("html_url"), "author": author,
-            **_settle(token, number, pull.get("node_id"), arm, base), "reused": False}
+            **_settle(token, number, pull.get("node_id"), arm, base, head), "reused": False}
 
 
 def rearm(number: int, node_id: str, base: str) -> dict:
