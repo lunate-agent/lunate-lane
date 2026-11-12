@@ -66,7 +66,9 @@ class FailurePathTests(unittest.TestCase):
         self.assertIn(("PATCH", "/repos/lunate-agent/lunate/pulls/7"), calls)
 
     def test_an_existing_worker_pr_is_reused_not_duplicated(self) -> None:
+        """Reuse still pushes: a re-dispatch usually carries new commits, and they must reach GitHub."""
         posts = []
+        pushes = []
 
         def api(token, method, path, payload=None):
             if method == "GET":
@@ -75,7 +77,7 @@ class FailurePathTests(unittest.TestCase):
             return {}
 
         open_pr._api = api
-        open_pr.push = lambda *a, **k: (_ for _ in ()).throw(AssertionError("must not push for an open PR"))
+        open_pr.push = lambda *a, **k: pushes.append(a)
         armed = []
         saved_arm = open_pr.arm_auto_merge
         open_pr.arm_auto_merge = lambda token, node_id, method="SQUASH": armed.append(node_id)
@@ -86,6 +88,7 @@ class FailurePathTests(unittest.TestCase):
         self.assertTrue(result["reused"])
         self.assertEqual(result["number"], 42)
         self.assertEqual(armed, ["N42"])
+        self.assertEqual(len(pushes), 1, "reuse must still push the branch, or new commits never arrive")
 
     def test_a_branch_that_does_not_exist_is_refused_before_pushing(self) -> None:
         with self.assertRaises(open_pr.OpenPrError) as caught:

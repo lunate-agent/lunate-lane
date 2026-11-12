@@ -30,7 +30,12 @@ class CardError(RuntimeError):
 
 def gh(*args: str, repo: pathlib.Path) -> str:
     """A gh read that refuses to answer with an empty string on failure."""
-    done = subprocess.run(["gh", *args], capture_output=True, text=True, cwd=str(repo), timeout=120)
+    try:
+        done = subprocess.run(["gh", *args], capture_output=True, text=True, cwd=str(repo), timeout=120)
+    except OSError as exc:
+        raise CardError(f"gh could not be run ({exc.__class__.__name__}: {exc})") from exc
+    except subprocess.SubprocessError as exc:
+        raise CardError(f"gh {' '.join(args[:2])} did not finish ({exc.__class__.__name__})") from exc
     if done.returncode != 0:
         tail = ((done.stderr or "") + (done.stdout or "")).strip()[:200]
         raise CardError(f"gh {' '.join(args[:2])} failed: {tail}")
@@ -39,7 +44,8 @@ def gh(*args: str, repo: pathlib.Path) -> str:
 
 def card(repo: pathlib.Path, number: int) -> dict:
     """The issue, or a named failure. Never an empty card."""
-    raw = gh("issue", "view", str(number), "--json", "number,title,state,labels,milestone,body", repo=repo)
+    raw = gh("issue", "view", str(number), "-R", SLUG,
+             "--json", "number,title,state,milestone,body", repo=repo)
     try:
         data = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -54,28 +60,44 @@ def card(repo: pathlib.Path, number: int) -> dict:
 def branch_for(repo: pathlib.Path, number: int) -> str:
     """The branch a worker uses for this card, checked to exist locally."""
     name = f"wt/issue-{number}"
-    exists = subprocess.run(
-        ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{name}"],
-        capture_output=True, text=True, cwd=str(repo), timeout=60,
-    )
+    try:
+        exists = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{name}"],
+            capture_output=True, text=True, cwd=str(repo), timeout=60,
+        )
+    except OSError as exc:
+        raise CardError(f"git could not be run in {repo} ({exc.__class__.__name__})") from exc
+    except subprocess.SubprocessError as exc:
+        raise CardError(f"the branch check did not finish ({exc.__class__.__name__})") from exc
     if exists.returncode != 0:
-        raise CardError(f"#{number} has no branch {name!r} in {repo}: the worker has not pushed its work")
+        raise CardError(f"#{number} has no local branch {name!r} in {repo}")
+    ahead = subprocess.run(["git", "rev-list", "--count", f"main..{name}"],
+                           capture_output=True, text=True, cwd=str(repo), timeout=60)
+    if (ahead.stdout or "").strip() in ("", "0"):
+        raise CardError(f"#{number}'s branch {name!r} has no commits ahead of main — nothing to open")
     return name
 
 
 def body_for(data: dict) -> str:
-    """The pull request body: what closes, and the acceptance as the issue states it."""
+    """The pull request body: what closes, and the first part of the issue.
+
+    The issue's own text is truncated, and any `Closes #n` inside it is defused: a copied closing keyword
+    would close unrelated issues on merge, and GitHub caps a pull request body at 65,536 characters.
+    """
     closes = f"Closes #{data['number']}"
     milestone = (data.get("milestone") or {}).get("title")
-    head = f"{closes}" + (f" · milestone {milestone}" if milestone else "")
-    return f"{head}\n\n{data.get('body') or '(the issue states no body)'}\n"
+    head = closes + (f" · milestone {milestone}" if milestone else "")
+    issue_text = (data.get("body") or "(the issue states no body)").replace("Closes #", "Closes \\#")
+    if len(issue_text) > 8000:
+        issue_text = issue_text[:8000] + "\n…truncated; the issue holds the rest."
+    return f"{head}\n\n{issue_text}\n"
 
 
 def dispatch(repo: pathlib.Path, number: int) -> dict:
     """Card to pull request. Raises rather than half-opening anything."""
-    data = card(repo, number)
     branch = branch_for(repo, number)
-    title = f"{data['title']} (#{number})"
+    data = card(repo, number)
+    title = data["title"]
     return open_pr.open_pr(repo, branch, title, body_for(data))
 
 

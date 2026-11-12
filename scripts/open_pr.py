@@ -161,6 +161,9 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
     """
     token = _worker_token()
 
+    # push first: a re-dispatch usually carries new commits, and reuse must still deliver them
+    push(repo, branch, token)
+
     existing = find_open_pr(branch, token)
     if existing:
         number = existing.get("number")
@@ -173,7 +176,6 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
         return {"number": number, "url": existing.get("html_url"), "author": author,
                 "auto_merge": "armed", "reused": True}
 
-    push(repo, branch, token)
     try:
         pull = _api(
             token,
