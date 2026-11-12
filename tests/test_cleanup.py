@@ -160,6 +160,38 @@ class FinishedCardTests(unittest.TestCase):
         self.assertTrue(path.exists())
 
 
+class RerunPruneTests(unittest.TestCase):
+    """Review of #17, round two, item 5: rerun records go with the pull requests they were for."""
+
+    def setUp(self) -> None:
+        self.state = TempState()
+        self.cfg = self.state.cfg
+        self.addCleanup(self.state.close)
+        out = mock.patch("sys.stdout", new=io.StringIO())
+        out.start()
+        self.addCleanup(out.stop)
+        for pr, head in ((50, "h1"), (51, "h2"), (52, "h3")):
+            harness.note_rerun(pr, head, (77,))
+
+    def tidy(self, open_pulls, dry_run=False):
+        with mock.patch.object(cleanup, "finished", return_value={}), mock.patch.object(review, "reap"):
+            cleanup.tidy(self.cfg, "feed", open_pulls, {}, dry_run)
+
+    def test_records_of_pull_requests_no_longer_open_are_pruned(self) -> None:
+        self.tidy([pull(50, 9)])
+        self.assertEqual(harness.reran(), frozenset({(50, "h1")}))
+        self.assertIn("pruned 2 rerun record(s)", (self.cfg.state / "logs" / "feed.log").read_text())
+
+    def test_a_dry_run_prunes_nothing(self) -> None:
+        self.tidy([], dry_run=True)
+        self.assertEqual(len(harness.reran()), 3)
+
+    def test_an_unreadable_record_is_a_named_failure_not_a_silent_skip(self) -> None:
+        (self.cfg.state / "reruns" / "53.json").write_text("{")
+        with self.assertRaises(common.StateError):
+            harness.prune_reruns([50])
+
+
 class LogTests(unittest.TestCase):
     def setUp(self) -> None:
         self.state = TempState()

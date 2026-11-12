@@ -198,6 +198,9 @@ def tidy(cfg: common.Config, job: str, open_pulls, running: dict, dry_run: bool 
     if dry_run:
         return
     write_held(held)
+    pruned_reruns = harness.prune_reruns(p.number for p in open_pulls)
+    if pruned_reruns:
+        common.log(job, f"pruned {pruned_reruns} rerun record(s) of pull requests no longer open")
     for name in rotate_logs():
         common.log(job, f"rotated {name}")
     pruned = prune_sessions()

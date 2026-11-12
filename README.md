@@ -80,7 +80,7 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      make) — but only when nothing would be lost: no uncommitted or untracked change in the worktree, and every
      commit on the branch on an origin ref or a pull request's head as GitHub has it. Nothing is forced
      (`git worktree remove`, the branch deleted only at the tip that was checked). A card that fails the check
-     is kept, logged, and listed in the digest under "Kept by cleanup" for a person. Logs over 5 MB are rotated (three generations kept), Pi event logs older than 14 days are deleted, and
+     is kept, logged, and listed in the digest under "Kept by cleanup" for a person. Rerun records of pull requests no longer open are pruned. Logs over 5 MB are rotated (three generations kept), Pi event logs older than 14 days are deleted, and
      review sessions left by a killed review run are cleared. A cleanup that fails fails the tick by name, but only
      after the launches.
 2. **Worker** (`scripts/worker.py --issue N [--rework PR]`, started detached by the feeder). Cuts or continues

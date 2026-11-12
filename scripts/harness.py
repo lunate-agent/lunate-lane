@@ -604,6 +604,24 @@ def reran() -> frozenset:
     return frozenset(found)
 
 
+def prune_reruns(open_prs) -> int:
+    """Remove the rerun records of pull requests that are no longer open (review of #17, round two, item 5).
+    An unreadable record raises, like every other state read. Returns how many went."""
+    keep, gone = {int(n) for n in open_prs}, 0
+    for path in _listing(common.state_dir("reruns")):
+        try:
+            pr = int(json.loads(path.read_text())["pr"])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise StateError(f"the rerun record {path} could not be read: {exc}") from exc
+        if pr not in keep:
+            try:
+                path.unlink()
+            except OSError as exc:
+                raise StateError(f"the rerun record {path} could not be removed: {exc}") from exc
+            gone += 1
+    return gone
+
+
 # --- attempts: a card is parked after IDLE_RUN_LIMIT runs with no new commit, or after REWORK_LIMIT rework rounds
 #     on one pull request (#9). Deleting <state>/attempts/<card>.json unparks it and clears both counts.
 
