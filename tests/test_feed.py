@@ -63,6 +63,19 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(self.started, [])
         self.assertIn("would start rework of #50", (self.state.cfg.state / "logs" / "feed.log").read_text())
 
+    def test_a_tick_that_fills_the_limit_logs_its_launches_before_the_wip_note(self) -> None:
+        """#3: five cards start, then the sixth is held — the WIP line comes after the five, not above them."""
+        github.milestone_cards.return_value = [card(n) for n in range(780, 786)]
+        github.open_pulls.return_value = []
+        with mock.patch.object(sys, "argv", ["feed.py", "--dry-run"]):
+            self.assertEqual(feed.main(), 0)
+        lines = (self.state.cfg.state / "logs" / "feed.log").read_text().splitlines()
+        starts = [i for i, line in enumerate(lines) if "would start card" in line]
+        wip = [i for i, line in enumerate(lines) if "WIP 5 of 5" in line]
+        self.assertEqual(len(starts), 5)
+        self.assertEqual(len(wip), 1)
+        self.assertGreater(wip[0], max(starts), "the WIP note must follow the launches it explains")
+
     def test_only_the_worker_identitys_pull_requests_are_read_in_full(self) -> None:
         github.open_pulls.return_value = [pull(50, 9), pull(60, 3, author="someone")]
         feed.main()

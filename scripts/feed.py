@@ -57,10 +57,7 @@ def start(cfg: common.Config, launch: cards.Launch) -> int:
 def tick(dry_run: bool = False) -> None:
     cfg = common.config()
     launches, notes = decide(cfg)
-    for note in notes:
-        common.log(JOB, note)
-    if not launches:
-        common.log(JOB, "nothing to start")
+    # the launches first, in the order they were chosen, then the notes on why nothing else was (#3)
     for launch in launches:
         what = f"rework of #{launch.rework_pr} for card #{launch.card}" if launch.rework_pr else f"card #{launch.card}"
         if dry_run:
@@ -68,6 +65,10 @@ def tick(dry_run: bool = False) -> None:
             continue
         pid = start(cfg, launch)
         common.log(JOB, f"started {what} (pid {pid})")
+    if not launches:
+        common.log(JOB, "nothing to start")
+    for note in notes:
+        common.log(JOB, note)
 
 
 def main() -> int:
