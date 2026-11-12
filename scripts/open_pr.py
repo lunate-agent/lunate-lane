@@ -105,6 +105,27 @@ def push(repo: pathlib.Path, branch: str, token: str, host: str = "github.com") 
         raise OpenPrError(f"the push of {branch} was refused: {tail.strip()[:200]}")
 
 
+def _graphql(token: str, query: str, variables: dict, what: str) -> dict:
+    """A GraphQL call with the worker token. Errors in the answer, or no data, raise."""
+    request = urllib.request.Request(
+        f"{API}/graphql",
+        data=json.dumps({"query": query, "variables": variables}).encode(),
+        method="POST",
+        headers={"Authorization": f"token {token}", "User-Agent": "lunate-lane"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=60) as response:
+            payload = json.loads(response.read())
+    except urllib.error.HTTPError as exc:
+        raise OpenPrError(f"the {what} call was refused ({exc.code})") from exc
+    except Exception as exc:
+        raise OpenPrError(f"GitHub could not be reached for the {what} call ({exc.__class__.__name__})") from exc
+    if not isinstance(payload, dict) or payload.get("errors") or not isinstance(payload.get("data"), dict):
+        detail = payload.get("errors") if isinstance(payload, dict) else payload
+        raise OpenPrError(f"{what} was refused: {str(detail)[:160]}")
+    return payload["data"]
+
+
 def arm_auto_merge(token: str, node_id: str | None, method: str = "SQUASH") -> None:
     """Arm auto-merge through the merge queue, or raise. A refused auto-merge is not a success.
 
@@ -118,24 +139,42 @@ def arm_auto_merge(token: str, node_id: str | None, method: str = "SQUASH") -> N
         "{enablePullRequestAutoMerge(input:{pullRequestId:$id,mergeMethod:$method})"
         "{pullRequest{autoMergeRequest{enabledAt}}}}"
     )
-    request = urllib.request.Request(
-        f"{API}/graphql",
-        data=json.dumps({"query": query, "variables": {"id": node_id, "method": method}}).encode(),
-        method="POST",
-        headers={"Authorization": f"token {token}", "User-Agent": "lunate-lane"},
-    )
-    try:
-        with urllib.request.urlopen(request, timeout=60) as response:
-            payload = json.loads(response.read())
-    except urllib.error.HTTPError as exc:
-        raise OpenPrError(f"the auto-merge call was refused ({exc.code})") from exc
-    except Exception as exc:
-        raise OpenPrError(f"GitHub could not be reached for the auto-merge call ({exc.__class__.__name__})") from exc
-    if payload.get("errors"):
-        raise OpenPrError(f"auto-merge was refused: {str(payload['errors'])[:160]}")
-    armed = ((payload.get("data") or {}).get("enablePullRequestAutoMerge") or {}).get("pullRequest") or {}
+    data = _graphql(token, query, {"id": node_id, "method": method}, "auto-merge")
+    armed = (data.get("enablePullRequestAutoMerge") or {}).get("pullRequest") or {}
     if not armed.get("autoMergeRequest"):
         raise OpenPrError("auto-merge reported no error but came back unarmed")
+
+
+def disarm_auto_merge(token: str, node_id: str) -> None:
+    """Turn auto-merge off. Called only on a pull request that reads as armed."""
+    query = ("mutation($id:ID!){disablePullRequestAutoMerge(input:{pullRequestId:$id})"
+             "{pullRequest{autoMergeRequest{enabledAt}}}}")
+    _graphql(token, query, {"id": node_id}, "disable auto-merge")
+
+
+def auto_merge_enabled(token: str, node_id: str | None) -> bool:
+    """Whether GitHub says auto-merge is on for this pull request. Unreadable is a failure, not 'off'."""
+    if not node_id:
+        raise OpenPrError("auto-merge state could not be read — no node id for the pull request")
+    data = _graphql(token, "query($id:ID!){node(id:$id){... on PullRequest{number autoMergeRequest{enabledAt}}}}",
+                    {"id": node_id}, "auto-merge read")
+    node = data.get("node")
+    if not isinstance(node, dict) or "autoMergeRequest" not in node:
+        raise OpenPrError(f"pull request {node_id} came back without its auto-merge state")
+    return node["autoMergeRequest"] is not None
+
+
+def _settle(token: str, node_id: str | None, arm: bool) -> str:
+    """Arm, or make sure auto-merge is off, then report what GitHub says — never the intent."""
+    if arm:
+        arm_auto_merge(token, node_id)
+    elif auto_merge_enabled(token, node_id):
+        disarm_auto_merge(token, node_id)  # type: ignore[arg-type]
+    actual = auto_merge_enabled(token, node_id)
+    if actual != arm:
+        raise OpenPrError(f"auto-merge should be {'on' if arm else 'off'} but GitHub reads it as "
+                          f"{'on' if actual else 'off'}")
+    return "armed" if actual else "not armed"
 
 
 def _worker_token() -> str:
@@ -149,19 +188,20 @@ def _worker_token() -> str:
 def find_open_pr(branch: str, token: str) -> dict | None:
     """The open pull request for this branch, if any. Reusing one beats failing with a 422."""
     pulls = _api(token, "GET", f"/repos/{SLUG}/pulls?state=open&head={SLUG.split('/')[0]}:{branch}")
-    if isinstance(pulls, list) and pulls:
-        return pulls[0]
-    return None
+    if not isinstance(pulls, list):
+        raise OpenPrError(f"the open pull requests for {branch!r} came back as {type(pulls).__name__}, not a list")
+    return pulls[0] if pulls else None
 
 
 def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = "main", arm: bool = True) -> dict:
     """Open or reuse the pull request for `branch`, as the worker identity, then arm auto-merge.
 
-    `arm=False` opens it without auto-merge: the lane opens a card's pull request at its first commit, so the
-    worker knows the number for its changelog fragment, and arms it only when the session finished cleanly.
+    `arm=False` leaves auto-merge off — and turns it off on a reused pull request that was armed, before the push:
+    the lane opens a card's pull request at its first commit, so the worker knows the number for its changelog
+    fragment, and arms it only when the session finished cleanly. A rework that is not clean disarms it again.
 
-    Raises on anything short of a pull request that exists, is authored by `lunate-worker[bot]`, and has
-    auto-merge armed.
+    Raises on anything short of a pull request that exists, is authored by `lunate-worker[bot]`, and whose
+    auto-merge state, read back from GitHub, is the one asked for. `auto_merge` in the result is that read.
     """
     token = _worker_token()
 
@@ -174,12 +214,13 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
             raise OpenPrError(
                 f"#{number} is already open for {branch!r} but authored by {author!r}, not {WORKER_LOGIN}"
             )
+        if not arm and auto_merge_enabled(token, existing.get("node_id")):
+            # off before the push: work that is not clean never sits on an armed pull request, not even briefly
+            disarm_auto_merge(token, existing["node_id"])
         # a re-dispatch usually carries new commits, and reuse must deliver them
         push(repo, branch, token)
-        if arm:
-            arm_auto_merge(token, existing.get("node_id"))
         return {"number": number, "url": existing.get("html_url"), "author": author,
-                "auto_merge": "armed" if arm else "not armed", "reused": True}
+                "auto_merge": _settle(token, existing.get("node_id"), arm), "reused": True}
 
     push(repo, branch, token)
     try:
@@ -198,11 +239,9 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
                 raise OpenPrError(
                     f"#{raced.get('number')} already exists for {branch!r} but is authored by {raced_author!r}"
                 )
-            if arm:
-                arm_auto_merge(token, raced.get("node_id"))
             return {"number": raced.get("number"), "url": raced.get("html_url"),
                     "author": (raced.get("user") or {}).get("login", ""),
-                    "auto_merge": "armed" if arm else "not armed", "reused": True}
+                    "auto_merge": _settle(token, raced.get("node_id"), arm), "reused": True}
         raise
 
     number = pull.get("number")
@@ -218,10 +257,8 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
             closed = " and it could NOT be closed"
         raise OpenPrError(f"the pull request came back authored by {author!r}, not {WORKER_LOGIN}{closed}")
 
-    if arm:
-        arm_auto_merge(token, pull.get("node_id"))
     return {"number": number, "url": pull.get("html_url"), "author": author,
-            "auto_merge": "armed" if arm else "not armed", "reused": False}
+            "auto_merge": _settle(token, pull.get("node_id"), arm), "reused": False}
 
 
 def comment(number: int, body: str) -> None:

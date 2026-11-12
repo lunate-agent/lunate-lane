@@ -229,6 +229,41 @@ class DriveTests(RepoCase):
         self.assertIn("FAILED — GitHub refused POST /issues/77/comments (502)", log)
         self.assertFalse((self.cfg.state / "workers" / "3.json").exists())
 
+    def test_an_unclean_rework_on_an_armed_pull_request_leaves_it_disarmed(self) -> None:
+        """Through the real dispatch and open_pr: only GitHub (a stateful fake) and the push are replaced."""
+        armed = {"N77": True}
+        pushed = []
+
+        def graphql(token, query, variables, what):
+            node = variables["id"]
+            if "disablePullRequestAutoMerge" in query:
+                armed[node] = False
+                return {}
+            if "enablePullRequestAutoMerge" in query:
+                raise AssertionError("an unclean rework must never arm")
+            return {"node": {"number": 77, "autoMergeRequest": {"enabledAt": "t"} if armed[node] else None}}
+
+        def api(token, method, path, payload=None):
+            if method == "GET":
+                return [{"number": 77, "html_url": "u", "user": {"login": open_pr.WORKER_LOGIN}, "node_id": "N77"}]
+            raise AssertionError(f"unexpected {method} {path}")
+
+        self.patches[1].stop()  # the real dispatch_card.dispatch from here on
+        self.patches[1:2] = []
+        sha = self.push_branch("wt/issue-3", "first.cs")
+        with self.fake_session(stalled=True), \
+                mock.patch.object(open_pr, "_graphql", side_effect=graphql), \
+                mock.patch.object(open_pr, "_api", side_effect=api), \
+                mock.patch.object(open_pr, "_worker_token", return_value="t"), \
+                mock.patch.object(open_pr, "push", side_effect=lambda repo, branch, token: pushed.append(armed["N77"])), \
+                mock.patch.object(github, "pull", return_value=pull(77, 3, head=sha,
+                                                                    reviews=[review("CHANGES_REQUESTED", commit=sha)])):
+            self.assertEqual(worker.drive(self.cfg, 3, 77), 1)
+        self.assertFalse(armed["N77"])
+        self.assertEqual(pushed, [False], "the push happened only after auto-merge was off")
+        self.assertIn("auto-merge is not armed", self.comments[0][1])
+        self.assertIn("auto-merge not armed", (self.cfg.state / "logs" / "worker-3.log").read_text())
+
     def test_a_closed_issue_is_never_worked(self) -> None:
         dispatch_card.card.side_effect = dispatch_card.CardError("issue #3 is CLOSED, not open")
         with self.fake_session() as session:

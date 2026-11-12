@@ -163,7 +163,7 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
     head = common.git(worktree, "rev-parse", "HEAD")[:9]
     lines = [f"**Worker session** on `{cfg.worker_model}` at `{head}`, {outcome.elapsed // 60} min."]
     if found:
-        lines.append("**Incomplete — auto-merge is not armed:** " + "; ".join(found) + ".")
+        lines.append(f"**Incomplete — auto-merge is {result['auto_merge']}:** " + "; ".join(found) + ".")
     report = harness.last_text(session_log).strip() or "(the session left no final message)"
     lines.append("\n" + report)
     open_pr.comment(result["number"], "\n".join(lines)[:COMMENT_LIMIT])
