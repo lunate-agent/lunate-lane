@@ -56,7 +56,7 @@ class FailurePathTests(unittest.TestCase):
             calls.append((method, path))
             if method == "GET":
                 return []
-            return {"number": 7, "html_url": "u", "user": {"login": "wdaniel1993"}, "node_id": "N7"}
+            return {"number": 7, "html_url": "u", "user": {"login": "someone-else"}, "node_id": "N7"}
 
         open_pr._api = api
         open_pr.push = lambda *a, **k: None
