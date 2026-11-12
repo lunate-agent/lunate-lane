@@ -97,6 +97,31 @@ class RunTests(unittest.TestCase):
         self.assertEqual(args[args.index("n=5") - 1], "-F")
 
 
+class GitEnvTests(unittest.TestCase):
+    """Review of #17, round two, item 2: the lane's git reads an empty, lane-owned global config."""
+
+    def setUp(self) -> None:
+        from tests.helpers import TempState
+
+        self.state = TempState()
+        self.addCleanup(self.state.close)
+
+    def test_the_global_config_is_an_empty_lane_owned_file_and_is_emptied_again(self) -> None:
+        env = common.git_env()
+        path = pathlib.Path(env["GIT_CONFIG_GLOBAL"])
+        self.assertEqual((env["GIT_CONFIG_NOSYSTEM"], path.parent), ("1", self.state.cfg.state / "git"))
+        path.write_text("[core]\n\tfsmonitor = /tmp/evil\n")
+        common.git_env()
+        self.assertEqual(path.read_text(), "")
+
+    def test_a_symlinked_global_config_is_refused(self) -> None:
+        path = common.empty_gitconfig()
+        path.unlink()
+        path.symlink_to(self.state.root / "elsewhere")
+        with self.assertRaises(common.StateError):
+            common.git_env()
+
+
 class RestTests(unittest.TestCase):
     def test_a_refusal_is_an_api_error_and_never_carries_the_token(self) -> None:
         token = "ghs_secret_for_tests"

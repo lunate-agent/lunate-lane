@@ -179,12 +179,65 @@ def graphql(query: str, **variables: Any) -> dict:
 SAFE_GIT = ("-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", "-c", "credential.helper=")
 
 
+def empty_gitconfig() -> pathlib.Path:
+    """`<state>/git/empty.gitconfig`: the lane's global git config, kept empty. Sessions cannot write the state
+    directory; the lane truncates the file if anything ever appears in it."""
+    path = state_dir("git") / "empty.gitconfig"
+    try:
+        if path.is_symlink() or (path.exists() and not path.is_file()):
+            raise StateError(f"{path} is not a plain file — refusing to use it as git's global config")
+        if not path.exists() or path.stat().st_size:
+            path.write_text("")
+    except OSError as exc:
+        raise StateError(f"the lane's empty git config {path} could not be prepared: {exc}") from exc
+    return path
+
+
 def git_env(extra: dict | None = None) -> dict:
-    """The environment for the lane's own git: no inherited GIT_*/GH_* settings, no system or global config."""
+    """The environment for the lane's own git: no inherited GIT_*/GH_* settings, no system config, and a global
+    config that is an empty lane-owned file."""
     env = {key: value for key, value in os.environ.items() if not key.startswith(("GIT_", "GH_", "GITHUB_"))}
-    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": os.devnull, "GIT_TERMINAL_PROMPT": "0"})
+    env.update({"GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": str(empty_gitconfig()), "GIT_TERMINAL_PROMPT": "0"})
     env.update(extra or {})
     return env
+
+
+def checkout_git(cfg: Config) -> pathlib.Path:
+    """The checkout's own `.git` directory, resolved. A `.git` that is a file or a symlink is refused: the lane
+    never takes a repository's location from a pointer file."""
+    path = cfg.checkout / ".git"
+    if path.is_symlink() or not path.is_dir():
+        raise GitError(f"{path} is not a plain directory — refusing to read where the repository is from it")
+    return path.resolve()
+
+
+def worktree_admin(cfg: Config, worktree: pathlib.Path) -> pathlib.Path:
+    """`<checkout>/.git/worktrees/<name>` for a lane worktree, computed by the lane — never read from the
+    worktree's `.git` pointer file — and checked against the admin directory's own `gitdir` record."""
+    admin = checkout_git(cfg) / "worktrees" / worktree.name
+    try:
+        recorded = (admin / "gitdir").read_text().strip()
+    except OSError as exc:
+        raise GitError(f"{worktree} is not a registered worktree of {cfg.checkout} ({exc.__class__.__name__})") from exc
+    if os.path.realpath(recorded) != os.path.realpath(worktree / ".git"):
+        raise GitError(f"{admin} belongs to {recorded}, not {worktree} — refusing to use it")
+    # git follows <admin>/commondir even with GIT_COMMON_DIR set and --git-dir given, so it is checked too
+    try:
+        common = (admin / "commondir").read_text().strip()
+    except OSError as exc:
+        raise GitError(f"{admin}/commondir could not be read ({exc.__class__.__name__})") from exc
+    if pathlib.Path(os.path.realpath(admin / common)) != checkout_git(cfg):
+        raise GitError(f"{admin}/commondir points at {common}, not {checkout_git(cfg)} — refusing to use it")
+    return admin
+
+
+def wt_git(cfg: Config, worktree: pathlib.Path, *args: str, timeout: int = 300) -> str:
+    """git in a lane worktree with --git-dir and --work-tree computed by the lane and GIT_COMMON_DIR pinned, so a
+    rewritten `.git` pointer or `commondir` file cannot point it elsewhere (review of #17, round two)."""
+    admin = worktree_admin(cfg, worktree)
+    argv = ["git", *SAFE_GIT, f"--git-dir={admin}", f"--work-tree={worktree}", *args]
+    return run(argv, error=GitError, timeout=timeout, cwd=worktree,
+               env=git_env({"GIT_COMMON_DIR": str(checkout_git(cfg))})).strip()
 
 
 def git_argv(repo: pathlib.Path, *args: str) -> list:

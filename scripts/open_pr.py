@@ -51,7 +51,7 @@ def scan(repo: pathlib.Path, branch: str, base: str, title: str, body: str, know
     """Before every push (#12): the diff's added lines against the base, the title and the body. A match raises
     SecretFound; an unreadable diff is a failure, never a clean scan."""
     try:
-        diff = common.git(repo, "diff", "--no-color", "--no-ext-diff", "--unified=0",
+        diff = common.git(repo, "diff", "--no-color", "--no-textconv", "--no-ext-diff", "--unified=0",
                           f"origin/{base}...refs/heads/{branch}")
     except common.GitError as exc:
         raise OpenPrError(f"the diff of {branch} could not be read for the secret scan: {exc}") from exc
@@ -232,9 +232,13 @@ def push(repo: pathlib.Path, branch: str, token: str, url: str | None = None) ->
         raise OpenPrError(f"git could not check {branch!r} in {repo}: {exists.stderr.strip()[:160]}")
     if exists.returncode != 0:
         raise OpenPrError(f"there is no local branch {branch!r} in {repo} to push")
+    source = repo / ".git"
+    if source.is_symlink() or not source.is_dir():  # never follow a worktree's .git pointer file
+        raise OpenPrError(f"{repo} is not a checkout with its own .git directory — push from the checkout")
     mirror = push_mirror()
     ref = f"refs/heads/{branch}"
-    _run_git(["-C", str(mirror), "fetch", "-q", "--no-tags", "--no-write-fetch-head", str(repo), f"+{ref}:{ref}"],
+    _run_git(["-C", str(mirror), "fetch", "-q", "--no-tags", "--no-write-fetch-head", str(source.resolve()),
+              f"+{ref}:{ref}"],
              None, env, f"copying {branch} into the push mirror")
     sweep_secret_dir()
     secret_env = push_env(token, _secret_dir(), url)

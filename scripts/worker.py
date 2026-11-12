@@ -72,7 +72,7 @@ def prepare_worktree(cfg: common.Config, number: int) -> pathlib.Path:
     common.git(repo, "fetch", "-q", "origin")
     remote = ref_exists(repo, f"refs/remotes/origin/{branch}")
     if (path / ".git").exists():
-        current = common.git(path, "rev-parse", "--abbrev-ref", "HEAD")
+        current = common.wt_git(cfg, path, "rev-parse", "--abbrev-ref", "HEAD")
         if current != branch:
             raise WorktreeError(f"the worktree {path} is on {current!r}, not {branch!r}")
     elif path.exists():
@@ -90,7 +90,7 @@ def prepare_worktree(cfg: common.Config, number: int) -> pathlib.Path:
         else:
             common.git(repo, "worktree", "add", "-b", branch, str(path), f"origin/{cfg.base}")
     if remote:
-        common.git(path, "merge", "--ff-only", "-q", f"origin/{branch}")
+        common.wt_git(cfg, path, "merge", "--ff-only", "-q", f"origin/{branch}")
     return path
 
 
@@ -120,8 +120,9 @@ def log_tail(cfg: common.Config, job_id: int) -> str:
 def conflicts(cfg: common.Config, worktree: pathlib.Path) -> list[str]:
     """The files that conflict when origin/<base> is merged into the branch, without touching the worktree."""
     try:
-        done = subprocess.run(common.git_argv(worktree, "merge-tree", "--write-tree", "--name-only", "--no-messages",
-                                              f"origin/{cfg.base}", "HEAD"),
+        head = common.wt_git(cfg, worktree, "rev-parse", "HEAD")  # the worktree's HEAD, via the lane's git-dir
+        done = subprocess.run(common.git_argv(cfg.checkout, "merge-tree", "--write-tree", "--name-only",
+                                              "--no-messages", f"origin/{cfg.base}", head),
                               capture_output=True, text=True, timeout=120, env=common.git_env())
     except (OSError, subprocess.SubprocessError) as exc:
         raise GitError(f"git merge-tree could not be run in {worktree} ({exc.__class__.__name__})") from exc
@@ -203,7 +204,7 @@ def brief(cfg: common.Config, issue: dict, worktree: pathlib.Path, pr: int | Non
                          FRAGMENT_RULE=fragment, REWORK=rework, BODY=(issue.get("body") or "").strip())
 
 
-def problems(outcome: harness.Outcome, worktree: pathlib.Path, start_head: str) -> list[str]:
+def problems(cfg: common.Config, outcome: harness.Outcome, worktree: pathlib.Path, start_head: str) -> list[str]:
     """Why a finished session is not clean. rc=0 only says the process exited."""
     found = []
     if outcome.stalled:
@@ -212,9 +213,9 @@ def problems(outcome: harness.Outcome, worktree: pathlib.Path, start_head: str) 
         found.append(f"the session exited with {outcome.rc}")
     if outcome.leaked_markup:
         found.append("the session's last message is tool-call markup, not a report")
-    if common.git(worktree, "status", "--porcelain"):
+    if common.wt_git(cfg, worktree, "status", "--porcelain"):
         found.append("the session left uncommitted changes in the worktree")
-    if common.git(worktree, "rev-parse", "HEAD") == start_head:
+    if common.wt_git(cfg, worktree, "rev-parse", "HEAD") == start_head:
         found.append("the session made no new commit")
     return found
 
@@ -222,7 +223,7 @@ def problems(outcome: harness.Outcome, worktree: pathlib.Path, start_head: str) 
 def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
     job = f"worker-{number}"
     worktree = prepare_worktree(cfg, number)
-    issue = dispatch_card.card(worktree, number)
+    issue = dispatch_card.card(cfg.checkout, number)
     findings = rework_findings(cfg, rework_pr, worktree) if rework_pr else ""
     if rework_pr:
         # back to draft before the session: CI's heavy legs and the reviewer wait for the clean finish (#5)
@@ -238,18 +239,18 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
             pr_file.write_text(str(rework_pr))
     except OSError as exc:
         raise common.StateError(f"the pull request number file {pr_file} could not be written: {exc}") from exc
-    text = brief(cfg, issue, worktree, rework_pr, findings, has_fragments(cfg, worktree))
-    start_head = common.git(worktree, "rev-parse", "HEAD")
+    text = brief(cfg, issue, worktree, rework_pr, findings, has_fragments(cfg, cfg.checkout))
+    start_head = common.wt_git(cfg, worktree, "rev-parse", "HEAD")
     opened: dict = {"pr": rework_pr, "tried": False}
 
     def open_early() -> None:
         if opened["pr"] is not None or opened["tried"]:
             return
         try:
-            if common.git(worktree, "rev-parse", "HEAD") == start_head:
+            if common.wt_git(cfg, worktree, "rev-parse", "HEAD") == start_head:
                 return
             opened["tried"] = True  # one attempt; the end of the session tries again and fails loudly
-            opened["pr"] = dispatch_card.dispatch(worktree, number, arm=False,
+            opened["pr"] = dispatch_card.dispatch(cfg.checkout, number, arm=False,
                                                   known=(harness.read_credential(cfg),))["number"]
             try:
                 pr_file.write_text(str(opened["pr"]))
@@ -271,17 +272,17 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
 def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: harness.Outcome, start_head: str,
            session_log: pathlib.Path) -> int:
     job = f"worker-{number}"
-    found = problems(outcome, worktree, start_head)
-    idle, parked_now = harness.note_run(number, common.git(worktree, "rev-parse", "HEAD") != start_head)
+    found = problems(cfg, outcome, worktree, start_head)
+    idle, parked_now = harness.note_run(number, common.wt_git(cfg, worktree, "rev-parse", "HEAD") != start_head)
     if idle:
         common.log(job, f"no new commit — idle run {idle} of {harness.IDLE_RUN_LIMIT}")
-    if dispatch_card._count(worktree, f"wt/issue-{number}") == 0:
+    if dispatch_card._count(cfg.checkout, f"wt/issue-{number}") == 0:
         common.log(job, "the session ended with no commits — no pull request. " + "; ".join(found))
         if parked_now:
             park(cfg, number, number, "idle", idle)
         return 1
     try:
-        result = dispatch_card.dispatch(worktree, number, arm=not found, known=(harness.read_credential(cfg),))
+        result = dispatch_card.dispatch(cfg.checkout, number, arm=not found, known=(harness.read_credential(cfg),))
     except open_pr.SecretFound as exc:
         # nothing was pushed; the card stops here until a person looks (#12). The kind, never the value.
         common.log(job, f"secret scan: {exc}")
@@ -290,7 +291,7 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
                  detail=f"the secret scan before the push found something shaped like a {exc.kind} in the "
                         f"{exc.where}; nothing was pushed")
         return 1
-    head = common.git(worktree, "rev-parse", "HEAD")[:9]
+    head = common.wt_git(cfg, worktree, "rev-parse", "HEAD")[:9]
     lines = [f"**Worker session** on `{cfg.worker_model}` at `{head}`, {outcome.elapsed // 60} min."]
     if found:
         lines.append(f"**Incomplete — the pull request stays a draft and auto-merge is {result['auto_merge']}:** "

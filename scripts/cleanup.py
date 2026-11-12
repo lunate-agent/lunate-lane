@@ -74,7 +74,7 @@ def unsafe(cfg: common.Config, card: int, pulls: list) -> str | None:
     path = common.state_dir("worktrees") / f"issue-{card}"
     branch = f"refs/heads/wt/issue-{card}"
     try:
-        if (path / ".git").exists() and common.git(path, "status", "--porcelain", "--untracked-files=all"):
+        if (path / ".git").exists() and common.wt_git(cfg, path, "status", "--porcelain", "--untracked-files=all"):
             return "uncommitted or untracked changes in its worktree"
         if not common.git(cfg.checkout, "for-each-ref", "--format=%(refname)", branch):
             return None

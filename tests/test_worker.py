@@ -155,13 +155,84 @@ class DriverGitTests(RepoCase):
         with mock.patch.dict(os.environ, {"HOME": str(home), "GIT_CONFIG_GLOBAL": str(home / ".gitconfig")}):
             path = worker.prepare_worktree(self.cfg, 3)
             (path / "a.txt").write_text("changed\n")
-            worker.problems(harness.Outcome(0, False, 1, False), path, "x")
+            worker.problems(self.cfg, harness.Outcome(0, False, 1, False), path, "x")
             worker.ref_exists(self.clone, "refs/heads/wt/issue-3")
             worker.conflicts(self.cfg, path)
-            dispatch_card._count(path, "wt/issue-3")
-            common.git(path, "diff", "origin/main...HEAD")
+            dispatch_card._count(self.clone, "wt/issue-3")
+            common.wt_git(self.cfg, path, "diff", "--no-textconv", "--no-ext-diff", "origin/main...HEAD")
         self.assertFalse(marker.exists(), marker.read_text() if marker.exists() else "")
         self.assertEqual((path / "a.txt").read_text(), "changed\n")
+
+
+class PointerTests(RepoCase):
+    """Review of #17, round two, item 2: the driver's git never takes the repository from a worktree's pointer
+    files. Each attack is first shown to work on plain git, then shown not to reach the lane's."""
+
+    def evil_repo(self):
+        evil = self.state.root / "evil"
+        git(self.state.root, "init", "-q", "-b", "main", str(evil))
+        for key, value in (("user.email", "e@example.invalid"), ("user.name", "e")):
+            git(evil, "config", key, value)
+        (evil / "x").write_text("evil\n")
+        git(evil, "add", "x")
+        git(evil, "commit", "-qm", "evil")
+        return evil, git(evil, "rev-parse", "HEAD")
+
+    def plain(self, path, *args):
+        return subprocess.run(["git", "-C", str(path), *args], capture_output=True, text=True).stdout.strip()
+
+    def test_a_redirected_gitdir_pointer_does_not_move_the_drivers_git(self) -> None:
+        path = worker.prepare_worktree(self.cfg, 3)
+        real = common.wt_git(self.cfg, path, "rev-parse", "HEAD")
+        evil, evil_head = self.evil_repo()
+        (path / ".git").write_text(f"gitdir: {evil / '.git'}\n")
+        self.assertEqual(self.plain(path, "rev-parse", "HEAD"), evil_head, "the attack works on plain git")
+        self.assertEqual(common.wt_git(self.cfg, path, "rev-parse", "HEAD"), real)
+        self.assertEqual(worker.prepare_worktree(self.cfg, 3), path)
+        self.assertEqual(worker.problems(self.cfg, harness.Outcome(0, False, 1, False), path, real),
+                         ["the session made no new commit"], "status and HEAD come from the real worktree")
+        with self.assertRaises(open_pr.OpenPrError):
+            open_pr.push(path, "wt/issue-3", "t", url="file:///nowhere")
+
+    def test_a_rewritten_commondir_does_not_move_the_drivers_git(self) -> None:
+        path = worker.prepare_worktree(self.cfg, 4)
+        real = common.wt_git(self.cfg, path, "rev-parse", "origin/main")
+        evil, evil_head = self.evil_repo()
+        admin = common.worktree_admin(self.cfg, path)
+        git(evil, "update-ref", "refs/remotes/origin/main", evil_head)
+        (admin / "commondir").write_text(str(evil / ".git") + "\n")
+        self.assertEqual(self.plain(path, "rev-parse", "origin/main"), evil_head, "the attack works on plain git")
+        # GIT_COMMON_DIR alone does not override the commondir file (git 2.54): the lane refuses instead
+        with self.assertRaises(GitError) as caught:
+            common.wt_git(self.cfg, path, "rev-parse", "origin/main")
+        self.assertIn("commondir points at", str(caught.exception))
+        (admin / "commondir").write_text("../..\n")
+        self.assertEqual(common.wt_git(self.cfg, path, "rev-parse", "origin/main"), real)
+
+    def test_an_admin_directory_that_belongs_elsewhere_is_refused(self) -> None:
+        path = worker.prepare_worktree(self.cfg, 5)
+        admin = common.worktree_admin(self.cfg, path)
+        (admin / "gitdir").write_text(str(self.state.root / "elsewhere" / ".git") + "\n")
+        with self.assertRaises(GitError):
+            common.wt_git(self.cfg, path, "status")
+
+    def test_a_checkout_whose_git_is_a_pointer_file_is_refused(self) -> None:
+        import dataclasses
+
+        path = worker.prepare_worktree(self.cfg, 6)
+        with self.assertRaises(GitError):
+            common.checkout_git(dataclasses.replace(self.cfg, checkout=path))
+
+    def test_diffs_run_no_textconv_or_external_diff(self) -> None:
+        marker = self.state.root / "ran"
+        path = worker.prepare_worktree(self.cfg, 7)
+        for key, value in (("diff.evil.textconv", f"touch {marker}; cat"), ("diff.external", f"touch {marker}; true")):
+            git(self.clone, "config", key, value)
+        (path / ".gitattributes").write_text("* diff=evil\n")
+        (path / "README").write_text("changed\n")
+        common.wt_git(self.cfg, path, "diff", "--no-textconv", "--no-ext-diff")
+        open_pr.scan(self.clone, "wt/issue-7", "main", "t", "b")
+        self.assertFalse(marker.exists())
 
 
 class ConflictTests(RepoCase):

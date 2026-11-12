@@ -147,10 +147,11 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str, str]:
     common.git(repo, "worktree", "add", "--detach", str(worktree), p.head)
     try:
         try:
-            diff_file.write_text(common.git(worktree, "diff", f"origin/{cfg.base}...HEAD"))
+            diff_file.write_text(common.git(repo, "diff", "--no-textconv", "--no-ext-diff",
+                                            f"origin/{cfg.base}...{p.head}"))
         except OSError as exc:
             raise ReviewError(f"the diff {diff_file} could not be written: {exc}") from exc
-        issue = dispatch_card.card(worktree, p.card)
+        issue = dispatch_card.card(repo, p.card)
         fragments = ("never edit `CHANGELOG.md`; the PR must add `changes/" + str(p.number) + ".md`."
                      if common.git(repo, "ls-tree", "--name-only", f"origin/{cfg.base}", "--", "changes")
                      else "the `changes/` convention is not on main yet; `CHANGELOG.md` must not be edited.")
