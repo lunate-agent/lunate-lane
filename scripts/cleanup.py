@@ -89,7 +89,13 @@ def unsafe(cfg: common.Config, card: int, pulls: list) -> str | None:
 
 def remove_card(cfg: common.Config, card: int) -> list[str]:
     """Remove the card's worktree, local branch and scratch directory — without --force: git refuses a dirty
-    worktree, and the branch is deleted only at the tip that was checked. Returns what was removed."""
+    worktree, and the branch is deleted only at the tip that was checked. Returns what was removed. Runs under the
+    checkout lock: worktree remove, prune and the branch delete write the shared .git."""
+    with common.checkout_lock():
+        return _remove_card(cfg, card)
+
+
+def _remove_card(cfg: common.Config, card: int) -> list[str]:
     removed = []
     path = common.state_dir("worktrees") / f"issue-{card}"
     if path.exists() or path.is_symlink():
@@ -179,15 +185,22 @@ def read_held() -> dict:
 def tidy(cfg: common.Config, job: str, open_pulls, running: dict, dry_run: bool = False) -> None:
     held = {}
     for card, pulls in finished(cfg, open_pulls, running).items():
+        with common.checkout_lock():  # the check and the removal, as one step on the shared .git
+            _tidy_card(cfg, job, card, pulls, held, dry_run)
+    _after_cards(cfg, job, open_pulls, held, dry_run)
+
+
+def _tidy_card(cfg: common.Config, job: str, card: int, pulls: list, held: dict, dry_run: bool) -> None:
+    if True:
         names = ", ".join(f"#{p['number']} {str(p['state']).lower()}" for p in pulls)
         why = unsafe(cfg, card, pulls)
         if why:
             held[card] = why
             common.log(job, f"card #{card} is done ({names}) but kept — {why}; a person decides")
-            continue
+            return
         if dry_run:
             common.log(job, f"would remove card #{card}'s worktree and branch ({names})")
-            continue
+            return
         for p in pulls:
             if p.get("state") == "MERGED":
                 oid, parents = github.landed_parents(cfg, int(p["number"]))
@@ -195,6 +208,9 @@ def tidy(cfg: common.Config, job: str, open_pulls, running: dict, dry_run: bool 
                                 + ("" if parents == 1 else " — NOT a squash; check the merge queue's method"))
         removed = remove_card(cfg, card)
         common.log(job, f"card #{card} is done ({names}) — removed " + (", ".join(removed) or "nothing left"))
+
+
+def _after_cards(cfg: common.Config, job: str, open_pulls, held: dict, dry_run: bool) -> None:
     if dry_run:
         return
     write_held(held)
