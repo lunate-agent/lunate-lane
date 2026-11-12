@@ -251,9 +251,56 @@ class FailureKindTests(unittest.TestCase):
     """Review of #17, item 1: what is the runner's fault (rerun once) and what is a real failure (rework)."""
 
     def run_node(self, name, conclusion, *, steps=("SUCCESS",), more=False, run_id=77):
+        """`steps`: conclusions, or (name, conclusion) pairs."""
+        nodes = [{"name": s[0], "conclusion": s[1]} if isinstance(s, tuple) else {"name": "step", "conclusion": s}
+                 for s in steps]
         return {"__typename": "CheckRun", "name": name, "status": "COMPLETED", "conclusion": conclusion,
                 "databaseId": 5, "detailsUrl": "u", "checkSuite": {"workflowRun": {"databaseId": run_id}},
-                "steps": {"pageInfo": {"hasNextPage": more}, "nodes": [{"conclusion": c} for c in steps]}}
+                "steps": {"pageInfo": {"hasNextPage": more}, "nodes": nodes}}
+
+    def ci_ok(self, failing_step="Every required job succeeded", conclusion="FAILURE", run_id=77):
+        steps = [("Set up job", "SUCCESS"), ("Checkout", "SUCCESS"), ("Every required job succeeded", "SUCCESS"),
+                 ("Post Checkout", "SUCCESS"), ("Complete job", "SUCCESS")]
+        steps = [(n, "FAILURE" if n == failing_step else c) for n, c in steps]
+        return self.run_node("ci-ok", conclusion, steps=tuple(steps), run_id=run_id)
+
+    def leg(self, name, conclusion, failing=None, run_id=77):
+        steps = [("Set up job", "SUCCESS"), ("Checkout", "SUCCESS"), ("Restore", "SUCCESS"),
+                 ("Test slice", failing or ("CANCELLED" if conclusion == "CANCELLED" else "SUCCESS")),
+                 ("Complete job", "SKIPPED" if conclusion == "CANCELLED" else "SUCCESS")]
+        return self.run_node(name, conclusion, steps=tuple(steps), run_id=run_id)
+
+    def shape_813(self, *extra):
+        return (self.run_node("plan", "SUCCESS"), self.run_node("changes", "SUCCESS"),
+                self.leg("verify (macos-latest, 1/4)", "SUCCESS"), self.leg("verify (macos-latest, 2/4)", "CANCELLED"),
+                self.leg("verify (macos-latest, 3/4)", "CANCELLED"), self.leg("verify (macos-latest, 4/4)", "SUCCESS"),
+                self.leg("verify (ubuntu-latest, 1/4)", "SUCCESS"), self.run_node("verify-docs", "SKIPPED"),
+                *extra, self.ci_ok())
+
+    def test_813s_exact_shape_is_infra_and_names_its_run(self) -> None:
+        """Two cancelled macOS legs, ci-ok red on its aggregate step and nothing else: the runner's fault."""
+        kind, p = self.kind(*self.shape_813())
+        self.assertEqual(kind, "infra")
+        self.assertEqual(github.infra_runs(p), (77,))
+
+    def test_a_real_failing_leg_next_to_cancelled_ones_is_real(self) -> None:
+        self.assertEqual(self.kind(*self.shape_813(self.leg("verify (ubuntu-latest, 2/4)", "FAILURE",
+                                                            failing="FAILURE")))[0], "real")
+
+    def test_ci_ok_failing_anywhere_but_its_aggregate_step_or_over_green_jobs_is_real(self) -> None:
+        cases = {
+            "ci-ok fails at checkout": (self.leg("verify (macos, 2/4)", "CANCELLED"), self.ci_ok("Checkout")),
+            "ci-ok red, every job green (e.g. a draft)": (self.leg("verify (macos, 2/4)", "SUCCESS"), self.ci_ok()),
+            "the cancelled job is another workflow's": (self.leg("verify (macos, 2/4)", "CANCELLED", run_id=88),
+                                                        self.ci_ok()),
+            "a cancelled job with a failed step": (self.leg("verify (macos, 2/4)", "CANCELLED", failing="FAILURE"),
+                                                  self.ci_ok()),
+            "ci-ok's steps unread": (self.leg("verify (macos, 2/4)", "CANCELLED"),
+                                     {**self.ci_ok(), "steps": {"pageInfo": {"hasNextPage": True}, "nodes": []}}),
+        }
+        for name, runs in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(self.kind(*runs)[0], "real")
 
     def kind(self, *contexts):
         node = PullTests().node(commits={"nodes": [{"commit": {"oid": "abc", "statusCheckRollup": {

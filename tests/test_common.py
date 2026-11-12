@@ -49,6 +49,14 @@ class ConfigTests(unittest.TestCase):
                     common.load_config(self.write(data))
                 self.assertIn(f"the {kind} reviewer model must differ", str(caught.exception))
 
+    def test_the_aggregate_check_and_its_step_are_configured(self) -> None:
+        cfg = common.load_config()
+        self.assertEqual((cfg.aggregate_check, cfg.aggregate_step), ("ci-ok", "Every required job succeeded"))
+        del self.data["checks"]["aggregate_step"]
+        with self.assertRaises(ConfigError) as caught:
+            common.load_config(self.write(self.data))
+        self.assertIn("checks.aggregate_step", str(caught.exception))
+
     def test_the_old_single_reviewer_model_is_refused_by_name(self) -> None:
         self.data["models"]["reviewer"] = "opencode-go/glm-5.3-flash"
         with self.assertRaises(ConfigError) as caught:

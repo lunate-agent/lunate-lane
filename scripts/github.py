@@ -26,6 +26,7 @@ class Run(typing.NamedTuple):
     url: str = ""
     run_id: int = 0  # the workflow run it belongs to, for a rerun
     failed_step: bool = False
+    failed_steps: tuple = ()  # names of the steps that failed ("<steps unread>" when they could not all be read)
 
 
 INFRA = frozenset({"CANCELLED", "TIMED_OUT", "STARTUP_FAILURE"})
@@ -225,7 +226,7 @@ reviews(last:100){pageInfo{hasPreviousPage} nodes{author{login} state body commi
 files(first:100){pageInfo{hasNextPage} nodes{path}}
 commits(last:1){nodes{commit{oid statusCheckRollup{contexts(first:100){pageInfo{hasNextPage}
 nodes{__typename ... on CheckRun{name status conclusion databaseId detailsUrl checkSuite{workflowRun{databaseId}}
-steps(first:100){pageInfo{hasNextPage} nodes{conclusion}}} ... on StatusContext{context state}}}}}}}}}}"""
+steps(first:100){pageInfo{hasNextPage} nodes{name conclusion}}} ... on StatusContext{context state}}}}}}}}}}"""
 
 
 def pull(cfg: common.Config, number: int) -> Pull:
@@ -324,10 +325,13 @@ def worker_report(cfg: common.Config, number: int) -> str:
 def _run(c: dict) -> Run:
     steps = c.get("steps") or {}
     unread = (steps.get("pageInfo") or {}).get("hasNextPage") or "nodes" not in steps
-    failed = unread or any((s or {}).get("conclusion") == "FAILURE" for s in steps.get("nodes") or [])
+    names = tuple(str((s or {}).get("name") or "") for s in steps.get("nodes") or []
+                  if (s or {}).get("conclusion") == "FAILURE")
+    if unread:
+        names += ("<steps unread>",)
     run_id = ((c.get("checkSuite") or {}).get("workflowRun") or {}).get("databaseId")
     return Run(str(c["name"]), str(c.get("conclusion") or ""), int(c.get("databaseId") or 0),
-               str(c.get("detailsUrl") or ""), int(run_id or 0), bool(failed))
+               str(c.get("detailsUrl") or ""), int(run_id or 0), bool(names), names)
 
 
 def _queue_removal(node: dict) -> str:
@@ -349,17 +353,24 @@ def _disarmed_by(node: dict, worker_app: str) -> str:
     return ""
 
 
-def failure_kind(p: Pull, required: frozenset) -> str | None:
-    """'infra' or 'real' for a head whose required checks are failing, else None (#1 of the review of #17).
+def failure_kind(p: Pull, required: frozenset, aggregate: tuple | None = None) -> str | None:
+    """'infra' or 'real' for a head whose required checks are failing, else None.
 
-    Infra: every failing check run — the required ones included — was cancelled, timed out or failed to start,
-    with no failing step. A required check that failed for real is never infra, even when other legs were
-    cancelled (review of #17, round two, item 4): `ci-ok` failing as the roll-up of cancelled legs is real too.
-    Anything else is real, and so is a failure the lane cannot attribute (a failing status context, a run whose
-    steps or workflow run could not be read): a rerun is only for what is plainly the runner's fault.
+    A run is infra when it was cancelled, timed out or failed to start with no failing step. The required
+    aggregate check (`ci-ok`, `aggregate` = (check name, its aggregating step), from lane.json) is judged by the
+    jobs it rolls up — the other check runs of its workflow run: its failure is infra when the only step that
+    failed is the aggregating one and every job beside it that did not succeed is infra; it is real when any
+    aggregated job has a failing step, when ci-ok fails at another step, or when it fails with nothing beneath
+    it failing. Any other required check that failed for real is real, whatever its legs did. A failure the
+    lane cannot attribute (a status context, unread steps, no workflow run) is real: a rerun is only for what
+    is plainly the runner's fault.
     """
     if check_state(p, required) != "failing":
         return None
+    if aggregate is None:
+        cfg = common.config()
+        aggregate = (cfg.aggregate_check, cfg.aggregate_step)
+    name, step = aggregate
     failing = [r for r in p.runs if r.conclusion and r.conclusion not in PASSED]
     if any(c[0] in required and c[0] not in {r.name for r in p.runs} for c in p.checks if c[2] not in PASSED):
         return "real"  # a required status context, not a check run: nothing to rerun
@@ -367,10 +378,18 @@ def failure_kind(p: Pull, required: frozenset) -> str | None:
     def infra(r: Run) -> bool:
         return r.conclusion in INFRA and not r.failed_step and r.run_id > 0
 
-    own = [r for r in failing if r.name in required]
-    if any(not infra(r) for r in own):
-        return "real"  # a required check failed for real, whatever its legs did
-    return "infra" if failing and all(infra(r) for r in failing) else "real"
+    if not failing:
+        return "real"
+    for r in failing:
+        if r.name == name and r.name in required and not infra(r):
+            if r.run_id == 0 or set(r.failed_steps) != {step}:
+                return "real"  # ci-ok failed somewhere other than its aggregating step
+            jobs = [j for j in p.runs if j.run_id == r.run_id and j.name != name and j.conclusion not in PASSED]
+            if not jobs or not all(infra(j) for j in jobs):
+                return "real"  # an aggregated job failed for real, or ci-ok failed with nothing beneath it
+        elif not infra(r):
+            return "real"
+    return "infra"
 
 
 def infra_runs(p: Pull) -> tuple:

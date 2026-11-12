@@ -194,6 +194,37 @@ class FeedTests(unittest.TestCase):
         self.assertIn("reran the failed jobs of run(s) 4321", log)
         self.assertIn("(required checks cancelled or timed out again after a rerun)", log)
 
+    def test_813s_shape_reruns_once_then_goes_back_as_a_rework(self) -> None:
+        """The regression: ci-ok red on its aggregate step over two cancelled macOS legs."""
+        from scripts import common
+
+        step = "Every required job succeeded"
+        runs = (github.Run("verify (macos-latest, 2/4)", "CANCELLED", 1, "u", 4321),
+                github.Run("verify (macos-latest, 3/4)", "CANCELLED", 2, "u", 4321),
+                github.Run("verify (ubuntu-latest, 1/4)", "SUCCESS", 3, "u", 4321),
+                github.Run("ci-ok", "FAILURE", 4, "u", 4321, True, (step,)))
+        github.pull.return_value = pull(50, 9, checks=(("ci-ok", "COMPLETED", "FAILURE"),), runs=runs)
+        with mock.patch.object(common, "gh", return_value="") as gh:
+            feed.main()
+            self.assertEqual([c.args for c in gh.call_args_list],
+                             [("run", "rerun", "4321", "--failed", "-R", "lunate-agent/lunate")])
+            self.assertNotIn(50, [l.rework_pr for l in self.started])
+            feed.main()
+            self.assertEqual(gh.call_count, 1, "rerun once per head")
+        self.assertIn(50, [l.rework_pr for l in self.started])
+
+    def test_a_real_failing_leg_beside_cancelled_ones_is_reworked_at_once(self) -> None:
+        from scripts import common
+
+        runs = (github.Run("verify (macos-latest, 2/4)", "CANCELLED", 1, "u", 4321),
+                github.Run("verify (ubuntu-latest, 2/4)", "FAILURE", 2, "u", 4321, True, ("Test slice",)),
+                github.Run("ci-ok", "FAILURE", 4, "u", 4321, True, ("Every required job succeeded",)))
+        github.pull.return_value = pull(50, 9, checks=(("ci-ok", "COMPLETED", "FAILURE"),), runs=runs)
+        with mock.patch.object(common, "gh", return_value="") as gh:
+            feed.main()
+        self.assertNotIn(("run", "rerun"), [c.args[:2] for c in gh.call_args_list])
+        self.assertIn(50, [l.rework_pr for l in self.started])
+
     def test_a_dry_run_only_says_it_would_rerun(self) -> None:
         from scripts import common
 

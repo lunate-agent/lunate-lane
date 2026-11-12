@@ -14,6 +14,10 @@
       "light": "opencode-go/glm-5.3-flash"
     }
   },
+  "checks": {
+    "aggregate": "ci-ok",
+    "aggregate_step": "Every required job succeeded"
+  },
   "labels": {
     "bug": "kind/bug",
     "area_prefix": "area/"

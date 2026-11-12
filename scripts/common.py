@@ -66,6 +66,8 @@ class Config:
     reviewer_light: str  # docs-only pull requests
     bug_label: str
     area_prefix: str
+    aggregate_check: str  # the required check that rolls up the CI jobs (`ci-ok`)
+    aggregate_step: str  # its step that fails when an aggregated job did not succeed
     harness: dict
     checkout: pathlib.Path
     state: pathlib.Path
@@ -106,6 +108,8 @@ def load_config(path: pathlib.Path | None = None) -> Config:
         reviewer_full=str(_need(data, "models", "reviewer", "full")),
         reviewer_light=str(_need(data, "models", "reviewer", "light")),
         bug_label=str(_need(data, "labels", "bug")), area_prefix=str(_need(data, "labels", "area_prefix")),
+        aggregate_check=str(_need(data, "checks", "aggregate")),
+        aggregate_step=str(_need(data, "checks", "aggregate_step")),
         harness=dict(_need(data, "harness")),
         checkout=expand("paths", "checkout"), state=expand("paths", "state"),
         app_config=expand("paths", "app_config"), pins=expand("paths", "pins"),
