@@ -29,6 +29,7 @@ class FinishedCardTests(unittest.TestCase):
         self.addCleanup(self.out.stop)
         self.addCleanup(self.state.close)
         self.states = {}  # card -> [(number, state)]
+        self.heads = {}  # pull request -> its head as GitHub has it
         gh = mock.patch.object(common, "gh_json", side_effect=self.gh_json)
         gh.start()
         self.addCleanup(gh.stop)
@@ -38,7 +39,7 @@ class FinishedCardTests(unittest.TestCase):
 
     def gh_json(self, *args, **_):
         card = int(args[args.index("--head") + 1].split("-")[-1])
-        return [{"number": n, "state": s} for n, s in self.states.get(card, [])]
+        return [{"number": n, "state": s, "headRefOid": self.heads.get(n, "")} for n, s in self.states.get(card, [])]
 
     def card(self, number):
         path = worker.prepare_worktree(self.cfg, number)
@@ -61,6 +62,75 @@ class FinishedCardTests(unittest.TestCase):
         log = (self.cfg.state / "logs" / "feed.log").read_text()
         self.assertIn("#11 landed as abcdef012 with 1 parent(s)", log)
         self.assertIn("card #1 is done (#11 merged) — removed worktree", log)
+
+    def commit(self, path, name="w.cs"):
+        for key, value in (("user.email", "w@example.invalid"), ("user.name", "w")):
+            git(path, "config", key, value)
+        (path / name).write_text(name + "\n")
+        git(path, "add", name)
+        git(path, "commit", "-qm", name)
+        return git(path, "rev-parse", "HEAD")
+
+    def assert_kept(self, card, path, why):
+        self.assertTrue((path / ".git").exists())
+        self.assertIn(f"wt/issue-{card}", git(self.clone, "branch", "--list", f"wt/issue-{card}"))
+        self.assertIn(why, cleanup.read_held()[card])
+        self.assertIn(f"card #{card} is done", (self.cfg.state / "logs" / "feed.log").read_text())
+
+    def test_a_dirty_or_untracked_worktree_is_kept_and_flagged(self) -> None:
+        """Review of #17, item 4."""
+        dirty, untracked = self.card(1), self.card(2)
+        (dirty / "README").write_text("edited\n")
+        (untracked / "new.cs").write_text("x\n")
+        self.states = {1: [(11, "CLOSED")], 2: [(12, "MERGED")]}
+        cleanup.tidy(self.cfg, "feed", [], {})
+        self.assert_kept(1, dirty, "uncommitted or untracked changes")
+        self.assert_kept(2, untracked, "uncommitted or untracked changes")
+        self.landed.assert_not_called()
+
+    def test_commits_a_refused_push_left_behind_are_kept_and_flagged(self) -> None:
+        """The review's path: the PR is closed, the card runs again, its push is refused — nothing is open."""
+        path = self.card(3)
+        old_head = self.commit(path, "first.cs")
+        git(path, "push", "-q", "origin", "wt/issue-3")
+        self.commit(path, "unpushed.cs")
+        self.states, self.heads = {3: [(13, "CLOSED")]}, {13: old_head}
+        cleanup.tidy(self.cfg, "feed", [], {})
+        self.assert_kept(3, path, "1 commit(s) on wt/issue-3 that are not on GitHub")
+
+    def test_a_squash_merged_branch_whose_remote_was_deleted_goes(self) -> None:
+        path = self.card(4)
+        head = self.commit(path, "fix.cs")
+        self.states, self.heads = {4: [(14, "MERGED")]}, {14: head}  # never on an origin ref, but GitHub has it
+        cleanup.tidy(self.cfg, "feed", [], {})
+        self.assertFalse(path.exists())
+        self.assertEqual(git(self.clone, "branch", "--list", "wt/issue-4"), "")
+        self.assertEqual(cleanup.read_held(), {})
+
+    def test_a_head_that_cannot_be_checked_is_kept(self) -> None:
+        path = self.card(5)
+        self.commit(path, "fix.cs")
+        self.states, self.heads = {5: [(15, "CLOSED")]}, {15: "0123456789abcdef0123456789abcdef01234567"}
+        cleanup.tidy(self.cfg, "feed", [], {})
+        self.assert_kept(5, path, "could not be checked")
+
+    def test_the_digest_lists_what_cleanup_kept(self) -> None:
+        from scripts import digest
+        from tests.helpers import REQUIRED
+        import datetime
+
+        text = digest.compose(self.cfg, [], [], [], REQUIRED, datetime.datetime.now(datetime.timezone.utc),
+                              kept={3: "1 commit(s) on wt/issue-3 that are not on GitHub"})
+        self.assertIn("Kept by cleanup (1)", text)
+        self.assertIn("card #3 — 1 commit(s) on wt/issue-3 that are not on GitHub", text)
+
+    def test_no_script_forces_a_git_removal(self) -> None:
+        import re
+
+        for script in sorted((pathlib.Path(cleanup.__file__).parent).glob("*.py")):
+            code = "\n".join(line.split("#")[0] for line in script.read_text().splitlines())
+            with self.subTest(script=script.name):
+                self.assertNotRegex(code, r'"--force"|"-D"|--force-with-lease')
 
     def test_a_merge_that_is_not_a_squash_is_called_out(self) -> None:
         self.card(1)

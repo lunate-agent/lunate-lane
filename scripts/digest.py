@@ -16,7 +16,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from scripts import common, github, harness  # noqa: E402
+from scripts import cleanup, common, github, harness  # noqa: E402
 from scripts.common import GhError  # noqa: E402
 
 JOB = "digest"
@@ -93,7 +93,8 @@ def stuck(cfg: common.Config, pulls: list, required: frozenset, now: datetime.da
 
 
 def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required: frozenset,
-            now: datetime.datetime, parked: dict | None = None, running: dict | None = None) -> str:
+            now: datetime.datetime, parked: dict | None = None, running: dict | None = None,
+            kept: dict | None = None) -> str:
     running = running or {}
     flight = in_flight(cfg, pulls, running)
     lines = [f"Lunate lane — {now:%Y-%m-%d}", f"{cfg.milestone}: {len(cards)} open issue(s)",
@@ -109,6 +110,10 @@ def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required
                  else "Parked cards: none")
     for number in sorted(parked):
         lines.append(f"  #{number} — {PARKED_WHY.get(parked[number], parked[number])}")
+    kept = kept or {}
+    lines.append(f"Kept by cleanup ({len(kept)}) — its PR is closed, but removing it would lose work:" if kept
+                 else "Kept by cleanup: none")
+    lines += [f"  card #{number} — {kept[number]}" for number in sorted(kept)]
     lines.append(f"Merged since yesterday ({len(merged)}):" if merged else "Merged since yesterday: none")
     lines += [f"  #{m['number']} {str(m.get('title') or '')[:60]}" for m in merged]
     return "\n".join(lines)
@@ -121,7 +126,8 @@ def tick() -> None:
     cards = github.milestone_cards(cfg)
     pulls = [github.pull(cfg, p.number) for p in github.open_pulls(cfg)]
     merged = merged_since(cfg, now - datetime.timedelta(days=1))
-    message = compose(cfg, cards, pulls, merged, required, now, harness.parked_details(), harness.running_workers())
+    message = compose(cfg, cards, pulls, merged, required, now, harness.parked_details(), harness.running_workers(),
+                      cleanup.read_held())
     latest = common.state_dir("digest") / "latest.md"
     try:
         latest.write_text(message + "\n", encoding="utf-8")

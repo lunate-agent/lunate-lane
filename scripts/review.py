@@ -140,8 +140,8 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str, str]:
     except OSError as exc:
         raise ReviewError(f"the old verdict {verdict_file} could not be removed: {exc}") from exc
     common.git(repo, "fetch", "-q", "origin", p.head)
-    if worktree.exists():
-        common.git(repo, "worktree", "remove", "--force", str(worktree))
+    if worktree.exists() or worktree.is_symlink():
+        remove_review_worktree(cfg, p.number)
     driver = os.getpid()
     harness.record_review(p.number, driver, worktree)  # so a SIGKILLed run's session and worktree get cleared
     common.git(repo, "worktree", "add", "--detach", str(worktree), p.head)
@@ -168,7 +168,7 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str, str]:
             raise ReviewError(f"the review session did not finish cleanly (rc {outcome.rc}, stalled {outcome.stalled})")
         return (*read_verdict(verdict_file), model)
     finally:
-        common.git(repo, "worktree", "remove", "--force", str(worktree))
+        remove_review_worktree(cfg, p.number)
         harness.clear_review(p.number, driver)
 
 
@@ -190,12 +190,20 @@ def spec_neighbours(p: github.Pull, others) -> str:
 
 
 def remove_review_worktree(cfg: common.Config, pr: int) -> None:
-    """Remove the review worktree of `pr` a dead run left behind, and prune its registration. The path is derived
-    from the number and resolved; a symlink or anything outside <state>/reviews is refused."""
+    """Remove the review worktree of `pr`, and prune its registration. The path is derived from the number and
+    resolved; a symlink or anything outside <state>/reviews is refused.
+
+    No --force (review of #17, item 4): a clean worktree goes through `git worktree remove`. One the reviewer's
+    build left untracked files in is deleted as a directory instead — it is detached at a head that is already on
+    GitHub and holds nothing the lane keeps.
+    """
     worktree = common.inside_state(common.state_dir("reviews") / f"pr-{int(pr)}", "reviews")
     if (worktree / ".git").exists():
-        common.git(cfg.checkout, "worktree", "remove", "--force", str(worktree))
-    elif worktree.exists():
+        try:
+            common.git(cfg.checkout, "worktree", "remove", str(worktree))
+        except common.GitError:
+            pass  # untracked build output: removed as a directory below
+    if worktree.exists():
         try:
             shutil.rmtree(worktree)
         except OSError as exc:

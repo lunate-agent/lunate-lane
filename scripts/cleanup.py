@@ -12,6 +12,7 @@ Only what the lane made is touched: worktrees under its state directory and `wt/
 
 from __future__ import annotations
 
+import json
 import os
 import pathlib
 import re
@@ -43,9 +44,9 @@ def lane_cards(cfg: common.Config) -> set[int]:
 
 
 def closed_pulls(cfg: common.Config, card: int) -> list[dict]:
-    """Every pull request ever opened from `wt/issue-<card>`, with its state."""
+    """Every pull request ever opened from `wt/issue-<card>`, with its state and its head as GitHub has it."""
     found = common.gh_json("pr", "list", "-R", cfg.slug, "--head", f"wt/issue-{card}", "--state", "all",
-                           "--limit", "50", "--json", "number,state")
+                           "--limit", "50", "--json", "number,state,headRefOid")
     if not isinstance(found, list) or len(found) >= 50:
         raise GhError(f"the pull requests of wt/issue-{card} came back unreadable or cut off")
     return found
@@ -63,25 +64,50 @@ def finished(cfg: common.Config, open_pulls, running: dict) -> dict:
     return done
 
 
+def unsafe(cfg: common.Config, card: int, pulls: list) -> str | None:
+    """Why removing the card's worktree and branch would lose work, or None (review of #17, item 4).
+
+    Uncommitted or untracked changes in the worktree, or a commit on the branch that is on no origin ref and is
+    no pull request's head as GitHub has it (a squash-merged branch whose remote was deleted is still covered by
+    its pull request's head). What cannot be checked is unsafe too.
+    """
+    path = common.state_dir("worktrees") / f"issue-{card}"
+    branch = f"refs/heads/wt/issue-{card}"
+    try:
+        if (path / ".git").exists() and common.git(path, "status", "--porcelain", "--untracked-files=all"):
+            return "uncommitted or untracked changes in its worktree"
+        if not common.git(cfg.checkout, "for-each-ref", "--format=%(refname)", branch):
+            return None
+        heads = [str(p["headRefOid"]) for p in pulls if p.get("headRefOid")]
+        ahead = common.git(cfg.checkout, "rev-list", branch, "--not", "--remotes=origin", *heads)
+    except common.GitError as exc:
+        return f"its work could not be checked ({str(exc)[:120]})"
+    if ahead:
+        return f"{len(ahead.splitlines())} commit(s) on wt/issue-{card} that are not on GitHub"
+    return None
+
+
 def remove_card(cfg: common.Config, card: int) -> list[str]:
-    """Remove the card's worktree, local branch and scratch directory. Returns what was removed."""
+    """Remove the card's worktree, local branch and scratch directory — without --force: git refuses a dirty
+    worktree, and the branch is deleted only at the tip that was checked. Returns what was removed."""
     removed = []
     path = common.state_dir("worktrees") / f"issue-{card}"
     if path.exists() or path.is_symlink():
         common.inside_state(path, "worktrees")
     if (path / ".git").exists():
-        common.git(cfg.checkout, "worktree", "remove", "--force", str(path))
+        common.git(cfg.checkout, "worktree", "remove", str(path))
         removed.append(f"worktree {path}")
     elif path.exists():
         _rmtree(path)
         removed.append(f"directory {path}")
     common.git(cfg.checkout, "worktree", "prune")
-    branch = f"wt/issue-{card}"
-    if common.git(cfg.checkout, "for-each-ref", "--format=%(refname)", f"refs/heads/{branch}"):
-        common.git(cfg.checkout, "branch", "-D", branch)
-        removed.append(f"branch {branch}")
+    branch = f"refs/heads/wt/issue-{card}"
+    tip = common.git(cfg.checkout, "for-each-ref", "--format=%(objectname)", branch)
+    if tip:
+        common.git(cfg.checkout, "update-ref", "-d", branch, tip)
+        removed.append(f"branch wt/issue-{card}")
     scratch = cfg.state / "scratch" / f"issue-{card}"
-    if scratch.exists():
+    if scratch.exists() or scratch.is_symlink():
         _rmtree(scratch)
         removed.append(f"scratch {scratch}")
     return removed
@@ -129,9 +155,36 @@ def prune_sessions(days: int = SESSION_DAYS, now: float | None = None) -> int:
     return gone
 
 
+def write_held(held: dict) -> None:
+    """<state>/held.json: card -> why cleanup kept it, rewritten each tick, for the digest."""
+    path = common.state_dir() / "held.json"
+    try:
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps({str(k): v for k, v in sorted(held.items())}))
+        os.replace(tmp, path)
+    except OSError as exc:
+        raise StateError(f"{path} could not be written: {exc}") from exc
+
+
+def read_held() -> dict:
+    path = common.state_dir() / "held.json"
+    if not path.exists():
+        return {}
+    try:
+        return {int(k): str(v) for k, v in json.loads(path.read_text()).items()}
+    except (OSError, ValueError, AttributeError) as exc:
+        raise StateError(f"{path} could not be read: {exc}") from exc
+
+
 def tidy(cfg: common.Config, job: str, open_pulls, running: dict, dry_run: bool = False) -> None:
+    held = {}
     for card, pulls in finished(cfg, open_pulls, running).items():
         names = ", ".join(f"#{p['number']} {str(p['state']).lower()}" for p in pulls)
+        why = unsafe(cfg, card, pulls)
+        if why:
+            held[card] = why
+            common.log(job, f"card #{card} is done ({names}) but kept — {why}; a person decides")
+            continue
         if dry_run:
             common.log(job, f"would remove card #{card}'s worktree and branch ({names})")
             continue
@@ -144,6 +197,7 @@ def tidy(cfg: common.Config, job: str, open_pulls, running: dict, dry_run: bool 
         common.log(job, f"card #{card} is done ({names}) — removed " + (", ".join(removed) or "nothing left"))
     if dry_run:
         return
+    write_held(held)
     for name in rotate_logs():
         common.log(job, f"rotated {name}")
     pruned = prune_sessions()
