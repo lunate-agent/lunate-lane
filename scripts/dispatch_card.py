@@ -1,0 +1,160 @@
+"""Turn a card into a pull request.
+
+The lane's feeder decides *which* card is next; this module does the part that touches GitHub: take the card,
+find the branch its worker used, and open (or reuse) the pull request as the worker identity.
+
+    python3 scripts/dispatch_card.py --issue 794
+
+Rule one applies here too: an unreadable issue, or a card whose branch does not exist, is a named failure and
+stops the decision. Nothing is inferred from an empty read.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import pathlib
+import re
+import subprocess
+
+try:  # imported as scripts.dispatch_card by the tests, or run as a script
+    from . import open_pr
+except ImportError:  # pragma: no cover - the script path
+    import open_pr
+
+SLUG = "lunate-agent/lunate"
+
+
+class CardError(RuntimeError):
+    """The card cannot become a pull request, and the reason is named."""
+
+
+def gh(*args: str, repo: pathlib.Path) -> str:
+    """A gh read that refuses to answer with an empty string on failure."""
+    try:
+        done = subprocess.run(["gh", *args], capture_output=True, text=True, cwd=str(repo), timeout=120)
+    except OSError as exc:
+        raise CardError(f"gh could not be run ({exc.__class__.__name__}: {exc})") from exc
+    except subprocess.SubprocessError as exc:
+        raise CardError(f"gh {' '.join(args[:2])} did not finish ({exc.__class__.__name__})") from exc
+    if done.returncode != 0:
+        tail = ((done.stderr or "") + (done.stdout or "")).strip()[:200]
+        raise CardError(f"gh {' '.join(args[:2])} failed: {tail}")
+    return (done.stdout or "").strip()
+
+
+def card(repo: pathlib.Path, number: int) -> dict:
+    """The issue, or a named failure. Never an empty card."""
+    raw = gh("issue", "view", str(number), "-R", SLUG,
+             "--json", "number,title,state,milestone,body", repo=repo)
+    try:
+        data = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise CardError(f"the issue #{number} could not be parsed: {exc}") from exc
+    if not data.get("title"):
+        raise CardError(f"issue #{number} came back with no title")
+    if data.get("state") != "OPEN":
+        raise CardError(f"issue #{number} is {data.get('state')}, not open — nothing to dispatch")
+    return data
+
+
+def branch_for(repo: pathlib.Path, number: int) -> str:
+    """The branch a worker uses for this card, checked to exist locally."""
+    name = f"wt/issue-{number}"
+    try:
+        exists = subprocess.run(
+            ["git", "rev-parse", "--verify", "--quiet", f"refs/heads/{name}"],
+            capture_output=True, text=True, cwd=str(repo), timeout=60,
+        )
+    except OSError as exc:
+        raise CardError(f"git could not be run in {repo} ({exc.__class__.__name__})") from exc
+    except subprocess.SubprocessError as exc:
+        raise CardError(f"the branch check did not finish ({exc.__class__.__name__})") from exc
+    if exists.returncode != 0:
+        raise CardError(f"#{number} has no local branch {name!r} in {repo}")
+    ahead = _count(repo, name)
+    if ahead == 0:
+        raise CardError(f"#{number}'s branch {name!r} has no commits ahead of {BASE} — nothing to open")
+    return name
+
+
+BASE = "origin/main"
+
+
+def _count(repo: pathlib.Path, name: str) -> int:
+    """How many commits `name` is ahead of the base. An unreadable answer is a refusal, not a zero.
+
+    Rule one: if git cannot say, this does not decide. A missing base ref makes `rev-list` fail and print
+    nothing, which would otherwise read as "nothing to open" — the right answer is that we do not know.
+    """
+    try:
+        done = subprocess.run(
+            ["git", "rev-list", "--count", f"{BASE}..{name}"],
+            capture_output=True, text=True, cwd=str(repo), timeout=60,
+        )
+    except OSError as exc:
+        raise CardError(f"git could not be run in {repo} ({exc.__class__.__name__})") from exc
+    except subprocess.SubprocessError as exc:
+        raise CardError(f"counting commits ahead of {BASE} did not finish ({exc.__class__.__name__})") from exc
+    if done.returncode != 0:
+        tail = ((done.stderr or "") + (done.stdout or "")).strip()[:160]
+        raise CardError(f"git could not count commits ahead of {BASE} in {repo}: {tail or 'no output'}")
+    raw = (done.stdout or "").strip()
+    if not raw.isdigit():
+        raise CardError(f"git answered {raw!r} when counting commits ahead of {BASE} — refusing to decide")
+    return int(raw)
+
+
+# closing keywords, their colon form, owner/repo#N, and the full issue URL form
+CLOSING_KEYWORDS = re.compile(
+    r"\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b(\s*:?\s*)([\w.-]+/[\w.-]+)?#(\d+)"
+    r"|\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b(\s*:?\s*)(https?://\S*?/issues/\d+)",
+    re.IGNORECASE,
+)
+
+
+def body_for(data: dict) -> str:
+    """The pull request body: what closes, and the first part of the issue.
+
+    The issue's own text is truncated, and any `Closes #n` inside it is defused: a copied closing keyword
+    would close unrelated issues on merge, and GitHub caps a pull request body at 65,536 characters.
+    """
+    closes = f"Closes #{data['number']}"
+    milestone = (data.get("milestone") or {}).get("title")
+    head = closes + (f" · milestone {milestone}" if milestone else "")
+    def escape(match: "re.Match[str]") -> str:
+        if match.group(4):  # keyword #N, optionally owner/repo#N
+            return f"{match.group(1)}{match.group(2)}{match.group(3) or ''}\\#{match.group(4)}"
+        return f"{match.group(5)}{match.group(6)}\\{match.group(7)}"  # the URL form
+
+    issue_text = CLOSING_KEYWORDS.sub(escape, data.get("body") or "(the issue states no body)")
+    if len(issue_text) > 8000:
+        issue_text = issue_text[:8000] + "\n…truncated; the issue holds the rest."
+    return f"{head}\n\n{issue_text}\n"
+
+
+def dispatch(repo: pathlib.Path, number: int) -> dict:
+    """Card to pull request. Raises rather than half-opening anything."""
+    branch = branch_for(repo, number)
+    data = card(repo, number)
+    title = data["title"]
+    return open_pr.open_pr(repo, branch, title, body_for(data))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--repo", default=str(pathlib.Path.home() / "dev" / "lunate"))
+    parser.add_argument("--issue", type=int, required=True)
+    args = parser.parse_args()
+    try:
+        result = dispatch(pathlib.Path(args.repo), args.issue)
+    except (CardError, open_pr.OpenPrError) as exc:
+        print(f"FAILED — {exc}")
+        return 1
+    reused = " (reused the open one)" if result["reused"] else ""
+    print(f"#{args.issue} → #{result['number']} as {result['author']} — auto-merge {result['auto_merge']}{reused} — {result['url']}")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -161,6 +161,7 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
     """
     token = _worker_token()
 
+    # the author is checked before the push: never overwrite a branch whose PR belongs to someone else
     existing = find_open_pr(branch, token)
     if existing:
         number = existing.get("number")
@@ -169,6 +170,8 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
             raise OpenPrError(
                 f"#{number} is already open for {branch!r} but authored by {author!r}, not {WORKER_LOGIN}"
             )
+        # a re-dispatch usually carries new commits, and reuse must deliver them
+        push(repo, branch, token)
         arm_auto_merge(token, existing.get("node_id"))
         return {"number": number, "url": existing.get("html_url"), "author": author,
                 "auto_merge": "armed", "reused": True}
@@ -185,6 +188,11 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
         # a race: another run opened it between the check and this call
         raced = find_open_pr(branch, token)
         if raced:
+            raced_author = (raced.get("user") or {}).get("login", "")
+            if raced_author != WORKER_LOGIN:
+                raise OpenPrError(
+                    f"#{raced.get('number')} already exists for {branch!r} but is authored by {raced_author!r}"
+                )
             arm_auto_merge(token, raced.get("node_id"))
             return {"number": raced.get("number"), "url": raced.get("html_url"),
                     "author": (raced.get("user") or {}).get("login", ""),
