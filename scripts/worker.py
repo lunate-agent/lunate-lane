@@ -41,8 +41,29 @@ def ref_exists(repo: pathlib.Path, ref: str) -> bool:
     return done.returncode == 0
 
 
+class WorktreeError(GitError):
+    """The card's worktree cannot be cut or reused, and the reason — which worktree is in the way — is named."""
+
+
+def worktrees(repo: pathlib.Path) -> dict:
+    """branch -> worktree path for every worktree of `repo` that has a branch checked out. Stale registrations
+    (their directory is gone) are pruned first, so a deleted worktree does not hold its branch."""
+    common.git(repo, "worktree", "prune")
+    found, path = {}, None
+    for line in common.git(repo, "worktree", "list", "--porcelain").splitlines():
+        if line.startswith("worktree "):
+            path = pathlib.Path(line[len("worktree "):])
+        elif line.startswith("branch refs/heads/") and path is not None:
+            found[line[len("branch refs/heads/"):]] = path
+    return found
+
+
 def prepare_worktree(cfg: common.Config, number: int) -> pathlib.Path:
-    """The card's worktree on `wt/issue-<n>`: reused, continued from the local or remote branch, or cut from base."""
+    """The card's worktree on `wt/issue-<n>`: reused, continued from the local or remote branch, or cut from base.
+
+    A branch git would refuse to check out because another worktree holds it (the old lane kept its worktrees at
+    `<checkout>/.worktrees/<card>`) is a named `WorktreeError` saying which one, never git's bare exit 128 (#4).
+    """
     repo, branch = cfg.checkout, f"wt/issue-{number}"
     path = common.state_dir("worktrees") / f"issue-{number}"
     common.git(repo, "fetch", "-q", "origin")
@@ -50,13 +71,21 @@ def prepare_worktree(cfg: common.Config, number: int) -> pathlib.Path:
     if (path / ".git").exists():
         current = common.git(path, "rev-parse", "--abbrev-ref", "HEAD")
         if current != branch:
-            raise GitError(f"the worktree {path} is on {current!r}, not {branch!r}")
-    elif ref_exists(repo, f"refs/heads/{branch}"):
-        common.git(repo, "worktree", "add", str(path), branch)
-    elif remote:
-        common.git(repo, "worktree", "add", "-b", branch, str(path), f"origin/{branch}")
+            raise WorktreeError(f"the worktree {path} is on {current!r}, not {branch!r}")
+    elif path.exists():
+        raise WorktreeError(f"{path} exists but is not a worktree — move it aside and the next run cuts the card")
     else:
-        common.git(repo, "worktree", "add", "-b", branch, str(path), f"origin/{cfg.base}")
+        holder = worktrees(repo).get(branch)
+        if holder is not None and holder.resolve() != path.resolve():
+            raise WorktreeError(f"{branch!r} is already checked out in the worktree {holder}; remove that worktree "
+                                f"(`git -C {repo} worktree remove {holder}`) or switch it to another branch, and "
+                                "the next run continues the card here")
+        if ref_exists(repo, f"refs/heads/{branch}"):
+            common.git(repo, "worktree", "add", str(path), branch)
+        elif remote:
+            common.git(repo, "worktree", "add", "-b", branch, str(path), f"origin/{branch}")
+        else:
+            common.git(repo, "worktree", "add", "-b", branch, str(path), f"origin/{cfg.base}")
     if remote:
         common.git(path, "merge", "--ff-only", "-q", f"origin/{branch}")
     return path

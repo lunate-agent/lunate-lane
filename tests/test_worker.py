@@ -64,8 +64,41 @@ class WorktreeTests(RepoCase):
     def test_a_worktree_on_another_branch_is_refused(self) -> None:
         path = self.cfg.state / "worktrees" / "issue-5"
         git(self.clone, "worktree", "add", "-q", "-b", "someone-else", str(path), "origin/main")
-        with self.assertRaises(GitError):
+        with self.assertRaises(worker.WorktreeError):
             worker.prepare_worktree(self.cfg, 5)
+
+    def test_a_free_local_branch_is_checked_out(self) -> None:
+        git(self.clone, "branch", "wt/issue-8", "origin/main")
+        path = worker.prepare_worktree(self.cfg, 8)
+        self.assertEqual(git(path, "rev-parse", "--abbrev-ref", "HEAD"), "wt/issue-8")
+
+    def test_a_branch_checked_out_in_another_worktree_is_a_named_refusal_not_gits_128(self) -> None:
+        """#4: the old lane's `<checkout>/.worktrees/issue-N` holds the branch."""
+        holder = self.clone / ".worktrees" / "issue-794"
+        git(self.clone, "worktree", "add", "-q", "-b", "wt/issue-794", str(holder), "origin/main")
+        with self.assertRaises(worker.WorktreeError) as caught:
+            worker.prepare_worktree(self.cfg, 794)
+        message = str(caught.exception)
+        self.assertIn(str(holder.resolve()), message)
+        self.assertIn("already checked out", message)
+        self.assertNotIn("fatal", message)
+        self.assertNotIn("128", message)
+        self.assertFalse((self.cfg.state / "worktrees" / "issue-794").exists())
+
+    def test_a_worktree_whose_directory_is_gone_does_not_hold_its_branch(self) -> None:
+        import shutil
+
+        holder = self.clone / ".worktrees" / "issue-9"
+        git(self.clone, "worktree", "add", "-q", "-b", "wt/issue-9", str(holder), "origin/main")
+        shutil.rmtree(holder)
+        path = worker.prepare_worktree(self.cfg, 9)
+        self.assertEqual(git(path, "rev-parse", "--abbrev-ref", "HEAD"), "wt/issue-9")
+
+    def test_a_directory_in_the_way_that_is_not_a_worktree_is_refused(self) -> None:
+        (self.cfg.state / "worktrees" / "issue-10").mkdir(parents=True)
+        with self.assertRaises(worker.WorktreeError) as caught:
+            worker.prepare_worktree(self.cfg, 10)
+        self.assertIn("is not a worktree", str(caught.exception))
 
     def test_an_unreachable_checkout_is_a_named_failure(self) -> None:
         import shutil
