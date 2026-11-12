@@ -141,6 +141,7 @@ def main() -> int:
     parser.add_argument("--repo", default=str(pathlib.Path.home() / "dev" / "lunate"))
     parser.add_argument("--branch", required=True)
     parser.add_argument("--title", required=True)
+    parser.add_argument("--body", help="the body as a string")
     parser.add_argument("--body-file")
     parser.add_argument("--base", default="main")
     parser.add_argument("--close", type=int, help="close this pull request and delete --branch instead of opening")
@@ -149,7 +150,10 @@ def main() -> int:
         if args.close:
             print(close_pr(args.close, args.branch))
             return 0
-        body = pathlib.Path(args.body_file).read_text() if args.body_file else ""
+        if args.body_file:
+            body = pathlib.Path(args.body_file).read_text()
+        else:
+            body = args.body or ""
         result = open_pr(pathlib.Path(args.repo), args.branch, args.title, body, args.base)
     except OpenPrError as exc:
         print(f"FAILED — {exc}")
