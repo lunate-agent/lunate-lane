@@ -265,6 +265,7 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
     driver = os.getpid()
     outcome = harness.run_session(cfg, model=cfg.worker_model, worktree=worktree, prompt=text, scratch=scratch,
                                   log_path=session_log, extra_env={"LANE_PR_FILE": str(pr_file)}, on_tick=open_early,
+                                  branch=f"wt/issue-{number}",
                                   on_start=lambda pgid, sid: harness.note_session(number, driver, pgid, sid))
     return finish(cfg, number, worktree, outcome, start_head, session_log)
 

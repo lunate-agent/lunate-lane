@@ -72,6 +72,7 @@ class HarnessTests(Case):
         (self.state.root / "logs-file").write_text("x")
         worktree = self.state.root / "wt"
         worktree.mkdir()
+        subprocess.run(["git", "init", "-q", str(self.cfg.checkout)], check=True)
         with mock.patch.object(harness, "read_credential", return_value="k"), \
                 mock.patch.object(harness, "_git_identity", return_value={}):
             with self.assertRaises(harness.HarnessError) as caught:

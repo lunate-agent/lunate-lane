@@ -212,21 +212,25 @@ morning digest matching what GitHub shows. Then retire the old jobs in
 
 ## Known limitations
 
-- **The sandbox is the v1 boundary; a separate macOS user is the follow-up.** Every Pi session — worker and
-  reviewer — runs under `sandbox-exec` with a profile (`harness.sandbox_profile`) that:
+- **The sandbox is the v1 boundary, and it is deny-by-default for writes; a separate macOS user is the
+  follow-up.** Every Pi session — worker and reviewer — runs under `sandbox-exec` with a profile
+  (`harness.sandbox_profile`) that:
+  - denies **every write** except: the session's own scratch (its HOME and TMPDIR) and worktree; what git needs to
+    commit there (`.git/objects`, the worktree's own `.git/worktrees/<name>`, and for a worker its own
+    `refs/heads/wt/issue-N` and that ref's log — no other ref, since cleanup trusts `refs/remotes/origin`); the
+    NuGet package cache the lane points sessions at; `/dev/null` and `/dev/tty`. Inside those, the worktree's
+    `.git` pointer and the admin directory's `gitdir`, `commondir` and `config.worktree` stay denied. So the
+    lane's code, its state, the checkout's config and hooks, the user's dotfiles (`~/.zshrc`, `~/.gitconfig`),
+    `~/Library/LaunchAgents` and Homebrew's prefix are all out of reach — tested by running each write;
   - denies **reading** `~/.config/lunate-lane` (the App keys, `app.json`, the model key, the push's askpass
     files), `~/.hermes`, `~/.ssh`, `~/.config/gh` and `~/Library/Keychains`;
-  - denies **writing** everything the unsandboxed lane later runs or trusts: the lane's own code (this checkout
-    and the main one), the whole state directory except the session's own scratch and worktree (so no worker,
-    attempts, review or rerun record, no other session's files, not the push mirror), the checkout's
-    `.git/config`, `.git/hooks` and per-worktree `config.worktree`, and the user's `~/.gitconfig` and
-    `~/.config/git`;
   - denies process-info calls on any process outside the session's own sandbox.
 
-  The lane's own git never trusts what a session could have influenced anyway: every git it runs has
-  `core.fsmonitor`, `core.hooksPath` and the credential helper neutralised and runs without system or global
-  config. Every path the lane deletes is resolved and refused unless it lies inside the state directory, and a
-  review record must name exactly its own `reviews/pr-<n>`.
+  The lane's own git never takes a worktree's location from its pointer files: it passes `--git-dir` and
+  `--work-tree` it computes, checks the admin directory's `gitdir` and `commondir` (git follows `commondir` even
+  with `GIT_COMMON_DIR` set), runs with no system config and an empty lane-owned global config, with fsmonitor,
+  hooks and credential helpers neutralised, and diffs with `--no-textconv --no-ext-diff`. Every path the lane
+  deletes is resolved and refused unless it lies inside the state directory.
 
   What it does not cover:
   - `sysctl(KERN_PROCARGS2)` is not mediated by the sandbox on this macOS, so a session can still read the
@@ -238,6 +242,11 @@ morning digest matching what GitHub shows. Then retire the old jobs in
     `https://github.com/lunate-agent/lunate.git`, with system and global config off and hooks pointing nowhere,
     so nothing a session writes into the checkout's config (a `pushurl`, an `insteadOf`) decides where the
     token goes. The model key is in the session's own environment by design.
+  - **Direct calls to macOS services.** The profile allows everything that is not a file write, a secret read,
+    or another process's information — so a session can still talk to system services over Mach/XPC itself
+    (launchd, the keychain's securityd, LaunchServices) rather than through their command-line tools. That is
+    the remaining risk this sandbox does not close; running sessions as a separate macOS user is the follow-up
+    that does.
   - Filters and diff drivers named by a branch's `.gitattributes` still run in the lane's git when the
     checkout's own `.git/config` defines them; sessions cannot write that file, and the lane's git ignores the
     global and system config where a planted one would otherwise sit.

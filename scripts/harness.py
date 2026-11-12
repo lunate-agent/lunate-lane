@@ -142,7 +142,11 @@ def session_env(cfg: common.Config, scratch: pathlib.Path, extra: dict | None = 
     env = {"PATH": path, "HOME": str(home), "TMPDIR": str(scratch),
            "GH_CONFIG_DIR": str(nogh), "GIT_TERMINAL_PROMPT": "0",
            "GIT_CONFIG_NOSYSTEM": "1", "GIT_CONFIG_GLOBAL": str(home / ".gitconfig"),
-           "GIT_CONFIG_COUNT": "1", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "",
+           # no credential helper; no automatic gc or maintenance, which would write outside what the sandbox
+           # allows a session (packed-refs, gc.log)
+           "GIT_CONFIG_COUNT": "3", "GIT_CONFIG_KEY_0": "credential.helper", "GIT_CONFIG_VALUE_0": "",
+           "GIT_CONFIG_KEY_1": "gc.auto", "GIT_CONFIG_VALUE_1": "0",
+           "GIT_CONFIG_KEY_2": "maintenance.auto", "GIT_CONFIG_VALUE_2": "false",
            cfg.harness["credential_env"]: read_credential(cfg)}
     dotnet = real_home / ".dotnet"
     if (dotnet / "dotnet").exists():
@@ -174,46 +178,44 @@ def denied_paths(cfg: common.Config, real_home: pathlib.Path | None = None) -> l
     return _forms([real_home / d for d in SANDBOX_DENY] + [cfg.app_config.parent])
 
 
-def lane_repos() -> list[pathlib.Path]:
-    """The lane's own code: this checkout, and the main checkout whose .git it shares when it is a worktree."""
-    found = [common.ROOT]
-    try:
-        done = subprocess.run(["git", *common.SAFE_GIT, "-C", str(common.ROOT), "rev-parse", "--path-format=absolute",
-                               "--git-common-dir"], capture_output=True, text=True, timeout=30, env=common.git_env())
-    except (OSError, subprocess.SubprocessError) as exc:
-        raise HarnessError(f"the lane's own repository could not be located ({exc.__class__.__name__})") from exc
-    if done.returncode == 0 and done.stdout.strip():
-        found.append(pathlib.Path(done.stdout.strip()).parent)
-    return found
+def _rx(path: str, tail: str = "") -> str:
+    """An SBPL regex matching exactly `path` (and `path` + `tail`)."""
+    return '(regex #"^' + re.escape(path).replace('"', '\\"') + tail + '$")'
 
 
-def write_denied(cfg: common.Config, real_home: pathlib.Path | None = None) -> tuple[list[str], list[str]]:
-    """(subpaths, single files) a session may not write (review of #17, item 3): the lane's code, the git config
-    the driver's git would read (the user's global config, the checkout's .git/config and hooks), and the whole
-    state directory — of which the session's own scratch and worktree are allowed again afterwards."""
+def sandbox_profile(cfg: common.Config, real_home: pathlib.Path | None = None, *, scratch: pathlib.Path,
+                    worktree: pathlib.Path, branch: str | None = None) -> str:
+    """The session's sandbox (review of #17, round two, item 1). Writes are denied by default; allowed only:
+
+        the session's scratch (its HOME and TMPDIR) and its worktree;
+        what git needs to commit there — `.git/objects`, the worktree's own `.git/worktrees/<name>`, and for a
+        worker its own branch ref and that ref's log (not other refs: cleanup trusts `refs/remotes/origin`);
+        the NuGet package cache the lane points sessions at; /dev/null and /dev/tty.
+
+    Inside those, the worktree's `.git` pointer and the admin directory's `gitdir`, `commondir` and
+    `config.worktree` stay denied. Reads of the lane's and the user's secrets are denied; process-info only on
+    the session's own processes. `sysctl(KERN_PROCARGS2)` is not mediated by the sandbox on this macOS, so
+    another process's argv and environment stay readable — the lane keeps tokens out of both (open_pr.push).
+    """
     real_home = real_home or pathlib.Path.home()
-    git_dir = cfg.checkout / ".git"
-    subpaths = _forms([*lane_repos(), cfg.state, git_dir / "hooks", real_home / ".config" / "git"])
-    files = _forms([git_dir / "config", real_home / ".gitconfig"])
-    return subpaths, files
-
-
-def sandbox_profile(cfg: common.Config, real_home: pathlib.Path | None = None, writable=()) -> str:
-    """The session's sandbox (reads: the lane's and the user's secrets denied; writes: everything the
-    unsandboxed driver later runs or trusts denied, except the session's own `writable` scratch and worktree;
-    process-info: only its own processes). On this macOS the kernel does not ask the sandbox about
-    `sysctl(KERN_PROCARGS2)`, so another process's argv and environment stay readable — the lane therefore keeps
-    tokens out of both (open_pr.push)."""
+    git_dir = common.checkout_git(cfg)
+    admin = git_dir / "worktrees" / worktree.name
+    allowed = [f"(subpath {_sbpl(p)})" for p in _forms([scratch, worktree, git_dir / "objects", admin])]
+    if branch:
+        for ref in (git_dir / "refs" / "heads" / branch, git_dir / "logs" / "refs" / "heads" / branch):
+            allowed += [_rx(form, r"(\.lock)?") for form in _forms([ref])]
+    packages = real_home / ".nuget" / "packages"
+    if packages.is_dir():
+        allowed += [f"(subpath {_sbpl(p)})" for p in _forms([packages])]
+    allowed += ['(literal "/dev/null")', '(literal "/dev/tty")']
+    pinned = [_rx(form, r"(\.lock)?") for form in _forms([worktree / ".git", admin / "gitdir", admin / "commondir",
+                                                            admin / "config.worktree"])]
     deny = " ".join(f"(subpath {_sbpl(p)})" for p in denied_paths(cfg, real_home))
-    subpaths, files = write_denied(cfg, real_home)
-    no_write = " ".join([f"(subpath {_sbpl(p)})" for p in subpaths] + [f"(literal {_sbpl(p)})" for p in files])
-    git_dir = os.path.realpath(cfg.checkout / ".git")
-    worktree_config = f'(regex #"^{re.escape(git_dir)}/worktrees/[^/]+/config\\.worktree$")'
-    allow = " ".join(f"(subpath {_sbpl(p)})" for p in _forms(writable))
     return ("(version 1)\n(allow default)\n"
-            f"(deny file-write* {no_write} {worktree_config})\n"
-            + (f"(allow file-write* {allow})\n" if allow else "")
-            + f"(deny file-read* file-write* {deny})\n"
+            "(deny file-write*)\n"
+            f"(allow file-write* {' '.join(allowed)})\n"
+            f"(deny file-write* {' '.join(pinned)})\n"
+            f"(deny file-read* file-write* {deny})\n"
             # deny, then allow the session's own sandbox: `(target others)` alone is not enforced on this macOS
             # (a probe still read the lane's pids); this form is, and it keeps a session's own children readable
             # (dotnet's test host watches them)
@@ -224,11 +226,12 @@ def sandboxed(command: list, profile: pathlib.Path) -> list:
     return [SANDBOX_EXEC, "-f", str(profile), *command]
 
 
-def write_profile(cfg: common.Config, scratch: pathlib.Path, real_home: pathlib.Path | None = None,
-                  writable=()) -> pathlib.Path:
+def write_profile(cfg: common.Config, scratch: pathlib.Path, real_home: pathlib.Path | None = None, *,
+                  worktree: pathlib.Path, branch: str | None = None) -> pathlib.Path:
     path = scratch / "session.sb"
     try:
-        path.write_text(sandbox_profile(cfg, real_home, writable), encoding="utf-8")
+        path.write_text(sandbox_profile(cfg, real_home, scratch=scratch, worktree=worktree, branch=branch),
+                        encoding="utf-8")
     except OSError as exc:
         raise HarnessError(f"the sandbox profile {path} could not be written ({exc.__class__.__name__}: {exc})") from exc
     return path
@@ -245,6 +248,7 @@ def argv(cfg: common.Config, model: str, session_dir: pathlib.Path, session_id: 
 
 def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, prompt: str, scratch: pathlib.Path,
                 log_path: pathlib.Path, extra_env: dict | None = None, on_tick: Callable[[], None] | None = None,
+                branch: str | None = None,
                 on_start: Callable[[int, str], None] | None = None, tick: float = 30.0) -> Outcome:
     """Run Pi to completion in `worktree`, killing it when its event stream stalls or it passes the hard cap.
 
@@ -257,7 +261,7 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
     session_id = f"{worktree.name}-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
     env = session_env(cfg, scratch, extra_env)
     command = sandboxed(argv(cfg, model, scratch / "sessions", session_id, prompt),
-                        write_profile(cfg, scratch, writable=(scratch, worktree)))
+                        write_profile(cfg, scratch, worktree=worktree, branch=branch))
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         out_file = log_path.open("ab")
