@@ -428,6 +428,7 @@ class DriveTests(RepoCase):
                 session.side_effect = lambda *a, **k: order.append(("session",)) or real(*a, **k)
                 worker.drive(self.cfg, 3, 77)
         self.assertEqual(order[:2], [("draft", "wt/issue-3", 77), ("session",)])
+        self.assertEqual(harness.rework_rounds(3, 77), 1, "a rework round is counted when it starts (#9)")
         self.assertIn("#77 is a draft again", (self.cfg.state / "logs" / "worker-3.log").read_text())
 
     def test_a_rework_that_keeps_adding_nothing_is_parked_on_its_pull_request(self) -> None:

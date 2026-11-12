@@ -44,11 +44,19 @@ class ComposeTests(unittest.TestCase):
         self.assertIn("#5 open 2d — changes requested", text)
         self.assertNotIn("#6 open", text)
 
+    def test_parked_cards_are_listed_with_why(self) -> None:
+        text = digest.compose(CFG, [], [], [], REQUIRED, NOW, {9: "reworks", 3: "idle"})
+        self.assertIn("Parked cards (2)", text)
+        self.assertIn("#3 — runs with no new commit", text)
+        self.assertIn("#9 — rework rounds used up", text)
+        self.assertLess(text.index("#3 —"), text.index("#9 —"))
+
     def test_a_quiet_day_says_so(self) -> None:
         text = digest.compose(CFG, [], [], [], REQUIRED, NOW)
         self.assertIn("Open PRs: none", text)
         self.assertIn("Merged in the last 24h (0): none", text)
         self.assertIn("Stuck more than a day: none", text)
+        self.assertIn("Parked cards: none", text)
 
 
 class ReadTests(unittest.TestCase):

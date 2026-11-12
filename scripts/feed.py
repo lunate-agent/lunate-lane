@@ -17,7 +17,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from scripts import cards, common, github, harness  # noqa: E402
+from scripts import cards, common, github, harness, worker  # noqa: E402
 from scripts.common import LaneError  # noqa: E402
 
 JOB = "feed"
@@ -62,6 +62,15 @@ def tick(dry_run: bool = False) -> None:
     for launch in launches:
         what = (f"rework of #{launch.rework_pr} for card #{launch.card} ({launch.reason})" if launch.rework_pr
                 else f"card #{launch.card}")
+        rounds = harness.rework_rounds(launch.card, launch.rework_pr) if launch.rework_pr else 0
+        if rounds >= harness.REWORK_LIMIT:  # the cap holds whatever the cause (#9)
+            if dry_run:
+                common.log(JOB, f"would park card #{launch.card} instead of a {what} — {rounds} rework rounds")
+                continue
+            if harness.park(launch.card, "reworks"):
+                worker.park(cfg, launch.card, launch.rework_pr, "reworks", rounds)
+            common.log(JOB, f"parked card #{launch.card} after {rounds} rework rounds on #{launch.rework_pr}")
+            continue
         if dry_run:
             common.log(JOB, f"would start {what}")
             continue

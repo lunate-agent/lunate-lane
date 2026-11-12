@@ -222,7 +222,9 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
     if rework_pr:
         # back to draft before the session: CI's heavy legs and the reviewer wait for the clean finish (#5)
         open_pr.return_to_draft(f"wt/issue-{number}", rework_pr)
-        common.log(job, f"#{rework_pr} is a draft again for the rework, auto-merge off")
+        rounds = harness.note_rework(number, rework_pr)
+        common.log(job, f"#{rework_pr} is a draft again for rework round {rounds} of {harness.REWORK_LIMIT}, "
+                        "auto-merge off")
     scratch = common.state_dir("scratch", f"issue-{number}")
     pr_file = scratch / "pr-number"
     pr_file.unlink(missing_ok=True)
@@ -264,7 +266,7 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
     if dispatch_card._count(worktree, f"wt/issue-{number}") == 0:
         common.log(job, "the session ended with no commits — no pull request. " + "; ".join(found))
         if parked_now:
-            park(cfg, number, number, idle)
+            park(cfg, number, number, "idle", idle)
         return 1
     result = dispatch_card.dispatch(worktree, number, arm=not found)
     head = common.git(worktree, "rev-parse", "HEAD")[:9]
@@ -285,18 +287,27 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
     common.log(job, f"#{result['number']} pushed at {head}, auto-merge {result['auto_merge']}{method}"
                + (f" — {'; '.join(found)}" if found else ""))
     if parked_now:
-        park(cfg, number, result["number"], idle)
+        park(cfg, number, result["number"], "idle", idle)
     return 1 if found else 0
 
 
-def park(cfg: common.Config, card: int, target: int, idle: int) -> None:
-    """Say, on the pull request (or the issue when there is none), that the lane stops relaunching this card."""
+PARK_WHY = {
+    "idle": "{n} worker runs in a row ended with no new commit (cap: {cap})",
+    "reworks": "it went back to a worker {n} times (cap: {cap}) and is still not ready",
+}
+
+
+def park(cfg: common.Config, card: int, target: int, why: str, n: int = 0, detail: str = "") -> None:
+    """Say, once, on the pull request (or the issue when there is none), that the lane stops working this card."""
     record = cfg.state / "attempts" / f"{card}.json"
+    cap = harness.IDLE_RUN_LIMIT if why == "idle" else harness.REWORK_LIMIT
+    reason = PARK_WHY[why].format(n=n, cap=cap) if why in PARK_WHY else detail
     open_pr.comment(target, (
-        f"**Lane: card #{card} is parked.** {idle} worker runs in a row ended with no new commit, so the feeder "
-        f"will not start it again (cap: {harness.IDLE_RUN_LIMIT}). It needs a person: split or clarify the card, "
-        f"or push a fix. To let the lane pick it up again, delete `{record}` on the lane host."))
-    common.log(f"worker-{card}", f"parked after {idle} idle runs — commented on #{target}")
+        f"**Lane: card #{card} is parked.** {reason[:1].upper() + reason[1:]}, so the feeder will not start or "
+        f"rework it again. It needs a person: split or clarify the card, or push a fix. To let the lane pick it up "
+        f"again, delete `{record}` on the lane host."))
+    label = {"idle": f"after {n} idle runs", "reworks": f"after {n} rework rounds"}.get(why, f"({why})")
+    common.log(f"worker-{card}", f"parked {label} — commented on #{target}")
 
 
 def main() -> int:

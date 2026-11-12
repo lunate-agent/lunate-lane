@@ -33,6 +33,44 @@ class FeedTests(unittest.TestCase):
             patch.stop()
         self.state.close()
 
+    def test_a_fourth_rework_parks_the_card_with_one_comment_instead(self) -> None:
+        """#9: three rework rounds on #50, whatever their cause; the fourth is a park, said once."""
+        from scripts import open_pr
+
+        for _ in range(3):
+            harness.note_rework(9, 50)
+        comments = []
+        with mock.patch.object(open_pr, "comment", side_effect=lambda n, body: comments.append((n, body))):
+            self.assertEqual(feed.main(), 0)
+            self.assertEqual(feed.main(), 0)
+        self.assertNotIn(50, [l.rework_pr for l in self.started])
+        self.assertEqual(harness.parked_details(), {9: "reworks"})
+        self.assertEqual(len(comments), 1)
+        self.assertEqual(comments[0][0], 50)
+        self.assertIn("went back to a worker 3 times (cap: 3)", comments[0][1])
+        self.assertIn("attempts/9.json", comments[0][1])
+        log = (self.state.cfg.state / "logs" / "feed.log").read_text()
+        self.assertIn("parked card #9 after 3 rework rounds on #50", log)
+        self.assertIn("#50 needs rework (changes requested) but card #9 is parked", log)
+        (self.state.cfg.state / "attempts" / "9.json").unlink()  # a person unparks it
+        self.started.clear()
+        feed.main()
+        self.assertIn(50, [l.rework_pr for l in self.started])
+
+    def test_a_dry_run_only_says_it_would_park(self) -> None:
+        for _ in range(3):
+            harness.note_rework(9, 50)
+        with mock.patch.object(sys, "argv", ["feed.py", "--dry-run"]):
+            self.assertEqual(feed.main(), 0)
+        self.assertEqual(harness.parked_details(), {})
+        self.assertIn("would park card #9 instead of a rework of #50", (self.state.cfg.state / "logs" / "feed.log").read_text())
+
+    def test_two_rework_rounds_still_rework(self) -> None:
+        for _ in range(2):
+            harness.note_rework(9, 50)
+        feed.main()
+        self.assertIn(50, [l.rework_pr for l in self.started])
+
     def test_a_stuck_pull_request_is_reworked_and_the_log_says_why(self) -> None:
         github.pull.return_value = pull(50, 9, mergeable="CONFLICTING")
         with mock.patch.object(sys, "argv", ["feed.py", "--dry-run"]):

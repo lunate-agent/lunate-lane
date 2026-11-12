@@ -55,10 +55,13 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    - **limits**: total WIP ≤ `wip_limit`, where WIP is the cards in flight — each open worker pull request plus
      each running worker, a worker and its own pull request counted once — and at most one card in flight per
      `area/*` label. A card without an area label has no area limit.
-   - **parked cards**: a card whose worker runs ended with no new commit three times in a row (new card or
-     rework) is parked. The feeder no longer starts or reworks it, its open pull request still counts toward
-     WIP, and the run that parked it says so in a comment on the pull request (on the issue if there is none). A
-     new commit resets the count. To give a parked card back to the lane, delete `<state>/attempts/<card>.json`.
+   - **parked cards**: a card is parked when its worker runs ended with no new commit three times in a row (new
+     card or rework), or when one pull request has gone back to a worker three times, whatever the causes — the
+     feeder parks it instead of starting a fourth rework. The feeder no longer starts or reworks a parked card, its
+     open pull request still counts toward WIP, the run that parked it says so once in a comment on the pull
+     request (on the issue if there is none), and the digest lists it. A new commit resets the idle-run count (and
+     lifts an idle park) but not the rework rounds. To give a parked card back to the lane, delete
+     `<state>/attempts/<card>.json`; that clears both counts.
 2. **Worker** (`scripts/worker.py --issue N [--rework PR]`, started detached by the feeder). Cuts or continues
    the worktree `<state>/worktrees/issue-N` of the checkout on `wt/issue-N`, renders `templates/worker-brief.md`
    with the issue body, and runs one Pi session on the worker model. The session has no GitHub credential; the

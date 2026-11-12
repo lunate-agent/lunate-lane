@@ -15,7 +15,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from scripts import common, github  # noqa: E402
+from scripts import common, github, harness  # noqa: E402
 from scripts.common import GhError  # noqa: E402
 
 JOB = "digest"
@@ -57,8 +57,12 @@ def age_days(created: str, now: datetime.datetime) -> float:
     return (now - opened).total_seconds() / 86400
 
 
+PARKED_WHY = {"idle": "runs with no new commit", "reworks": "rework rounds used up",
+              "secret": "secret-shaped text in a push"}
+
+
 def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required: frozenset,
-            now: datetime.datetime) -> str:
+            now: datetime.datetime, parked: dict | None = None) -> str:
     lines = [f"Lunate lane — {now:%Y-%m-%d}", f"{cfg.milestone}: {len(cards)} open issue(s)"]
     lines.append(f"Open PRs ({len(pulls)}):" if pulls else "Open PRs: none")
     states = {p.number: pull_state(p, required, cfg.reviewer_app) for p in pulls}
@@ -69,6 +73,11 @@ def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required
     lines.append(f"Stuck more than a day ({len(stuck)}):" if stuck else "Stuck more than a day: none")
     for p in sorted(stuck, key=lambda p: p.created):
         lines.append(f"  #{p.number} open {age_days(p.created, now):.0f}d — {states[p.number]}")
+    parked = parked or {}
+    lines.append(f"Parked cards ({len(parked)}) — delete <state>/attempts/<card>.json to unpark:" if parked
+                 else "Parked cards: none")
+    for number in sorted(parked):
+        lines.append(f"  #{number} — {PARKED_WHY.get(parked[number], parked[number])}")
     return "\n".join(lines)
 
 
@@ -79,7 +88,7 @@ def tick() -> None:
     cards = github.milestone_cards(cfg)
     pulls = [github.pull(cfg, p.number) for p in github.open_pulls(cfg)]
     merged = merged_since(cfg, now - datetime.timedelta(days=1))
-    message = compose(cfg, cards, pulls, merged, required, now)
+    message = compose(cfg, cards, pulls, merged, required, now, harness.parked_details())
     (common.state_dir("digest") / "latest.md").write_text(message + "\n", encoding="utf-8")
     print(message)
 

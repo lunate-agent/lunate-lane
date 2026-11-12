@@ -415,9 +415,11 @@ def running_workers() -> dict:
     return found
 
 
-# --- idle runs: a card whose runs leave no new commit is parked after IDLE_RUN_LIMIT of them ---
+# --- attempts: a card is parked after IDLE_RUN_LIMIT runs with no new commit, or after REWORK_LIMIT rework rounds
+#     on one pull request (#9). Deleting <state>/attempts/<card>.json unparks it and clears both counts.
 
 IDLE_RUN_LIMIT = 3
+REWORK_LIMIT = 3
 
 
 def _attempts(card: int) -> pathlib.Path:
@@ -426,36 +428,84 @@ def _attempts(card: int) -> pathlib.Path:
 
 def _read_attempts(path: pathlib.Path) -> dict:
     if not path.exists():
-        return {"idle_runs": 0, "parked": False}
+        return {"idle_runs": 0, "parked": False, "reason": "", "reworks": {}}
     try:
         data = json.loads(path.read_text())
-        return {"idle_runs": int(data["idle_runs"]), "parked": bool(data["parked"])}
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+        return {"idle_runs": int(data["idle_runs"]), "parked": bool(data["parked"]),
+                "reason": str(data.get("reason") or ""),
+                "reworks": {str(int(k)): int(v) for k, v in (data.get("reworks") or {}).items()}}
+    except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise StateError(f"the attempts record {path} could not be read: {exc}") from exc
 
 
-def note_run(card: int, new_commit: bool) -> tuple[int, bool]:
-    """Count a finished run: a new commit resets the count, none adds one. Returns (idle runs, parked just now)."""
-    path = _attempts(card)
-    data = _read_attempts(path)
-    if new_commit:
-        path.unlink(missing_ok=True)
-        return 0, False
-    idle = data["idle_runs"] + 1
-    parked = idle >= IDLE_RUN_LIMIT
+def _write_attempts(path: pathlib.Path, data: dict) -> None:
+    if not data["idle_runs"] and not data["parked"] and not data["reworks"]:
+        try:
+            path.unlink(missing_ok=True)
+        except OSError as exc:
+            raise StateError(f"the attempts record {path} could not be removed: {exc}") from exc
+        return
     tmp = path.with_suffix(".tmp")
     try:
-        tmp.write_text(json.dumps({"idle_runs": idle, "parked": parked, "updated": time.time()}))
+        tmp.write_text(json.dumps({**data, "updated": time.time()}))
         os.replace(tmp, path)
     except OSError as exc:
         raise StateError(f"the attempts record {path} could not be written: {exc}") from exc
-    return idle, parked and not data["parked"]
+
+
+def note_run(card: int, new_commit: bool) -> tuple[int, bool]:
+    """Count a finished run: a new commit resets the idle count (and lifts an idle park), none adds one. Rework
+    rounds are kept. Returns (idle runs, parked just now)."""
+    path = _attempts(card)
+    data = _read_attempts(path)
+    if new_commit:
+        data["idle_runs"] = 0
+        if data["parked"] and data["reason"] == "idle":
+            data["parked"], data["reason"] = False, ""
+        _write_attempts(path, data)
+        return 0, False
+    data["idle_runs"] += 1
+    parked_now = data["idle_runs"] >= IDLE_RUN_LIMIT and not data["parked"]
+    if parked_now:
+        data["parked"], data["reason"] = True, "idle"
+    _write_attempts(path, data)
+    return data["idle_runs"], parked_now
+
+
+def note_rework(card: int, pr: int) -> int:
+    """Count one rework round started on this pull request; returns the rounds so far, this one included."""
+    path = _attempts(card)
+    data = _read_attempts(path)
+    data["reworks"][str(int(pr))] = data["reworks"].get(str(int(pr)), 0) + 1
+    _write_attempts(path, data)
+    return data["reworks"][str(int(pr))]
+
+
+def rework_rounds(card: int, pr: int) -> int:
+    return _read_attempts(_attempts(card))["reworks"].get(str(int(pr)), 0)
+
+
+def park(card: int, reason: str) -> bool:
+    """Park the card for `reason` ('idle', 'reworks', 'secret'). Returns whether it was parked just now."""
+    path = _attempts(card)
+    data = _read_attempts(path)
+    if data["parked"]:
+        return False
+    data["parked"], data["reason"] = True, reason
+    _write_attempts(path, data)
+    return True
+
+
+def parked_details() -> dict:
+    """card -> why it is parked, for every parked card."""
+    found = {}
+    for path in _listing(common.state_dir("attempts")):
+        data = _read_attempts(path)
+        if data["parked"]:
+            found[int(path.stem)] = data["reason"] or "idle"
+    return found
 
 
 def parked_cards() -> frozenset:
     """Cards the feeder must not start again until a person deletes their attempts record."""
-    found = set()
-    for path in _listing(common.state_dir("attempts")):
-        if _read_attempts(path)["parked"]:
-            found.add(int(path.stem))
-    return frozenset(found)
+    return frozenset(parked_details())

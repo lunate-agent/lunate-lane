@@ -311,6 +311,29 @@ class WorkerRecordTests(HarnessCase):
         with self.assertRaises(StateError):
             harness.note_session(5, 222, 333, "issue-5-x")
 
+    def test_rework_rounds_are_counted_per_pull_request_and_survive_a_new_commit(self) -> None:
+        self.assertEqual([harness.note_rework(3, 77) for _ in range(2)], [1, 2])
+        harness.note_rework(3, 78)
+        harness.note_run(3, True)
+        self.assertEqual((harness.rework_rounds(3, 77), harness.rework_rounds(3, 78)), (2, 1))
+
+    def test_a_rework_park_holds_through_a_new_commit_and_an_idle_park_does_not(self) -> None:
+        self.assertTrue(harness.park(3, "reworks"))
+        self.assertFalse(harness.park(3, "reworks"), "parked once, not again")
+        harness.note_run(3, True)
+        self.assertEqual(harness.parked_details(), {3: "reworks"})
+        for _ in range(3):
+            harness.note_run(4, False)
+        self.assertEqual(harness.parked_details(), {3: "reworks", 4: "idle"})
+        harness.note_run(4, True)
+        self.assertEqual(harness.parked_details(), {3: "reworks"})
+
+    def test_deleting_the_attempts_record_unparks_and_clears_the_counts(self) -> None:
+        harness.note_rework(3, 77)
+        harness.park(3, "reworks")
+        (self.cfg.state / "attempts" / "3.json").unlink()
+        self.assertEqual((harness.parked_cards(), harness.rework_rounds(3, 77)), (frozenset(), 0))
+
     def test_an_unreadable_attempts_record_raises_rather_than_reading_as_not_parked(self) -> None:
         (self.cfg.state / "attempts").mkdir(parents=True, exist_ok=True)
         (self.cfg.state / "attempts" / "5.json").write_text("{")
