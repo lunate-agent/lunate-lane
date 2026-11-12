@@ -14,6 +14,7 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
+import re
 import subprocess
 
 try:  # imported as scripts.dispatch_card by the tests, or run as a script
@@ -71,11 +72,41 @@ def branch_for(repo: pathlib.Path, number: int) -> str:
         raise CardError(f"the branch check did not finish ({exc.__class__.__name__})") from exc
     if exists.returncode != 0:
         raise CardError(f"#{number} has no local branch {name!r} in {repo}")
-    ahead = subprocess.run(["git", "rev-list", "--count", f"main..{name}"],
-                           capture_output=True, text=True, cwd=str(repo), timeout=60)
-    if (ahead.stdout or "").strip() in ("", "0"):
-        raise CardError(f"#{number}'s branch {name!r} has no commits ahead of main — nothing to open")
+    ahead = _count(repo, name)
+    if ahead == 0:
+        raise CardError(f"#{number}'s branch {name!r} has no commits ahead of {BASE} — nothing to open")
     return name
+
+
+BASE = "origin/main"
+
+
+def _count(repo: pathlib.Path, name: str) -> int:
+    """How many commits `name` is ahead of the base. An unreadable answer is a refusal, not a zero.
+
+    Rule one: if git cannot say, this does not decide. A missing base ref makes `rev-list` fail and print
+    nothing, which would otherwise read as "nothing to open" — the right answer is that we do not know.
+    """
+    try:
+        done = subprocess.run(
+            ["git", "rev-list", "--count", f"{BASE}..{name}"],
+            capture_output=True, text=True, cwd=str(repo), timeout=60,
+        )
+    except OSError as exc:
+        raise CardError(f"git could not be run in {repo} ({exc.__class__.__name__})") from exc
+    except subprocess.SubprocessError as exc:
+        raise CardError(f"counting commits ahead of {BASE} did not finish ({exc.__class__.__name__})") from exc
+    if done.returncode != 0:
+        tail = ((done.stderr or "") + (done.stdout or "")).strip()[:160]
+        raise CardError(f"git could not count commits ahead of {BASE} in {repo}: {tail or 'no output'}")
+    raw = (done.stdout or "").strip()
+    if not raw.isdigit():
+        raise CardError(f"git answered {raw!r} when counting commits ahead of {BASE} — refusing to decide")
+    return int(raw)
+
+
+CLOSING_KEYWORDS = re.compile(r"\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b(\s+)([\w.-]+/[\w.-]+)?#(\d+)",
+                              re.IGNORECASE)
 
 
 def body_for(data: dict) -> str:
@@ -87,7 +118,8 @@ def body_for(data: dict) -> str:
     closes = f"Closes #{data['number']}"
     milestone = (data.get("milestone") or {}).get("title")
     head = closes + (f" · milestone {milestone}" if milestone else "")
-    issue_text = (data.get("body") or "(the issue states no body)").replace("Closes #", "Closes \\#")
+    issue_text = CLOSING_KEYWORDS.sub(lambda m: f"{m.group(1)}{m.group(2)}{m.group(3) or ''}\\#{m.group(4)}",
+                                      data.get("body") or "(the issue states no body)")
     if len(issue_text) > 8000:
         issue_text = issue_text[:8000] + "\n…truncated; the issue holds the rest."
     return f"{head}\n\n{issue_text}\n"

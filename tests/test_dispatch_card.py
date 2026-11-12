@@ -21,6 +21,8 @@ class CardTests(unittest.TestCase):
         (self.repo / "seed.txt").write_text("seed\n")
         subprocess.run(["git", "add", "seed.txt"], cwd=self._tmp, capture_output=True)
         subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=self._tmp, capture_output=True)
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"],
+                       cwd=self._tmp, capture_output=True)
         self.saved = (dispatch_card.gh, open_pr.open_pr)
 
     def tearDown(self) -> None:
@@ -82,6 +84,54 @@ class CardTests(unittest.TestCase):
         self.assertEqual(seen["title"], "Per-PR changelog fragments")
 
 
+class AheadAndBodyTests(unittest.TestCase):
+    """The ahead check refuses to decide when it cannot read, and the body defuses every closing keyword."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.mkdtemp(prefix="lane-ahead-")
+        self.repo = pathlib.Path(self._tmp)
+        for cmd in (["git", "init", "-q", "-b", "main"],
+                    ["git", "config", "user.email", "lane@example.invalid"],
+                    ["git", "config", "user.name", "lane test"]):
+            subprocess.run(cmd, cwd=self._tmp, capture_output=True)
+        (self.repo / "seed.txt").write_text("seed\n")
+        subprocess.run(["git", "add", "seed.txt"], cwd=self._tmp, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=self._tmp, capture_output=True)
+
+    def tearDown(self) -> None:
+        import shutil
+
+        shutil.rmtree(self._tmp, ignore_errors=True)
+
+    def test_a_missing_base_ref_is_refused_rather_than_read_as_zero(self) -> None:
+        subprocess.run(["git", "switch", "-q", "-c", "wt/issue-1"], cwd=self._tmp, capture_output=True)
+        with self.assertRaises(dispatch_card.CardError) as caught:
+            dispatch_card.branch_for(self.repo, 1)
+        self.assertIn("could not count commits ahead", str(caught.exception))
+        self.assertNotIn("no commits ahead", str(caught.exception))
+
+    def test_a_branch_with_nothing_ahead_of_the_base_is_refused(self) -> None:
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"], cwd=self._tmp, capture_output=True)
+        subprocess.run(["git", "switch", "-q", "-c", "wt/issue-1"], cwd=self._tmp, capture_output=True)
+        with self.assertRaises(dispatch_card.CardError) as caught:
+            dispatch_card.branch_for(self.repo, 1)
+        self.assertIn("no commits ahead", str(caught.exception))
+
+    def test_every_closing_keyword_is_defused_whatever_its_case(self) -> None:
+        text = ("Fixes #3 and closes #4, Resolves lunate-agent/lunate#5, fix #6, resolved #7, "
+                "plus a normal #8 mention")
+        body = dispatch_card.body_for({"number": 1, "body": text, "milestone": None})
+        for leaked in ("Fixes #3", "closes #4", "Resolves lunate-agent/lunate#5", "fix #6", "resolved #7"):
+            self.assertNotIn(leaked, body, f"{leaked!r} would close an issue on merge")
+        self.assertIn("Closes #1", body)
+        self.assertIn("a normal #8 mention", body)
+
+    def test_a_long_issue_body_is_truncated(self) -> None:
+        body = dispatch_card.body_for({"number": 1, "body": "x" * 9000, "milestone": None})
+        self.assertLess(len(body), 8300)
+        self.assertIn("truncated", body)
+
+
 class GhWrapperTests(unittest.TestCase):
     """The real read path: a non-zero gh, an unparseable answer, a card with no title, and main()'s exit."""
 
@@ -89,6 +139,16 @@ class GhWrapperTests(unittest.TestCase):
         self._tmp = tempfile.mkdtemp(prefix="lane-gh-")
         self.repo = pathlib.Path(self._tmp)
         self.saved = dispatch_card.subprocess.run
+        # a repository with a seed commit and a base ref, like the real checkout
+        for cmd in (["git", "init", "-q", "-b", "main"],
+                    ["git", "config", "user.email", "lane@example.invalid"],
+                    ["git", "config", "user.name", "lane test"]):
+            subprocess.run(cmd, cwd=self._tmp, capture_output=True)
+        (self.repo / "seed.txt").write_text("seed\n")
+        subprocess.run(["git", "add", "seed.txt"], cwd=self._tmp, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "seed"], cwd=self._tmp, capture_output=True)
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"],
+                       cwd=self._tmp, capture_output=True)
 
     def tearDown(self) -> None:
         dispatch_card.subprocess.run = self.saved
@@ -142,16 +202,37 @@ class GhWrapperTests(unittest.TestCase):
         self.assertIn("no title", str(caught.exception))
 
     def test_main_returns_one_and_names_the_failure(self) -> None:
+        """The whole way through: a real branch, then gh failing, and main() reporting it by name."""
         import contextlib
         import io
+        from unittest import mock
 
-        dispatch_card.subprocess.run = lambda *a, **k: self._result(stderr="boom", returncode=1)
-        sys.argv = ["dispatch_card.py", "--repo", self._tmp, "--issue", "794"]
+        saved = sys.argv
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "HEAD"],
+                       cwd=self._tmp, capture_output=True)
+        subprocess.run(["git", "switch", "-q", "-c", "wt/issue-794"], cwd=self._tmp, capture_output=True)
+        (self.repo / "work.txt").write_text("work\n")
+        subprocess.run(["git", "add", "work.txt"], cwd=self._tmp, capture_output=True)
+        subprocess.run(["git", "commit", "-q", "-m", "work"], cwd=self._tmp, capture_output=True)
+
+        real_run = subprocess.run
+
+        def gh_fails(argv_list, **kwargs):
+            if argv_list and argv_list[0] == "gh":
+                return self._result(stderr="not authenticated", returncode=1)
+            return real_run(argv_list, **kwargs)
+
         buffer = io.StringIO()
-        with contextlib.redirect_stdout(buffer):
-            code = dispatch_card.main()
+        sys.argv = ["dispatch_card.py", "--repo", self._tmp, "--issue", "794"]
+        try:
+            with mock.patch.object(dispatch_card.subprocess, "run", side_effect=gh_fails):
+                with contextlib.redirect_stdout(buffer):
+                    code = dispatch_card.main()
+        finally:
+            sys.argv = saved
         self.assertEqual(code, 1)
         self.assertIn("FAILED —", buffer.getvalue())
+        self.assertIn("not authenticated", buffer.getvalue())
 
 
 if __name__ == "__main__":

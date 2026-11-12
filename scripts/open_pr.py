@@ -161,9 +161,7 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
     """
     token = _worker_token()
 
-    # push first: a re-dispatch usually carries new commits, and reuse must still deliver them
-    push(repo, branch, token)
-
+    # the author is checked before the push: never overwrite a branch whose PR belongs to someone else
     existing = find_open_pr(branch, token)
     if existing:
         number = existing.get("number")
@@ -172,10 +170,13 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
             raise OpenPrError(
                 f"#{number} is already open for {branch!r} but authored by {author!r}, not {WORKER_LOGIN}"
             )
+        # a re-dispatch usually carries new commits, and reuse must deliver them
+        push(repo, branch, token)
         arm_auto_merge(token, existing.get("node_id"))
         return {"number": number, "url": existing.get("html_url"), "author": author,
                 "auto_merge": "armed", "reused": True}
 
+    push(repo, branch, token)
     try:
         pull = _api(
             token,
