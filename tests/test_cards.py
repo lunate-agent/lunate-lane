@@ -295,6 +295,12 @@ class OrphanTests(unittest.TestCase):
 
 
 class NeedsPersonPlanTests(unittest.TestCase):
+    def test_818s_review_mentioning_needs_person_is_a_rework_not_a_park(self) -> None:
+        body = ("Add `changes/818.md` as above; this is a worker-fixable omission, not a `NEEDS-PERSON` item.")
+        launch = plan([], worker_pulls=[pull(818, 749, reviews=[review("CHANGES_REQUESTED", body=body)])])[0][0]
+        self.assertEqual((launch.card, launch.rework_pr, launch.reason, launch.person),
+                         (749, 818, "changes requested", None))
+
     def test_a_request_for_changes_that_says_needs_person_is_a_park_not_a_rework(self) -> None:
         body = "1. not met.\n\nNEEDS-PERSON: check 3 can only be evidenced by a real release"
         p = pull(813, 794, reviews=[review("CHANGES_REQUESTED", body=body)])

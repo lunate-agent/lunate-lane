@@ -582,6 +582,17 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
             **_settle(token, number, pull.get("node_id"), arm, base, head), "reused": False}
 
 
+def disarm(number: int, node_id: str) -> None:
+    """Turn auto-merge off on an armed pull request whose card waits on an open issue, as the worker identity, and
+    read it back. It stays ready; the feeder re-arms it once it is approved after the blockers close."""
+    token = _worker_token()
+    if not pr_state(token, node_id)["armed"]:
+        return
+    disarm_auto_merge(token, node_id)
+    if pr_state(token, node_id)["armed"]:
+        raise OpenPrError(f"#{number}'s auto-merge still reads as on after turning it off")
+
+
 def rearm(number: int, node_id: str, base: str) -> dict:
     """Arm a ready, approved pull request that is not armed, with the queue's method, and read it back."""
     token = _worker_token()

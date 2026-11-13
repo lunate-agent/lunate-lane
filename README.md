@@ -76,6 +76,10 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      GitHub's native blocked-by is the only blocking mechanism, there is no blocking label; so is a card any open
      pull request (any author) already carries or closes. An issue labelled **`kind/decision`** (`labels.decision`)
      is a question for a maintainer, not work: it is never started, and the digest lists it under "Waiting on you".
+     A pull request whose card has an open blocked-by issue (a slice started before its predecessor — S3 #820 and
+     S4 #825 before S1 #818) is **not reviewed, not armed and not re-armed**: the worker leaves it unarmed at its
+     finish, the feeder turns auto-merge off on one already armed, and the digest shows it as "waits on #n". Once the
+     blockers close it is reviewed, and re-armed when approved.
      A maintainer answers it in a comment that starts with **`Decision:`** and closes it; the worker and reviewer
      briefs of every card it blocked then carry that comment verbatim, in case the card text was not updated.
    - **limits**: total WIP ≤ `wip_limit`, where WIP is the cards in flight — each open worker pull request plus
@@ -94,10 +98,13 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
 
          .venv/bin/python scripts/lane.py status 794                  # worker, idle runs, rework rounds, parked and why
          .venv/bin/python scripts/lane.py park 794 --reason "waits on the API decision"
-         .venv/bin/python scripts/lane.py unpark 794                  # unparked, both counts cleared
+         .venv/bin/python scripts/lane.py unpark 794 --reason "decided in #820"   # unparked, both counts cleared
 
      Park and unpark take the feeder's lock (refused while a tick runs — try again in a minute); unpark is
-     refused while a worker runs the card. A card parked by hand shows in the digest as "parked by hand" with
+     refused while a worker runs the card. Both need a `--reason` and write a line to `<state>/logs/lane.log`
+     with the time, who ran it (login, `$LANE_ACTOR` if set, parent process, terminal or not) and the reason. A
+     park lifted any other way (its attempts record edited or removed by hand) is named in `feed.log` at the
+     next tick. A card parked by hand shows in the digest as "parked by hand" with
      its reason.
    - **re-arming**: a worker pull request that is ready, approved at its head, green, not conflicting, neither
      queued nor armed — the state a clean finish leaves when arming fails after it was marked ready, or a person's
@@ -117,7 +124,10 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    with the issue body (and the `Decision:` comment of each closed `kind/decision` issue that blocked it), and runs one Pi session on the worker model. The session has no GitHub credential; the
    lane pushes. At the branch's first commit the pull request is opened **as a draft**, without auto-merge (so
    the worker can name its `changes/<pr>.md` fragment, and Lunate's CI skips its heavy legs on work still being
-   written); when the session ends with commits the branch is pushed again, the session's final report is posted
+   written); when the session ends with commits the branch is pushed again (never forced: a session that amended
+   or rebased a commit the early open already pushed — #819 — has the pushed commit recorded as merged with its
+   own tree kept, `-s ours`, when the commit is in the branch's reflog; someone else's commits are merged
+   normally, and a conflict there is a named failure; the worktree setup of a relaunch does the same), the session's final report is posted
    on the pull request, and — only if the run was clean (exit 0, not stalled, nothing uncommitted, a new commit, a
    real final message) — the pull request is marked ready and then auto-merge is armed. Otherwise it stays a draft
    with auto-merge off, with a comment naming why, and the next feeder tick relaunches it as an orphaned draft. A
@@ -156,7 +166,12 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    worker's, and the posted review names the model it ran on — in a detached worktree at the head, with the diff and the issue in `templates/review-brief.md`. The
    brief also carries the other open pull requests on the same capabilities and the worker's session report: the
    reviewer compares the spec delta with main's spec and with theirs, and checks the worker's **Intent
-   decisions** (the grill-me questions it answered itself). The worker's brief says a conflict in
+   decisions** (the grill-me questions it answered itself). It requests changes **only for a blocking finding**: an
+   acceptance check not met, a behaviour or spec defect, a red or missing required gate, a missing changelog
+   fragment or archive, an OpenSpec lifecycle violation. Everything else — wording, style, the pull request's
+   description, suggestions — goes under **Non-blocking** in an approval. Test evidence is CI's: the reviewer
+   never asks the worker which tests it ran. A **`NEEDS-PERSON:`** line counts only at the start of a line, in a
+   review or a worker's report; a mention inside a sentence is not one. The worker's brief says a conflict in
    `openspec/specs/**` is resolved by reverting the archive commit, merging `origin/main` and re-archiving, never
    by hand. The
    session writes a JSON verdict; the lane re-reads the pull request and, only if it is still open at the same
@@ -173,7 +188,8 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    and green but still need a maintainer's or code owner's approval (the bot approved the head, or it carries no
    card), and a card still open after the pull request closing it merged. Then: open issues in the milestone; WIP against its limit, with what is in flight (as the feeder counts it); every open
    pull request with its state; what is stuck and why (a worker pull request that is red, conflicting or out of
-   the merge queue, and any pull request open for more than a day); the parked cards and why; and what merged
+   the merge queue, any pull request open for more than a day, and a card whose last worker run failed by name
+   before its session could end — "worker died: <reason>", also in `lane.py status`); the parked cards and why; and what merged
    since yesterday, with titles.
 
 ## Files

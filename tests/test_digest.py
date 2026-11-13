@@ -156,3 +156,20 @@ class WaitingOnYouTests(unittest.TestCase):
     def test_a_parked_card_frees_its_wip_slot_in_the_digest_too(self) -> None:
         text = digest.compose(CFG, [], [pull(813, 794), pull(815, 804)], [], REQUIRED, NOW, {794: ("person", "x")})
         self.assertIn("WIP 1 of 5: #815 (card #804)", text)
+
+
+class WorkerDiedTests(unittest.TestCase):
+    def test_a_worker_that_died_by_name_is_stuck_with_its_reason_until_one_runs_again(self) -> None:
+        died = {817: "git -c core.fsmonitor=false failed (128): hint: Diverging branches can't be fast-forwarded"}
+        text = digest.compose(CFG, [], [], [], REQUIRED, NOW, {817: ("reworks", "")}, died=died)
+        self.assertIn("Stuck (1):", text)
+        self.assertIn("  card #817 — worker died: git -c core.fsmonitor=false failed (128): hint: Diverging", text)
+        running = digest.compose(CFG, [], [], [], REQUIRED, NOW, {}, {817: frozenset()}, died=died)
+        self.assertNotIn("worker died", running, "a worker on it again is not stuck")
+
+
+class WaitsOnDigestTests(unittest.TestCase):
+    def test_a_pull_request_whose_card_waits_says_so(self) -> None:
+        self.assertEqual(state(pull(825, 752, draft=True, waits_on=(749,))), "waits on #749")
+        self.assertEqual(state(pull(820, 751, auto_merge=True, waits_on=(749, 750))),
+                         "waits on #749, #750 (auto-merge still armed)")

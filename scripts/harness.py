@@ -623,7 +623,9 @@ def prune_reruns(open_prs) -> int:
 
 
 # --- attempts: a card is parked after IDLE_RUN_LIMIT runs with no new commit, or after REWORK_LIMIT rework rounds
-#     on one pull request (#9). `scripts/lane.py unpark <card>` unparks it and clears both counts.
+#     on one pull request (#9). `scripts/lane.py unpark <card> --reason ...` unparks it and clears both counts.
+#     The feeder keeps last tick's parked set (`<state>/parked-seen.json`) and the cards the lane itself unparked
+#     since (`<state>/unparked.json`): a park that vanished any other way was lifted by hand, and is logged.
 
 IDLE_RUN_LIMIT = 3
 REWORK_LIMIT = 3
@@ -635,18 +637,19 @@ def _attempts(card: int) -> pathlib.Path:
 
 def _read_attempts(path: pathlib.Path) -> dict:
     if not path.exists():
-        return {"idle_runs": 0, "parked": False, "reason": "", "detail": "", "reworks": {}}
+        return {"idle_runs": 0, "parked": False, "reason": "", "detail": "", "reworks": {}, "died": ""}
     try:
         data = json.loads(path.read_text())
         return {"idle_runs": int(data["idle_runs"]), "parked": bool(data["parked"]),
                 "reason": str(data.get("reason") or ""), "detail": str(data.get("detail") or ""),
-                "reworks": {str(int(k)): int(v) for k, v in (data.get("reworks") or {}).items()}}
+                "reworks": {str(int(k)): int(v) for k, v in (data.get("reworks") or {}).items()},
+                "died": str(data.get("died") or "")}
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise StateError(f"the attempts record {path} could not be read: {exc}") from exc
 
 
 def _write_attempts(path: pathlib.Path, data: dict) -> None:
-    if not data["idle_runs"] and not data["parked"] and not data["reworks"]:
+    if not data["idle_runs"] and not data["parked"] and not data["reworks"] and not data["died"]:
         try:
             path.unlink(missing_ok=True)
         except OSError as exc:
@@ -681,10 +684,12 @@ def note_run(card: int, new_commit: bool) -> tuple[int, bool]:
     Returns (idle runs, parked just now)."""
     path = _attempts(card)
     data = _read_attempts(path)
+    data["died"] = ""  # the session ran to its end: whatever killed an earlier run did not kill this one
     if new_commit:
         data["idle_runs"] = 0
         if data["parked"] and data["reason"] == "idle":
             data["parked"], data["reason"] = False, ""
+            _note_lifted(card)
         _write_attempts(path, data)
         return 0, False
     parked_now = data["idle_runs"] >= IDLE_RUN_LIMIT and not data["parked"]
@@ -705,6 +710,29 @@ def note_rework(card: int, pr: int) -> int:
 
 def rework_rounds(card: int, pr: int) -> int:
     return _read_attempts(_attempts(card))["reworks"].get(str(int(pr)), 0)
+
+
+DIED_LIMIT = 160
+
+
+def note_death(card: int, reason: str) -> None:
+    """A worker run that failed by name (its setup, its push, its finish): the first line of why, for the digest's
+    "worker died: <reason>" and `lane.py status`. Cleared when a later run's session reaches its end (note_run)."""
+    path = _attempts(card)
+    data = _read_attempts(path)
+    first = next((line.strip() for line in str(reason).splitlines() if line.strip()), "no reason given")
+    data["died"] = first[:DIED_LIMIT]
+    _write_attempts(path, data)
+
+
+def died_info() -> dict:
+    """card -> why its last worker run died, for every card whose last run died."""
+    found = {}
+    for path in _listing(common.state_dir("attempts")):
+        data = _read_attempts(path)
+        if data["died"]:
+            found[int(path.stem)] = data["died"]
+    return found
 
 
 def park(card: int, reason: str, detail: str = "") -> bool:
@@ -737,14 +765,51 @@ def attempts(card: int) -> dict:
 def unpark(card: int) -> bool:
     """Remove the card's attempts record — unparked, both counts cleared. Returns whether there was one."""
     path = _attempts(card)
-    _read_attempts(path)  # a record that cannot be read is named, not silently removed
+    was_parked = _read_attempts(path)["parked"]  # a record that cannot be read is named, not silently removed
     if not path.exists():
         return False
+    if was_parked:
+        _note_lifted(card)
     try:
         path.unlink()
     except OSError as exc:
         raise StateError(f"the attempts record {path} could not be removed: {exc}") from exc
     return True
+
+
+def _read_cards(path: pathlib.Path) -> set:
+    if not path.exists():
+        return set()
+    try:
+        return {int(n) for n in json.loads(path.read_text())}
+    except (OSError, ValueError, TypeError) as exc:
+        raise StateError(f"{path} could not be read: {exc}") from exc
+
+
+def _write_cards(path: pathlib.Path, cards) -> None:
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps(sorted(int(n) for n in cards)))
+        os.replace(tmp, path)
+    except OSError as exc:
+        raise StateError(f"{path} could not be written: {exc}") from exc
+
+
+def _note_lifted(card: int) -> None:
+    """The lane itself lifted this card's park (`lane.py unpark`, or a new commit lifting an idle park)."""
+    path = common.state_dir() / "unparked.json"
+    _write_cards(path, _read_cards(path) | {int(card)})
+
+
+def lifted_by_hand() -> list[int]:
+    """Cards parked at the last check that are no longer parked, and that the lane did not unpark itself: their
+    attempts record was edited or removed by hand. Updates the check's memory; the first check finds none."""
+    seen_path, lifted_path = common.state_dir() / "parked-seen.json", common.state_dir() / "unparked.json"
+    first = not seen_path.exists()
+    seen, lifted, now = _read_cards(seen_path), _read_cards(lifted_path), set(parked_cards())
+    _write_cards(seen_path, now)
+    _write_cards(lifted_path, set())
+    return [] if first else sorted(seen - now - lifted)
 
 
 def parked_info() -> dict:

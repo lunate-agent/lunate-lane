@@ -47,6 +47,85 @@ class RepoCase(unittest.TestCase):
         return sha
 
 
+class RewrittenPushTests(RepoCase):
+    """2: #819. The early open pushed acf29de6; the session amended it 24 seconds later; the final push was refused
+    as non-fast-forward, and every relaunch died in the setup's `merge --ff-only` before a session started."""
+
+    def commit(self, path, name, text, *extra):
+        (path / name).write_text(text)
+        git(path, "add", name)
+        git(path, "commit", "-q", *extra, "-m", f"write {name}")
+        return git(path, "rev-parse", "HEAD")
+
+    def push(self, number):
+        git(self.clone, "push", "-q", "origin", f"wt/issue-{number}:wt/issue-{number}")  # never forced, as the lane
+
+    def amended_819(self):
+        path = worker.prepare_worktree(self.cfg, 817)
+        pushed = self.commit(path, "FirstRunTests.cs", "wait for the dismissed offer\n")
+        self.push(817)  # the early open
+        self.commit(path, "FirstRunTests.cs", "wait for the dismissed offer, then type\n", "--amend")
+        self.commit(path, "817.md", "- fragment\n")
+        with self.assertRaises(AssertionError, msg="git refuses it, as at 06:53"):
+            self.push(817)
+        return path, pushed, git(path, "rev-parse", "HEAD")
+
+    def test_a_relaunch_continues_a_branch_whose_pushed_commit_was_amended(self) -> None:
+        path, pushed, local = self.amended_819()
+        tree = git(path, "rev-parse", "HEAD^{tree}")
+        self.assertEqual(worker.prepare_worktree(self.cfg, 817), path)  # 07:00, 07:10, 07:20 each died here
+        head = git(path, "rev-parse", "HEAD")
+        self.assertEqual(git(path, "rev-parse", "HEAD^{tree}"), tree, "the rewrite's work is kept as it is")
+        self.assertEqual(git(path, "rev-parse", "HEAD^1"), local)
+        self.assertEqual(git(path, "rev-parse", "HEAD^2"), pushed, "what was pushed is recorded as merged")
+        self.push(817)  # now a fast-forward
+        self.assertEqual(git(self.origin, "rev-parse", "wt/issue-817"), head)
+        self.assertEqual(worker.reconcile(self.cfg, path, 817), "", "level with origin: nothing to do")
+
+    def test_the_finish_reconciles_before_its_push(self) -> None:
+        path, pushed, local = self.amended_819()
+        with self.subTest("the finish's own fetch and merge"):
+            git(self.clone, "fetch", "-q", "origin")
+            self.assertEqual(worker.reconcile(self.cfg, path, 817), "superseded")
+        self.push(817)
+
+    def test_someone_elses_commit_is_merged_not_dropped(self) -> None:
+        path = worker.prepare_worktree(self.cfg, 9)
+        self.commit(path, "a.txt", "mine\n")
+        self.push(9)
+        theirs = self.push_branch_on("wt/issue-9", "b.txt")
+        self.commit(path, "c.txt", "more of mine\n")
+        git(self.clone, "fetch", "-q", "origin")
+        self.assertEqual(worker.reconcile(self.cfg, path, 9), "merged")
+        self.assertEqual(git(path, "show", "HEAD:b.txt"), "theirs", "their commit is kept")
+        self.assertTrue(worker.is_ancestor(self.clone, theirs, git(path, "rev-parse", "HEAD")))
+
+    def test_a_conflict_with_someone_elses_commit_is_a_named_refusal_and_leaves_no_half_merge(self) -> None:
+        path = worker.prepare_worktree(self.cfg, 9)
+        self.commit(path, "a.txt", "mine\n")
+        self.push(9)
+        self.push_branch_on("wt/issue-9", "a.txt")
+        self.commit(path, "a.txt", "mine, changed\n")
+        git(self.clone, "fetch", "-q", "origin")
+        with self.assertRaises(worker.WorktreeError) as caught:
+            worker.reconcile(self.cfg, path, 9)
+        self.assertIn("origin has commits this branch never had", str(caught.exception))
+        self.assertEqual(git(path, "status", "--porcelain"), "")
+
+    def push_branch_on(self, branch, filename):
+        """Someone else's commit on top of origin's branch, from a separate clone."""
+        other = self.state.root / "other"
+        import subprocess
+        subprocess.run(["git", "clone", "-q", "-b", branch, str(self.origin), str(other)], check=True)
+        git(other, "config", "user.email", "x@example.invalid")
+        git(other, "config", "user.name", "someone")
+        (other / filename).write_text("theirs")
+        git(other, "add", filename)
+        git(other, "commit", "-q", "-m", "theirs")
+        git(other, "push", "-q", "origin", branch)
+        return git(other, "rev-parse", "HEAD")
+
+
 class WorktreeTests(RepoCase):
     def test_a_new_card_is_cut_from_the_base(self) -> None:
         path = worker.prepare_worktree(self.cfg, 3)
@@ -281,6 +360,11 @@ class BriefTests(unittest.TestCase):
         self.assertIn("never the full suite", text)
         self.assertIn(ISSUE["body"], text)
 
+    def test_the_brief_forbids_rewriting_any_commit_because_the_first_is_pushed_at_once(self) -> None:
+        text = worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), None, "", True)
+        self.assertIn("**Never rewrite a commit.**", text)
+        self.assertIn("never `git commit --amend`", text)
+
     def test_a_closed_decision_that_blocked_the_card_is_in_the_brief_verbatim(self) -> None:
         section = github.decisions_section([github.Decision(820, "Who opens release PRs?",
                                                             "Decision: the lane opens them; a maintainer merges.")])
@@ -376,12 +460,14 @@ class DriveCase(RepoCase):
         self.patches = [
             mock.patch.object(dispatch_card, "card", return_value=dict(ISSUE)),
             mock.patch.object(dispatch_card, "dispatch", side_effect=self.dispatch),
-            mock.patch.object(github, "decisions_for", return_value=[]),
             mock.patch.object(open_pr, "comment", side_effect=lambda n, body: self.comments.append((n, body))),
             mock.patch.object(harness, "read_credential", return_value="model-credential-value-1234"),
             mock.patch.object(open_pr, "return_to_draft", side_effect=lambda branch, pr: self.drafted.append(pr)),
             mock.patch.object(open_pr, "_worker_token", side_effect=AssertionError("no live token in tests")),
             mock.patch.object(github, "required_checks", return_value=REQUIRED),
+            # after the ones tests stop by position (5, 4, 1: the token, return_to_draft, the dispatch)
+            mock.patch.object(github, "decisions_for", return_value=[]),
+            mock.patch.object(github, "open_blockers", return_value=()),
         ]
         self.drafted = []
         for patch in self.patches:
@@ -430,6 +516,13 @@ class DriveTests(DriveCase):
         self.assertEqual(number, 77)
         self.assertIn("done: 1. met — a.cs:1", body)
         self.assertNotIn("Incomplete", body)
+
+    def test_a_clean_run_on_a_card_that_waits_on_an_open_issue_is_left_unarmed(self) -> None:
+        with self.fake_session(), mock.patch.object(github, "open_blockers", return_value=(749,)):
+            self.assertEqual(worker.drive(self.cfg, 3, None), 0)
+        self.assertEqual(self.dispatched, [False, False])
+        self.assertIn("card #3 waits on #749 — the pull request is left unarmed",
+                      (self.cfg.state / "logs" / "worker-3.log").read_text())
 
     def test_a_run_with_no_commits_opens_nothing(self) -> None:
         with self.fake_session(commit=False):
@@ -803,3 +896,13 @@ class ReleaseBriefTests(unittest.TestCase):
             with self.subTest(title=title):
                 text = worker.brief(self.cfg, {**ISSUE, "title": title}, pathlib.Path("/w"), 820, "", True)
                 self.assertIn("Never edit `CHANGELOG.md`. Write the change's line(s) to `changes/820.md`", text)
+
+
+class DeathRecordTests(RepoCase):
+    def test_a_run_that_fails_by_name_records_why_for_the_digest(self) -> None:
+        with mock.patch.object(harness, "live_pid", return_value=None), \
+                mock.patch.object(dispatch_card, "card", return_value={"labels": []}), \
+                mock.patch.object(worker, "drive", side_effect=worker.WorktreeError("hint: Diverging branches\nhint:")), \
+                mock.patch("sys.argv", ["worker.py", "--issue", "817", "--rework", "819"]):
+            self.assertEqual(worker.main(), 1)
+        self.assertEqual(harness.died_info(), {817: "hint: Diverging branches"})

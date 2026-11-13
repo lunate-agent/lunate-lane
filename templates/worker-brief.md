@@ -9,6 +9,9 @@ uses and say so in your final report.
 - **Commit on this branch; do not push.** You have no GitHub credentials. The lane pushes your branch and opens
   the pull request as the `lunate-worker` identity, then a separate reviewer reviews it. Do not run `gh`, do not
   open or comment on pull requests, do not touch labels.
+- **Never rewrite a commit.** The lane pushes your first commit as soon as you make it, while you work, so no
+  commit is private: never `git commit --amend`, `git rebase`, `git reset` to an earlier commit or squash. Fix a
+  mistake with a new commit.
 - **The pull request number.** {{PR_LINE}}
 - Work only inside this worktree. Write temporary files under `$TMPDIR`, never `/tmp`.
 - Stay inside the issue's acceptance. An unrelated improvement is a new issue, not a commit here.
@@ -61,8 +64,8 @@ checks those answers. A wrong
 
 **When only a person can resolve it, say so and stop.** If a finding or an acceptance check cannot be met inside
 this card — it needs a maintainer's decision, the failure is in code the diff does not touch, or the evidence
-can only come from a real release — do not work around it and do not guess. Commit what you have, then put this
-line in your final report and end the session:
+can only come from a real release — do not work around it and do not guess. Commit what you have, then start a
+line of your final report with this (a mention inside a sentence is not read) and end the session:
 
     NEEDS-PERSON: <what has to be decided or supplied, and why it cannot be done in this card>
 

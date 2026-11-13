@@ -7,24 +7,29 @@ The worktree at {{WORKTREE}} is checked out at that head. The diff against `orig
 
 ## What to check
 
-1. **Every acceptance check in the issue**, by its own number: met / not met / cannot tell, each with evidence —
-   a `file:line` or a test name, never a paraphrase. A check you did not look at is not a check that passed.
-2. **Run the tests the issue names**, plus the classes the diff touches, by filter — never the full suite:
-   `dotnet test <project> -c Release -nodeReuse:false --filter "FullyQualifiedName~<Class>"`. Report counts.
-3. **Scope**: changes the issue does not ask for are a request for changes, even when they are good.
-4. **OpenSpec**: a change folder under `openspec/changes/` that the PR adds must be archived in its **last**
-   commit; nothing under `openspec/specs/` may be hand-edited. A behaviour fix with no OpenSpec change must say
-   why and name the requirement it restores.
+1. **Every acceptance check in the issue**, by its own number: met / not met, each with evidence — a `file:line`,
+   a test name or a CI job, never a paraphrase. A check you did not look at is not a check that passed; a check
+   you cannot establish from the diff, the tests or CI is not met.
+2. **Behaviour and spec**: the change does what the card asks and breaks nothing the specs require. A defect —
+   wrong behaviour, a regression, a spec requirement contradicted — is blocking; cite it with `file:line`.
+3. **Gates**: the lane only reviews a head whose required checks are green, so CI has already run the build and
+   the full test suite. **Test evidence is CI's job**: never ask the worker to prove which tests it ran, or to
+   report counts, when CI ran them. A red or missing required gate is blocking. Run a test yourself by filter
+   (`dotnet test <project> -c Release -nodeReuse:false --filter "FullyQualifiedName~<Class>"`, never the full
+   suite) only when you need it to establish a behaviour.
+4. **OpenSpec lifecycle**: a change folder under `openspec/changes/` that the PR adds must be archived in its
+   **last** commit; nothing under `openspec/specs/` may be hand-edited. A behaviour fix with no OpenSpec change
+   must say why and name the requirement it restores.
    **Compare the delta** with main's spec (`git show origin/{{BASE}}:openspec/specs/<capability>/spec.md`) and
    with the other open pull requests below that change the same capabilities: a requirement this PR changes or
    removes must be one the issue asks to change, and must not contradict another open PR's delta without saying
    so. A conflict in `openspec/specs/**` resolved by hand (instead of reverting the archive commit, merging
-   `origin/{{BASE}}` and re-archiving) is a request for changes.
+   `origin/{{BASE}}` and re-archiving) is a lifecycle violation.
 5. **Changelog**: {{FRAGMENT_CHECK}}
-6. **Tests name the behaviour**: a test that would still pass with the change reverted is not evidence.
-7. **Intent decisions**: the worker's report (below) lists, under **Intent decisions**, the grill-me questions
-   about the card's intent with the answer it chose for each. Check each answer against the issue and the
-   specs: a wrong reading of the intent is a finding; a missing list on a behaviour change is a finding.
+6. **Intent decisions**: the worker's report (below) lists, under **Intent decisions**, the grill-me questions
+   about the card's intent with the answer it chose for each. Check each against the issue and the specs: an
+   answer that makes the change behave wrongly is a behaviour defect (blocking); anything else about the list is
+   non-blocking.
 
 ## OpenSpec neighbours
 
@@ -41,14 +46,27 @@ Write exactly one JSON object to the file `{{VERDICT_FILE}}` and nothing else in
     {"event": "APPROVE", "body": "<the review, in Markdown>"}
     {"event": "REQUEST_CHANGES", "body": "<the review, in Markdown>"}
 
-The body lists the acceptance checks by number with evidence, the tests you ran with counts, and — for
-REQUEST_CHANGES — each finding as a concrete thing to change, with its `file:line`. Request changes for: a check
-not met, a scope violation, a hand-edited spec, an archive that is not last, a missing changelog fragment, a test
-that does not test the change, a spec delta that contradicts main's spec or another open PR unannounced, a wrong
-or missing intent decision, or anything you could not establish. The lane posts this as a real review.
+**REQUEST_CHANGES only for a blocking finding**, and these are the only blocking findings:
+
+- an acceptance check not met;
+- a behaviour or spec defect;
+- a required gate that is red or missing;
+- a missing changelog fragment, or a missing or misplaced archive;
+- an OpenSpec lifecycle violation (a hand-edited spec, an archive that is not last, a delta that contradicts
+  main's spec or another open PR unannounced, a spec conflict resolved by hand).
+
+**Everything else is non-blocking** — wording, naming, style, the pull request's title or description, the
+worker's report, which tests the worker says it ran, a scope nit, a refactor you would prefer, a suggestion. Put
+those under a heading **Non-blocking** in the body and APPROVE. Never request changes for them alone, and never
+for test evidence CI already gave.
+
+The body lists the acceptance checks by number with evidence, then — for REQUEST_CHANGES — each blocking finding
+under **Blocking** as a concrete thing to change, with its `file:line` and which of the kinds above it is, then
+**Non-blocking**, if any. The lane posts this as a real review.
 
 **An acceptance check that cannot be evidenced in a pull request** — it needs a maintainer's decision, or only a
-real release can show it — is not something a worker can fix. Use REQUEST_CHANGES and put this line in the body:
+real release can show it — is not something a worker can fix. Use REQUEST_CHANGES and start a line of the body
+with it (a mention inside a sentence is not read):
 
     NEEDS-PERSON: <the check, by number, and why no pull request can evidence it>
 

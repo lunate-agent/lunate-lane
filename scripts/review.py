@@ -39,6 +39,8 @@ def skip_reason(p: github.Pull, required: frozenset, running: dict, reviewer: st
         return f"is {p.state.lower()}"
     if p.draft:
         return "is a draft"
+    if p.waits_on:  # a slice started before its predecessor: reviewed once the predecessor has landed
+        return github.waits_line(p.waits_on)
     if p.card in running:
         return f"its worker on #{p.card} is still running"
     if p.card is None:
