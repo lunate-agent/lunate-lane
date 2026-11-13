@@ -221,7 +221,7 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str, str]:
                                WORKTREE=str(worktree), BASE=cfg.base, DIFF_FILE=str(diff_file),
                                FRAGMENT_CHECK=fragments, VERDICT_FILE=str(verdict_file), CARD=str(p.card),
                                SPEC_NEIGHBOURS=spec_neighbours(p, others), WORKER_REPORT=report,
-                               SCOPE=scope_context(p, others, cfg.area_prefix),
+                               SCOPE=scope_context(p, cfg.area_prefix),
                                DECISIONS=github.decisions_section(github.decisions_for(cfg, p.card)),
                                BODY=(issue.get("body") or "").strip())
         log_path = common.state_dir("sessions") / f"review-{p.number}-{p.head[:8]}.jsonl"
@@ -267,25 +267,12 @@ def spec_neighbours(p: github.Pull, others) -> str:
     return "\n".join(lines)
 
 
-SHARED_LIMIT = 20
-
-
-def scope_context(p: github.Pull, others, area_prefix: str) -> str:
-    """For the brief's scope check: the card's `area/*` labels, and the files this pull request changes that
-    another open pull request (any author) changes too."""
+def scope_context(p: github.Pull, area_prefix: str) -> str:
+    """For the brief's scope check: the card's `area/*` labels. Files other open pull requests also change are not
+    listed: overlap is never blocking (a merge conflict goes back to a worker as a rework)."""
     areas = sorted(label for label in p.labels if label.startswith(area_prefix))
-    lines = [f"The card's area: {', '.join(f'`{a}`' for a in areas)}." if areas
-             else "The card has no area label: its area is what its own text names."]
-    mine = set(p.files or ())
-    for other in sorted(others, key=lambda o: o.number):
-        shared = sorted(mine & set(other.files or ())) if other.number != p.number else []
-        if shared:
-            lines.append(f"- #{other.number} \"{other.title}\" also changes "
-                         + ", ".join(f"`{f}`" for f in shared[:SHARED_LIMIT])
-                         + (" …" if len(shared) > SHARED_LIMIT else ""))
-    if len(lines) == 1:
-        lines.append("No other open pull request changes a file this one changes.")
-    return "\n".join(lines)
+    return (f"The card's area: {', '.join(f'`{a}`' for a in areas)}." if areas
+            else "The card has no area label: its area is what its own text names.")
 
 
 def remove_review_worktree(cfg: common.Config, pr: int) -> None:
