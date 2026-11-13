@@ -295,6 +295,21 @@ class NeedsPersonVerdictTests(unittest.TestCase):
         self.path.write_text(json.dumps({"event": "APPROVE", "body": body}))
         self.assertEqual(review.read_verdict(self.path), ("REQUEST_CHANGES", body))
 
+    def test_the_review_brief_blocks_only_on_the_five_kinds_and_leaves_test_evidence_to_ci(self) -> None:
+        """3: overnight send-back was 9 of 9. Only blocking findings send a pull request back."""
+        text = (review.common.ROOT / "templates" / "review-brief.md").read_text()
+        verdict = text[text.index("## Your verdict"):]
+        for kind in ("an acceptance check not met", "a behaviour or spec defect", "a required gate that is red or missing",
+                     "a missing changelog fragment, or a missing or misplaced archive", "an OpenSpec lifecycle violation"):
+            self.assertIn(kind, verdict)
+        self.assertIn("**REQUEST_CHANGES only for a blocking finding**", verdict)
+        self.assertIn("**Non-blocking**", verdict)
+        self.assertIn("the pull request's title or description", verdict)
+        self.assertIn("**Test evidence is CI's job**: never ask the worker to prove which tests it ran", text)
+        for gone in ("Report counts.", "the tests you ran with counts", "a scope violation",
+                     "a test\nthat does not test the change", "or anything you could not establish"):
+            self.assertNotIn(gone, text)
+
     def test_the_review_brief_offers_needs_person_for_what_no_pull_request_can_evidence(self) -> None:
         text = (review.common.ROOT / "templates" / "review-brief.md").read_text()
         self.assertIn("NEEDS-PERSON: <the check, by number, and why no pull request can evidence it>", text)
@@ -324,3 +339,10 @@ class PersonOutranksSkipTests(unittest.TestCase):
         p = pull(813, 794, head="5809330d1", reviews=[a_review("DISMISSED", commit="5809330d1"),
                                                       a_review("APPROVED", commit="5809330d1", author="a-maintainer")])
         self.assertEqual(review.skip_reason(p, REQUIRED, {}, "lunate-reviewer"), "@a-maintainer approved it at 5809330d")
+
+
+class WaitsOnReviewTests(unittest.TestCase):
+    def test_a_pull_request_whose_card_waits_on_an_open_issue_is_not_reviewed(self) -> None:
+        p = pull(820, 751, waits_on=(749, 750))
+        self.assertEqual(review.skip_reason(p, REQUIRED, {}, "lunate-reviewer"), "waits on #749, #750")
+        self.assertIsNone(review.skip_reason(pull(820, 751), REQUIRED, {}, "lunate-reviewer"))

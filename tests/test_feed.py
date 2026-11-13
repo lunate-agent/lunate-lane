@@ -460,3 +460,33 @@ class PersonOutranksFeedTests(unittest.TestCase):
         self.assertEqual(self.started, [])
         rearm.assert_called_once_with(813, "PR_813", "main")
         self.assertIn("re-armed #813", (self.state.cfg.state / "logs" / "feed.log").read_text())
+
+
+class WaitsOnFeedTests(unittest.TestCase):
+    """A slice started before its predecessor (S3 #820 on card #751, blocked by #749 and #750): its armed pull
+    request is disarmed, and an approved one is not re-armed while the blockers are open."""
+
+    setUp, tearDown = FeedTests.setUp, FeedTests.tearDown
+
+    def test_820s_shape_is_disarmed_and_not_rearmed_until_its_blockers_close(self) -> None:
+        from scripts import open_pr
+
+        github.milestone_cards.return_value = []
+        github.open_pulls.return_value = [pull(820, 751)]
+        github.pull.return_value = pull(820, 751, node_id="PR_820", auto_merge=True, waits_on=(749, 750))
+        with mock.patch.object(open_pr, "disarm") as disarm, mock.patch.object(open_pr, "rearm") as rearm:
+            with mock.patch.object(sys, "argv", ["feed.py", "--dry-run"]):
+                self.assertEqual(feed.main(), 0)
+            disarm.assert_not_called()
+            self.assertEqual(feed.main(), 0)
+            disarm.assert_called_once_with(820, "PR_820")
+            github.pull.return_value = pull(820, 751, node_id="PR_820", reviews=[review("APPROVED")],
+                                            waits_on=(749,))
+            self.assertEqual(feed.main(), 0)
+            rearm.assert_not_called()
+            github.pull.return_value = pull(820, 751, node_id="PR_820", reviews=[review("APPROVED")])
+            self.assertEqual(feed.main(), 0)
+            rearm.assert_called_once_with(820, "PR_820", "main")
+        log = (self.state.cfg.state / "logs" / "feed.log").read_text()
+        self.assertIn("would turn auto-merge off on #820: card #751 waits on #749, #750", log)
+        self.assertIn("turned auto-merge off on #820: card #751 waits on #749, #750", log)

@@ -25,6 +25,8 @@ MERGED_LIMIT = 100
 
 def pull_state(p: github.Pull, required: frozenset, reviewer: str) -> str:
     """One phrase for where a pull request stands, from GitHub's own state only."""
+    if p.waits_on:
+        return github.waits_line(p.waits_on) + (" (auto-merge still armed)" if p.auto_merge else "")
     if p.draft:
         return "draft"
     checks = github.check_state(p, required)
@@ -145,7 +147,7 @@ def waiting_on_you(cfg: common.Config, decisions: list, pulls: list, required: f
 
 def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required: frozenset,
             now: datetime.datetime, parked: dict | None = None, running: dict | None = None,
-            kept: dict | None = None, decisions: list | None = None) -> str:
+            kept: dict | None = None, decisions: list | None = None, died: dict | None = None) -> str:
     running = running or {}
     parked = parked or {}
     flight = in_flight(cfg, pulls, running, frozenset(parked))
@@ -157,9 +159,12 @@ def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required
     for p in sorted(pulls, key=lambda p: p.number):
         lines.append(f"  #{p.number} {p.title[:60]} — {pull_state(p, required, cfg.reviewer_app)}")
     held = stuck(cfg, pulls, required, now, running, frozenset(parked))
-    lines.append(f"Stuck ({len(held)}):" if held else "Stuck: none")
+    # a worker run that failed by name — its setup, its push — before its session could end: the reason, by card
+    dead = [(card, why) for card, why in sorted((died or {}).items()) if card not in running]
+    lines.append(f"Stuck ({len(held) + len(dead)}):" if held or dead else "Stuck: none")
     lines += [f"  #{number} — {why}" for number, why in held]
-    lines.append(f"Parked cards ({len(parked)}) — `scripts/lane.py unpark <card>` to unpark:" if parked
+    lines += [f"  card #{card} — worker died: {_short(why, WAIT_REASON + 40)}" for card, why in dead]
+    lines.append(f"Parked cards ({len(parked)}) — `scripts/lane.py unpark <card> --reason '...'` to unpark:" if parked
                  else "Parked cards: none")
     for number in sorted(parked):
         lines.append(f"  #{number} — {parked_line(parked[number])}")
@@ -181,7 +186,7 @@ def tick() -> None:
     merged = merged_since(cfg, now - datetime.timedelta(days=1))
     decisions = github.decision_issues(cfg)
     message = compose(cfg, cards, pulls, merged, required, now, harness.parked_info(), harness.running_workers(),
-                      cleanup.read_held(), decisions)
+                      cleanup.read_held(), decisions, harness.died_info())
     latest = common.state_dir("digest") / "latest.md"
     try:
         latest.write_text(message + "\n", encoding="utf-8")

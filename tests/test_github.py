@@ -567,6 +567,21 @@ class NeedsPersonTests(unittest.TestCase):
         for text in ("", "all checks met", "needs a person? no"):
             self.assertIsNone(github.needs_person(text))
 
+    def test_a_mention_mid_sentence_is_not_a_line(self) -> None:
+        # #818's review, which parked card #749 with the reason "item."
+        review_818 = ("Decisions 1–9 are consistent with the issue and the checked-in deltas. **Decision 10 is "
+                      "incorrect:** “no release note” does not waive the required per-PR fragment. Add "
+                      "`changes/818.md` as above; this is a worker-fixable omission, not a `NEEDS-PERSON` item.")
+        self.assertIsNone(github.needs_person(review_818))
+        self.assertIsNone(github.needs_person("Do not write NEEDS-PERSON: here, it is fixable."))
+        self.assertIsNone(github.needs_person("- not a NEEDS-PERSON item"))
+
+    def test_a_line_may_open_with_a_list_marker_or_a_quote(self) -> None:
+        for text in ("findings\n- NEEDS-PERSON: the ruleset change", "> **NEEDS-PERSON:** the ruleset change",
+                     "  NEEDS-PERSON: the ruleset change"):
+            with self.subTest(text=text):
+                self.assertEqual(github.needs_person(text), "the ruleset change")
+
 
 class PersonOutranksTests(unittest.TestCase):
     SHAPE = dict(head="5809330d1", reviews=[helper_review("DISMISSED", commit="5809330d1"),
@@ -649,3 +664,28 @@ class WaitsForApprovalTests(unittest.TestCase):
             self.assertTrue(github.waits_for_approval(p, REQUIRED, "lunate-reviewer"), p)
         for p in no:
             self.assertFalse(github.waits_for_approval(p, REQUIRED, "lunate-reviewer"), p)
+
+
+class WaitsOnTests(unittest.TestCase):
+    def test_the_cards_open_blockers_are_read_from_the_issue_it_closes(self) -> None:
+        issues = [{"number": 751, "blockedBy": page([{"number": 749, "state": "OPEN"}, {"number": 750, "state": "OPEN"},
+                                                    {"number": 700, "state": "CLOSED"}])},
+                  {"number": 9, "blockedBy": page([{"number": 5, "state": "OPEN"}])}]
+        self.assertEqual(github._waits_on({"headRefName": "wt/issue-751"}, issues, 820), (749, 750))
+        self.assertEqual(github._waits_on({"headRefName": "feature/x"}, issues, 820), (5, 749, 750))
+        with self.assertRaises(GhError):
+            github._waits_on({"headRefName": "wt/issue-751"},
+                             [{"number": 751, "blockedBy": page([], more=True)}], 820)
+
+    def test_a_waiting_pull_request_is_never_re_armed_nor_waiting_for_your_approval(self) -> None:
+        p = pull(820, 751, reviews=[review("APPROVED")], waits_on=(749,), review_decision="REVIEW_REQUIRED")
+        self.assertTrue(github.needs_rearm(pull(820, 751, reviews=[review("APPROVED")]), REQUIRED, "lunate-reviewer"))
+        self.assertFalse(github.needs_rearm(p, REQUIRED, "lunate-reviewer"))
+        self.assertFalse(github.waits_for_approval(p, REQUIRED, "lunate-reviewer"))
+
+    def test_open_blockers_of_a_card(self) -> None:
+        answer = {"repository": {"issue": {"blockedBy": page([{"number": 750, "state": "OPEN"},
+                                                              {"number": 749, "state": "OPEN"},
+                                                              {"number": 1, "state": "CLOSED"}])}}}
+        with mock.patch.object(common, "graphql", return_value=answer):
+            self.assertEqual(github.open_blockers(CFG, 751), (749, 750))

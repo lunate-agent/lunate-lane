@@ -73,6 +73,7 @@ class Pull:
     node_id: str = ""
     runs: tuple = ()  # Run, for every check run on the head
     review_decision: str = ""  # GitHub's: APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED, or '' when none is required
+    waits_on: tuple = ()  # open issues its card is blocked by: not reviewed, not armed, not re-armed until they close
 
     @property
     def capabilities(self) -> frozenset:
@@ -272,7 +273,8 @@ def waits_for_approval(p: Pull, required: frozenset, reviewer: str) -> bool:
     """Ready, green, not conflicting, and GitHub still requires an approval the reviewer bot cannot give: the bot
     approved the head (so a maintainer or code owner must), or the pull request carries no card (the bot never
     reviews those)."""
-    if p.state != "OPEN" or p.draft or p.review_decision != "REVIEW_REQUIRED" or p.mergeable == "CONFLICTING":
+    if (p.state != "OPEN" or p.draft or p.review_decision != "REVIEW_REQUIRED" or p.mergeable == "CONFLICTING"
+            or p.waits_on):
         return False
     if check_state(p, required) != "green":
         return False
@@ -304,7 +306,8 @@ isInMergeQueue queueRemoval:timelineItems(last:1,itemTypes:[REMOVED_FROM_MERGE_Q
 ... on RemovedFromMergeQueueEvent{createdAt reason beforeCommit{oid}}}}
 autoMergeEvents:timelineItems(last:1,itemTypes:[AUTO_MERGE_ENABLED_EVENT,AUTO_MERGE_DISABLED_EVENT]){nodes{__typename
 ... on AutoMergeDisabledEvent{actor{__typename login}}}}
-closingIssuesReferences(first:10){pageInfo{hasNextPage} nodes{number labels(first:50){pageInfo{hasNextPage} nodes{name}}}}
+closingIssuesReferences(first:10){pageInfo{hasNextPage} nodes{number labels(first:50){pageInfo{hasNextPage} nodes{name}}
+blockedBy(first:50){pageInfo{hasNextPage} nodes{number state}}}}
 reviews(last:100){pageInfo{hasPreviousPage} nodes{author{login} state body commit{oid}}}
 files(first:100){pageInfo{hasNextPage} nodes{path}}
 commits(last:1){nodes{commit{oid checkSuites(first:50){pageInfo{hasNextPage} nodes{databaseId status createdAt
@@ -346,7 +349,36 @@ def pull(cfg: common.Config, number: int) -> Pull:
         node_id=str(node.get("id") or ""),
         runs=tuple(_run(c) for c in newest),
         review_decision=str(node.get("reviewDecision") or ""),
+        waits_on=_waits_on(node, issues, number),
     )
+
+
+def _waits_on(node: dict, issues: list, number: int) -> tuple:
+    """The open blockers of the card this pull request carries (its `wt/issue-<n>` branch, else the issues it
+    closes), from the issues it closes."""
+    match = BRANCH.match(str(node.get("headRefName") or ""))
+    mine = [i for i in issues if match and i["number"] == int(match.group(1))] or issues
+    return tuple(sorted({b["number"] for i in mine
+                         for b in _complete(i.get("blockedBy") or {}, f"#{number}'s issue #{i['number']}'s blockers")
+                         if b.get("state") == "OPEN"}))
+
+
+OPEN_BLOCKERS = """query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){
+blockedBy(first:50){pageInfo{hasNextPage} nodes{number state}}}}}"""
+
+
+def open_blockers(cfg: common.Config, card: int) -> tuple:
+    """The open issues `card` is blocked by (GitHub's native blocked-by). Unreadable raises."""
+    data = common.graphql(OPEN_BLOCKERS, owner=cfg.owner, name=cfg.name, n=int(card))
+    issue = (data.get("repository") or {}).get("issue")
+    if not issue:
+        raise GhError(f"issue #{card} was not found in {cfg.slug}")
+    return tuple(sorted(b["number"] for b in _complete(issue["blockedBy"], f"issue #{card}'s blockers")
+                        if b.get("state") == "OPEN"))
+
+
+def waits_line(blockers) -> str:
+    return "waits on " + ", ".join(f"#{n}" for n in blockers)
 
 
 def required_checks(cfg: common.Config) -> frozenset:
@@ -559,6 +591,7 @@ def needs_rearm(p: Pull, required: frozenset, reviewer: str) -> bool:
     when arming fails after `mark_ready` (review of #17). Not when a person turned auto-merge off, and not when it
     is stuck (that is a rework) or its checks are not green."""
     return (p.state == "OPEN" and not p.draft and not p.auto_merge and not p.in_queue and not p.disarmed_by
+            and not p.waits_on
             and p.mergeable != "CONFLICTING" and not p.queue_removal and check_state(p, required) == "green"
             and verdict(p, reviewer) == "APPROVED")
 
@@ -593,13 +626,15 @@ def orphaned_draft(p: Pull, running, parked) -> bool:
     return p.state == "OPEN" and p.draft and p.card is not None and p.card not in running and p.card not in parked
 
 
-NEEDS_PERSON = re.compile(r"NEEDS-PERSON\b[*_`]*\s*[:—–-]?\s*(.*)")
+# only at the start of a line (after markup, a quote or a list marker): a mention mid-sentence — #818's review said
+# "this is a worker-fixable omission, not a `NEEDS-PERSON` item." — is not a request for a person
+NEEDS_PERSON = re.compile(r"^[ \t>*_`-]*NEEDS-PERSON\b[*_`]*[ \t]*[:—–-]?[ \t]*(.*)", re.MULTILINE)
 REASON_LIMIT = 300
 
 
 def needs_person(text: str) -> str | None:
-    """The reason after the first `NEEDS-PERSON:` in a worker's report or a review body, or None when there is no
-    such line. A finding nobody can meet inside the card — a maintainer's decision, a failure in code the diff
+    """The reason after the first line that starts with `NEEDS-PERSON:` in a worker's report or a review body, or
+    None when there is no such line. A finding nobody can meet inside the card — a maintainer's decision, a failure in code the diff
     does not touch, evidence only a real release gives — stops the card for a person instead of another round."""
     match = NEEDS_PERSON.search(text or "")
     if not match:

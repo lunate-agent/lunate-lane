@@ -30,13 +30,15 @@ def rules(cfg: common.Config) -> cards.Rules:
 
 def decide(cfg: common.Config) -> tuple[list[cards.Launch], list[str]]:
     """Read everything the decision needs, then decide. Every read raises on failure."""
-    launches, notes, _, _ = decide_all(cfg)
+    launches, notes, *_ = decide_all(cfg)
     return launches, notes
 
 
-def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[github.Pull], list[github.Pull]]:
-    """The launches and notes, and the worker pull requests whose required checks failed for infra reasons and
-    have not been rerun on their head yet: those are rerun once, not reworked."""
+def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[github.Pull], list[github.Pull],
+                                            list[github.Pull]]:
+    """The launches and notes; the worker pull requests whose required checks failed for infra reasons and have
+    not been rerun on their head yet (rerun once, not reworked); those to re-arm; and armed ones whose card waits on
+    an open issue (disarmed: a slice started before its predecessor must not land first)."""
     # the running workers first: a worker that finishes between the two reads leaves its pull request ready, and
     # a draft read before that would look orphaned
     running = harness.running_workers()
@@ -53,7 +55,8 @@ def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[
              and github.failure_kind(p, required) == "infra"]
     rearm = [p for p in worker_pulls if p.card not in running and p.card not in parked
              and github.needs_rearm(p, required, cfg.reviewer_app)]
-    return launches, notes, rerun, rearm
+    disarm = [p for p in worker_pulls if p.state == "OPEN" and p.auto_merge and p.waits_on]
+    return launches, notes, rerun, rearm, disarm
 
 
 def rerun(cfg: common.Config, p: github.Pull, dry_run: bool) -> None:
@@ -92,7 +95,11 @@ def tick(dry_run: bool = False) -> None:
         swept = open_pr.sweep_secret_dir()
         if swept:
             common.log(JOB, f"removed {swept} token file(s) a killed push left behind")
-    launches, notes, reruns, rearms = decide_all(cfg)
+    if not dry_run:
+        for card in harness.lifted_by_hand():
+            common.log(JOB, f"card #{card} is no longer parked, and not by `lane.py unpark`: its attempts record was "
+                            "edited or removed by hand")
+    launches, notes, reruns, rearms, disarms = decide_all(cfg)
     for p in reruns:
         rerun(cfg, p, dry_run)
     # the launches first, in the order they were chosen, then the notes on why nothing else was (#3)
@@ -149,6 +156,13 @@ def tick(dry_run: bool = False) -> None:
         result = open_pr.rearm(p.number, p.node_id, cfg.base)
         common.log(JOB, f"re-armed #{p.number}: approved at {p.head[:8]} but not armed — auto-merge {result['auto_merge']}"
                         f" (queue {result['queue_method']}, GitHub records {result['merge_method'] or 'none'})")
+    for p in disarms:
+        what = f"#{p.number}: card #{p.card} {github.waits_line(p.waits_on)}"
+        if dry_run:
+            common.log(JOB, f"would turn auto-merge off on {what}")
+            continue
+        open_pr.disarm(p.number, p.node_id)
+        common.log(JOB, f"turned auto-merge off on {what} — it is re-armed once approved after they close")
     # after the launches, so a cleanup that fails never holds work back — it still fails the tick, by name
     cleanup.tidy(cfg, JOB, github.open_pulls(cfg), harness.running_workers(), dry_run)
 

@@ -95,8 +95,60 @@ def _prepare_worktree(cfg: common.Config, number: int) -> pathlib.Path:
         else:
             common.git(repo, "worktree", "add", "--no-track", "-b", branch, str(path), f"origin/{cfg.base}")
     if remote:
-        common.wt_git(cfg, path, "merge", "--ff-only", "-q", f"origin/{branch}")
+        reconcile(cfg, path, number)
     return path
+
+
+def is_ancestor(repo: pathlib.Path, older: str, newer: str) -> bool:
+    """Whether `older` is an ancestor of (or is) `newer`. git's 'no' (exit 1) is an answer; anything else raises."""
+    try:
+        done = subprocess.run(common.git_argv(repo, "merge-base", "--is-ancestor", older, newer),
+                              capture_output=True, text=True, timeout=60, env=common.git_env())
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GitError(f"git could not compare {older[:9]} and {newer[:9]} ({exc.__class__.__name__})") from exc
+    if done.returncode not in (0, 1):
+        raise GitError(f"git could not compare {older[:9]} and {newer[:9]}: {done.stderr.strip()[:160]}")
+    return done.returncode == 0
+
+
+def reconcile(cfg: common.Config, path: pathlib.Path, number: int) -> str:
+    """Bring the local `wt/issue-<n>` level with `origin/wt/issue-<n>` without rewriting either, so the lane's
+    push (never forced) goes through. Returns what it did: '', 'fast-forward', 'superseded' or 'merged'.
+
+    A session that amends or rebases a commit the lane already pushed (#819: the early open pushed `acf29de6`,
+    the session amended it 24 seconds later) leaves the two diverged. When every commit only the remote has was
+    once on this local branch (it is in the branch's reflog), the local branch is the rewrite of it: the remote
+    is recorded as merged with the local tree kept (`-s ours`). Commits the branch never had — someone else's —
+    are merged normally; a conflict there is a named failure, never a guess.
+    """
+    repo, branch = cfg.checkout, f"wt/issue-{number}"
+    local = common.wt_git(cfg, path, "rev-parse", "HEAD")
+    remote = common.git(repo, "rev-parse", f"refs/remotes/origin/{branch}")
+    if is_ancestor(repo, remote, local):
+        return ""
+    if is_ancestor(repo, local, remote):
+        common.wt_git(cfg, path, "merge", "--ff-only", "-q", remote)
+        return "fast-forward"
+    known = common.git(repo, "reflog", "show", "--format=%H", f"refs/heads/{branch}").split()
+    job = f"worker-{number}"
+    if any(is_ancestor(repo, remote, seen) for seen in known):
+        common.wt_git(cfg, path, "merge", "-q", "-s", "ours", "--no-edit", "-m",
+                      f"Keep the rewritten {branch}: it supersedes {remote[:9]}, which was pushed before the rewrite",
+                      remote)
+        common.log(job, f"{branch} was rewritten after {remote[:9]} was pushed — recorded it as merged, kept the "
+                        f"local tree at {local[:9]}")
+        return "superseded"
+    try:
+        common.wt_git(cfg, path, "merge", "-q", "--no-edit", remote)
+    except GitError as exc:
+        try:
+            common.wt_git(cfg, path, "merge", "--abort")
+        except GitError:
+            pass
+        raise WorktreeError(f"{branch} and origin/{branch} diverged and origin has commits this branch never had; "
+                            f"merging them conflicts — a person resolves it ({str(exc)[:160]})") from exc
+    common.log(job, f"{branch} had diverged from origin — merged origin's {remote[:9]} into {local[:9]}")
+    return "merged"
 
 
 def has_fragments(cfg: common.Config, repo: pathlib.Path) -> bool:
@@ -333,8 +385,18 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
             park(cfg, number, number, "idle", idle)
         return 1
     not_ready = ""
+    # a slice started before its predecessor: pushed and marked ready like any clean finish, but never armed while
+    # its card waits on an open issue — the feeder re-arms it once it is approved after they close
+    blockers = github.open_blockers(cfg, number)
+    if blockers:
+        common.log(job, f"card #{number} {github.waits_line(blockers)} — the pull request is left unarmed")
+    with common.checkout_lock():  # the session may have rewritten a commit the early open already pushed
+        common.git(cfg.checkout, "fetch", "-q", "origin")
+        if ref_exists(cfg.checkout, f"refs/remotes/origin/wt/issue-{number}"):
+            reconcile(cfg, worktree, number)
     try:
-        result = dispatch_card.dispatch(cfg.checkout, number, arm=not found, known=(harness.read_credential(cfg),))
+        result = dispatch_card.dispatch(cfg.checkout, number, arm=not found and not blockers,
+                                        known=(harness.read_credential(cfg),))
     except open_pr.ReadyRunError as exc:
         # pushed and marked ready, but CI never ran it as ready: left unarmed, and parked by name below
         not_ready = str(exc)
@@ -413,7 +475,7 @@ def park(cfg: common.Config, card: int, target: int, why: str, n: int = 0, detai
     open_pr.comment(target, (
         f"**Lane: card #{card} is parked.** {reason[:1].upper() + reason[1:].rstrip('.')}. The feeder will not start "
         f"or rework it again. It needs a person: {PARK_ADVICE.get(why, PARK_ADVICE['default'])}. To let the lane "
-        f"pick it up again, run `scripts/lane.py unpark {card}` on the lane host."))
+        f"pick it up again, run `scripts/lane.py unpark {card} --reason '...'` on the lane host."))
     label = {"idle": f"after {n} idle runs", "reworks": f"after {n} rework rounds"}.get(why, f"({why})")
     common.log(f"worker-{card}", f"parked {label} — commented on #{target}")
 
@@ -443,6 +505,10 @@ def main() -> int:
             harness.clear_worker(args.issue, pid)
     except LaneError as exc:
         common.log(job, f"FAILED — {exc}")
+        try:
+            harness.note_death(args.issue, str(exc))
+        except LaneError as also:
+            common.log(job, f"FAILED — its death could not be recorded: {also}")
         return 1
 
 
