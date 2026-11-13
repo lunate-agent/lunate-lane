@@ -210,7 +210,11 @@ def brief(cfg: common.Config, issue: dict, worktree: pathlib.Path, pr: int | Non
         pr_line = ("The lane opens it after your first commit and writes its number to the file named by "
                    "`$LANE_PR_FILE` (`cat \"$LANE_PR_FILE\"`). Commit a first slice early, then read it.")
         fragment_name = "`changes/<the pull request number>.md`"
-    if fragments:
+    if github.is_release(f"wt/issue-{number}", issue["title"]):
+        fragment = ("This is a release card (its title starts with `chore(release)`): you may edit `CHANGELOG.md` — "
+                    "the release collects the `changes/` fragments into it — and this pull request needs no "
+                    "`changes/<n>.md` fragment of its own.")
+    elif fragments:
         fragment = (f"Never edit `CHANGELOG.md`. Write the change's line(s) to {fragment_name}, under the release's "
                     "own headings (look at the existing files in `changes/`), and commit it before the archive.")
     else:

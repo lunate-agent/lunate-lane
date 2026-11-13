@@ -173,8 +173,8 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
 | `scripts/dispatch_card.py` | A card becomes (or reuses) its pull request: reads the issue, checks the branch, writes the body. |
 | `scripts/open_pr.py` | Pushes and opens a pull request as `lunate-worker`, optionally arms auto-merge, comments as the worker. |
 | `scripts/identity.py` | Mints installation tokens for either App. |
-| `templates/worker-brief.md` | The worker's fixed brief: OpenSpec lifecycle, archive last, the changelog fragment, run only the named tests, and `NEEDS-PERSON` to stop for a person. |
-| `templates/review-brief.md` | The reviewer's brief and the verdict file format. A check no pull request can evidence gets `NEEDS-PERSON` (an approval carrying it is posted as a request for changes). |
+| `templates/worker-brief.md` | The worker's fixed brief: OpenSpec lifecycle, archive last, the changelog fragment (a release card — title starting `chore(release)` — may edit `CHANGELOG.md` and needs none), run only the named tests, and `NEEDS-PERSON` to stop for a person. |
+| `templates/review-brief.md` | The reviewer's brief and the verdict file format. A release pull request (`release/<version>` branch or `chore(release)` title) may edit `CHANGELOG.md` without a fragment; a check no pull request can evidence gets `NEEDS-PERSON` (an approval carrying it is posted as a request for changes). Who opens and merges release pull requests is not decided yet. |
 
 ## Configuration
 

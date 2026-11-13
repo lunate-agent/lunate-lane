@@ -753,3 +753,22 @@ class NeedsPersonDriveTests(DriveCase):
         text = worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), None, "", True)
         self.assertIn("NEEDS-PERSON: <what has to be decided or supplied", text)
         self.assertIn("evidence\ncan only come from a real release", text)
+
+
+class ReleaseBriefTests(unittest.TestCase):
+    """D: a release card may edit CHANGELOG.md and needs no fragment; every other card keeps the rule."""
+
+    setUp, tearDown = BriefTests.setUp, BriefTests.tearDown
+
+    def test_a_chore_release_card_may_edit_the_changelog(self) -> None:
+        release = {**ISSUE, "title": "chore(release): 0.4.0"}
+        text = worker.brief(self.cfg, release, pathlib.Path("/w"), 820, "", True)
+        self.assertIn("you may edit `CHANGELOG.md`", text)
+        self.assertIn("needs no `changes/<n>.md` fragment", text)
+        self.assertNotIn("Never edit `CHANGELOG.md`", text)
+
+    def test_any_other_card_keeps_the_fragment_rule(self) -> None:
+        for title in ("Fix the loop", "chore: release notes typo", "docs(release): explain"):
+            with self.subTest(title=title):
+                text = worker.brief(self.cfg, {**ISSUE, "title": title}, pathlib.Path("/w"), 820, "", True)
+                self.assertIn("Never edit `CHANGELOG.md`. Write the change's line(s) to `changes/820.md`", text)

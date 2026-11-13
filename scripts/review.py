@@ -155,9 +155,8 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str, str]:
         except OSError as exc:
             raise ReviewError(f"the diff {diff_file} could not be written: {exc}") from exc
         issue = dispatch_card.card(repo, p.card)
-        fragments = ("never edit `CHANGELOG.md`; the PR must add `changes/" + str(p.number) + ".md`."
-                     if common.git(repo, "ls-tree", "--name-only", f"origin/{cfg.base}", "--", "changes")
-                     else "the `changes/` convention is not on main yet; `CHANGELOG.md` must not be edited.")
+        fragments = fragment_check(p, bool(common.git(repo, "ls-tree", "--name-only", f"origin/{cfg.base}", "--",
+                                                      "changes")))
         report = github.worker_report(cfg, p.number) or "(the worker posted no session report on this pull request)"
         prompt = common.render("review-brief.md", PR=str(p.number), REPO=cfg.slug, TITLE=p.title, HEAD=p.head[:9],
                                WORKTREE=str(worktree), BASE=cfg.base, DIFF_FILE=str(diff_file),
@@ -174,6 +173,20 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str, str]:
     finally:
         remove_review_worktree(cfg, p.number)
         harness.clear_review(p.number, driver)
+
+
+RELEASE_CHECK = ("this is a release pull request (a `release/<version>` branch or a `chore(release)` title): it may "
+                 "edit `CHANGELOG.md` and needs no `changes/<n>.md` fragment. Check that the CHANGELOG entries match "
+                 "the fragments it collects.")
+
+
+def fragment_check(p: github.Pull, fragments: bool) -> str:
+    """The changelog rule for the review brief: a release pull request is the one that may edit CHANGELOG.md."""
+    if github.is_release(p.branch, p.title):
+        return RELEASE_CHECK
+    if fragments:
+        return "never edit `CHANGELOG.md`; the PR must add `changes/" + str(p.number) + ".md`."
+    return "the `changes/` convention is not on main yet; `CHANGELOG.md` must not be edited."
 
 
 def spec_neighbours(p: github.Pull, others) -> str:

@@ -546,3 +546,14 @@ def ready_run(r: CiRun, draft_runs: frozenset) -> bool:
     if r.ready_job:
         return r.ready_job != "SKIPPED"
     return r.id not in draft_runs
+
+
+RELEASE_BRANCH = re.compile(r"^release/[^/]+$")
+RELEASE_TITLE = "chore(release)"
+
+
+def is_release(branch: str, title: str) -> bool:
+    """A release pull request — branch `release/<version>`, or a title starting with `chore(release)` — may edit
+    CHANGELOG.md (it collects the fragments) and needs no `changes/<n>.md` of its own. Who opens and merges
+    release pull requests is not decided yet; this is only the exception in both briefs."""
+    return bool(RELEASE_BRANCH.match(branch or "")) or (title or "").strip().startswith(RELEASE_TITLE)
