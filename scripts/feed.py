@@ -36,10 +36,12 @@ def decide(cfg: common.Config) -> tuple[list[cards.Launch], list[str]]:
 def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[github.Pull], list[github.Pull]]:
     """The launches and notes, and the worker pull requests whose required checks failed for infra reasons and
     have not been rerun on their head yet: those are rerun once, not reworked."""
+    # the running workers first: a worker that finishes between the two reads leaves its pull request ready, and
+    # a draft read before that would look orphaned
+    running = harness.running_workers()
     milestone = github.milestone_cards(cfg)
     pulls = github.open_pulls(cfg)
     worker_pulls = [github.pull(cfg, p.number) for p in pulls if p.author == cfg.worker_app]
-    running = harness.running_workers()
     pins = cards.load_pins(cfg.pins)
     required = github.required_checks(cfg)
     reran, parked = harness.reran(), harness.parked_cards()
@@ -96,6 +98,17 @@ def tick(dry_run: bool = False) -> None:
     for launch in launches:
         what = (f"rework of #{launch.rework_pr} for card #{launch.card} ({launch.reason})" if launch.rework_pr
                 else f"card #{launch.card}")
+        if launch.person is not None:  # the reviewer said a person must decide: parked at once, never reworked
+            if dry_run:
+                common.log(JOB, f"would park card #{launch.card} — the review of #{launch.rework_pr} says NEEDS-PERSON: "
+                                f"{launch.person}")
+                continue
+            if harness.park(launch.card, "person", launch.person):
+                worker.park(cfg, launch.card, launch.rework_pr, "person",
+                            detail=f"the review of #{launch.rework_pr} says it needs a person: {launch.person}")
+            common.log(JOB, f"parked card #{launch.card} — the review of #{launch.rework_pr} says NEEDS-PERSON: "
+                            f"{launch.person}")
+            continue
         rounds = harness.rework_rounds(launch.card, launch.rework_pr) if launch.rework_pr else 0
         if rounds >= harness.REWORK_LIMIT:  # the cap holds whatever the cause (#9)
             if dry_run:

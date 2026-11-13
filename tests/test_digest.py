@@ -94,3 +94,24 @@ class ReadTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OrphanTests(unittest.TestCase):
+    def test_an_orphaned_draft_is_stuck_by_name_and_a_worked_or_parked_draft_is_not(self) -> None:
+        orphan, worked, parked = (pull(816, 780, draft=True), pull(815, 804, draft=True), pull(813, 794, draft=True))
+        text = digest.compose(CFG, [], [orphan, worked, parked], [], REQUIRED, NOW, {794: "reworks"},
+                              {804: frozenset()})
+        self.assertIn("Stuck (1):", text)
+        self.assertIn("  #816 — orphaned draft — no worker on it; the feeder relaunches it", text)
+        self.assertNotIn("  #815 — orphaned", text)
+        self.assertNotIn("  #813 — orphaned", text)
+
+
+class ParkedReasonTests(unittest.TestCase):
+    def test_a_person_or_ready_park_shows_its_words(self) -> None:
+        text = digest.compose(CFG, [], [], [], REQUIRED, NOW, {
+            794: ("reworks", ""), 780: ("person", "check 2 needs a maintainer decision"),
+            804: ("ready", "#815: the ready CI run on f9cb14ed9 was cancelled again after one draft/ready toggle")})
+        self.assertIn("#780 — needs a person: check 2 needs a maintainer decision", text)
+        self.assertIn("#804 — CI never ran it as ready: #815: the ready CI run on f9cb14ed9 was cancelled", text)
+        self.assertIn("#794 — rework rounds used up", text)

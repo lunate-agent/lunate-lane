@@ -59,7 +59,15 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      second such failure on the same head, or any real failing step, goes back to a worker. Conflicts are resolved
      by merging `origin/main` into the branch, never by rebasing; the lane never force-pushes (a rewritten branch
      is refused). Then the named tests, the push, and a new review (the ruleset dismisses the stale approval). A
-     rework does not add to WIP — its card is already in flight;
+     rework does not add to WIP — its card is already in flight. An **orphaned draft** goes back too: a worker
+     pull request that is a draft, with no worker running its card and the card not parked — what an unclean
+     finish leaves, which nothing else would ever touch (#816). Its brief quotes the last run's reason; if the
+     branch's work is already complete the run may end with no new commit and the pull request is marked ready.
+     It counts an idle run and a rework round at launch like any rework, so it is parked, with a comment, at
+     either cap. The running workers are read before the pull requests, so a worker finishing between the reads
+     never makes its own pull request look orphaned. A request for changes whose body says **`NEEDS-PERSON:
+     <reason>`** is not reworked: the card is parked at once with that reason, and the comment and the digest
+     say it;
    - **then new cards**, in order: the pins file (if any), then `kind/bug`, then cards that other open issues
      depend on (native GitHub dependency edges), then oldest first. A card waiting on an open issue is skipped;
      so is a card any open pull request (any author) already carries or closes.
@@ -95,7 +103,15 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    written); when the session ends with commits the branch is pushed again, the session's final report is posted
    on the pull request, and — only if the run was clean (exit 0, not stalled, nothing uncommitted, a new commit, a
    real final message) — the pull request is marked ready and then auto-merge is armed. Otherwise it stays a draft
-   with auto-merge off, with a comment naming why, and the orchestrator takes over. A rework returns its pull
+   with auto-merge off, with a comment naming why, and the next feeder tick relaunches it as an orphaned draft. A
+   final report with a **`NEEDS-PERSON: <reason>`** line (a finding nobody can meet inside the card: a
+   maintainer's decision, a failure in code the diff does not touch, evidence only a real release gives) is never
+   armed: the card is parked at once with that reason. Marking ready waits first for GitHub to show the pushed
+   head, then for the push's own (draft) CI run to exist — marked ready earlier, the late draft run cancelled the
+   ready run through CI's concurrency group on #816. After marking ready the lane waits for a CI run that saw the
+   pull request as ready (its `checks.ready_job`, `plan`, ran instead of being skipped) and is not cancelled on two
+   reads; if the ready run was cancelled it toggles draft then ready once. If that fails too, or no ready run
+   starts, the pull request is left ready and unarmed and the card is parked naming the runs. A rework returns its pull
    request to draft, with auto-merge off, before its session starts, and is made ready again only at its own clean
    finish. The draft and auto-merge state in the comment and the log are read back from
    GitHub, never assumed. Auto-merge is armed with the merge queue's own method, read from the base branch's
@@ -103,7 +119,8 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    request than the one sent (it recorded `MERGE` on #813, armed with `SQUASH`); the log shows both, and what
    actually lands is checked on the merged commit's parent count. The final report is scanned before posting: anything token- or key-shaped (GitHub
    tokens, `sk-` keys, private-key blocks, AWS keys, JWTs, `key=…`/`token=…` assignments, long opaque strings, or
-   the model credential itself) replaces it with a fixed "output withheld" note, and the worker log says so.
+   the model credential itself) has each matched span replaced by `[redacted: <kind>]` and the rest is posted; the
+   worker log names each kind, and the full message stays in the local session log.
    **Before every push** the diff's added lines (against `origin/main`), the pull request's title and its body
    are scanned for the shapes that are secrets by construction (private keys, GitHub tokens, `sk-`/`oc_` keys,
    AWS keys, JWTs) and the model credential. A match pushes nothing, parks the card, comments once naming the kind
@@ -157,8 +174,8 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
 | `scripts/dispatch_card.py` | A card becomes (or reuses) its pull request: reads the issue, checks the branch, writes the body. |
 | `scripts/open_pr.py` | Pushes and opens a pull request as `lunate-worker`, optionally arms auto-merge, comments as the worker. |
 | `scripts/identity.py` | Mints installation tokens for either App. |
-| `templates/worker-brief.md` | The worker's fixed brief: OpenSpec lifecycle, archive last, the changelog fragment, run only the named tests. |
-| `templates/review-brief.md` | The reviewer's brief and the verdict file format. |
+| `templates/worker-brief.md` | The worker's fixed brief: OpenSpec lifecycle, archive last, the changelog fragment (a release card — title starting `chore(release)` — may edit `CHANGELOG.md` and needs none), run only the named tests, and `NEEDS-PERSON` to stop for a person. |
+| `templates/review-brief.md` | The reviewer's brief and the verdict file format. A release pull request (`release/<version>` branch or `chore(release)` title) may edit `CHANGELOG.md` without a fragment; a check no pull request can evidence gets `NEEDS-PERSON` (an approval carrying it is posted as a request for changes). Who opens and merges release pull requests is not decided yet. |
 
 ## Configuration
 

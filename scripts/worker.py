@@ -24,12 +24,10 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from scripts import cards, common, dispatch_card, github, harness, open_pr  # noqa: E402
+from scripts import cards, common, dispatch_card, github, harness, open_pr, secret_scan  # noqa: E402
 from scripts.common import GitError, LaneError  # noqa: E402
 
 COMMENT_LIMIT = 60000
-WITHHELD = ("(Output withheld: the session's final message contained something shaped like a {kind}. "
-            "It stays in the lane's local session log.)")
 
 
 def ref_exists(repo: pathlib.Path, ref: str) -> bool:
@@ -139,9 +137,16 @@ def conflicts(cfg: common.Config, worktree: pathlib.Path) -> list[str]:
 
 
 def rework_findings(cfg: common.Config, pr: int, worktree: pathlib.Path | None = None) -> str:
+    return rework_brief(cfg, pr, worktree)[0]
+
+
+def rework_brief(cfg: common.Config, pr: int, worktree: pathlib.Path | None = None) -> tuple[str, bool]:
     """Everything that sends this pull request back, read now: the reviewer's request for changes on the head,
-    the failing checks with their log tails, the conflicting files, the merge queue's removal (#8). None of them
-    is a refusal to rework."""
+    the failing checks with their log tails, the conflicting files, the merge queue's removal (#8), and for an
+    orphaned draft what its last run reported. None of them is a refusal to rework.
+
+    Returns (findings, resume): `resume` is True when the only reason is an orphaned draft — the run may then end
+    with no new commit if the work is already complete (it still counts as an idle run)."""
     p = github.pull(cfg, pr)
     if p.state != "OPEN":
         raise LaneError(f"#{pr} is {p.state.lower()} — nothing to rework")
@@ -175,10 +180,22 @@ def rework_findings(cfg: common.Config, pr: int, worktree: pathlib.Path | None =
     elif stuck:
         sections.append(f"### It is {stuck}\n\nThe merge queue tests the branch together with what lands before "
                         f"it. Merge `origin/{cfg.base}`, find what breaks in combination, and fix it.")
+    resume = False
+    if p.draft:
+        resume = not sections
+        report = github.worker_report(cfg, pr)
+        incomplete = [line.strip() for line in report.splitlines() if line.strip().startswith("**Incomplete")]
+        sections.append(
+            "### The last run did not finish\n\nThis pull request was left a draft by a worker run that did not "
+            "finish cleanly, and nobody has worked on it since. That run reported:\n\n> "
+            + (incomplete[-1] if incomplete else "(no reason on record — read the branch and the card)")
+            + "\n\nPick the card up where it stopped. If the work on the branch is already complete, verify it — "
+            "the named tests, `openspec validate --all --strict`, the acceptance checks — and end with your report: "
+            "no new commit is needed then, and the lane marks the pull request ready.")
     if not sections:
-        raise LaneError(f"#{pr} has no request for changes on its head {p.head[:8]} and is not stuck — nothing "
-                        "to rework")
-    return "\n\n".join(sections)
+        raise LaneError(f"#{pr} has no request for changes on its head {p.head[:8]}, is not stuck and is not a "
+                        "draft — nothing to rework")
+    return "\n\n".join(sections), resume
 
 
 def brief(cfg: common.Config, issue: dict, worktree: pathlib.Path, pr: int | None, findings: str,
@@ -191,7 +208,11 @@ def brief(cfg: common.Config, issue: dict, worktree: pathlib.Path, pr: int | Non
         pr_line = ("The lane opens it after your first commit and writes its number to the file named by "
                    "`$LANE_PR_FILE` (`cat \"$LANE_PR_FILE\"`). Commit a first slice early, then read it.")
         fragment_name = "`changes/<the pull request number>.md`"
-    if fragments:
+    if github.is_release(f"wt/issue-{number}", issue["title"]):
+        fragment = ("This is a release card (its title starts with `chore(release)`): you may edit `CHANGELOG.md` — "
+                    "the release collects the `changes/` fragments into it — and this pull request needs no "
+                    "`changes/<n>.md` fragment of its own.")
+    elif fragments:
         fragment = (f"Never edit `CHANGELOG.md`. Write the change's line(s) to {fragment_name}, under the release's "
                     "own headings (look at the existing files in `changes/`), and commit it before the archive.")
     else:
@@ -211,8 +232,10 @@ def brief(cfg: common.Config, issue: dict, worktree: pathlib.Path, pr: int | Non
                          FRAGMENT_RULE=fragment, REWORK=rework, BODY=(issue.get("body") or "").strip())
 
 
-def problems(cfg: common.Config, outcome: harness.Outcome, worktree: pathlib.Path, start_head: str) -> list[str]:
-    """Why a finished session is not clean. rc=0 only says the process exited."""
+def problems(cfg: common.Config, outcome: harness.Outcome, worktree: pathlib.Path, start_head: str,
+             resume: bool = False) -> list[str]:
+    """Why a finished session is not clean. rc=0 only says the process exited. A `resume` of an orphaned draft
+    may end with no new commit: its work can be complete already."""
     found = []
     if outcome.stalled:
         found.append(f"the session stalled or passed its time cap and was stopped after {outcome.elapsed}s")
@@ -222,7 +245,7 @@ def problems(cfg: common.Config, outcome: harness.Outcome, worktree: pathlib.Pat
         found.append("the session's last message is tool-call markup, not a report")
     if common.wt_git(cfg, worktree, "status", "--porcelain"):
         found.append("the session left uncommitted changes in the worktree")
-    if common.wt_git(cfg, worktree, "rev-parse", "HEAD") == start_head:
+    if not resume and common.wt_git(cfg, worktree, "rev-parse", "HEAD") == start_head:
         found.append("the session made no new commit")
     return found
 
@@ -231,7 +254,7 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
     job = f"worker-{number}"
     worktree = prepare_worktree(cfg, number)
     issue = dispatch_card.card(cfg.checkout, number)
-    findings = rework_findings(cfg, rework_pr, worktree) if rework_pr else ""
+    findings, resume = rework_brief(cfg, rework_pr, worktree) if rework_pr else ("", False)
     if rework_pr:
         # back to draft before the session: CI's heavy legs and the reviewer wait for the clean finish (#5)
         open_pr.return_to_draft(f"wt/issue-{number}", rework_pr)
@@ -274,23 +297,48 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
                                   log_path=session_log, extra_env={"LANE_PR_FILE": str(pr_file)}, on_tick=open_early,
                                   branch=f"wt/issue-{number}",
                                   on_start=lambda pgid, sid: harness.note_session(number, driver, pgid, sid))
-    return finish(cfg, number, worktree, outcome, start_head, session_log)
+    return finish(cfg, number, worktree, outcome, start_head, session_log, resume)
+
+
+def person_reason(cfg: common.Config, report: str) -> str | None:
+    """The worker's `NEEDS-PERSON: <reason>`, if its final message has one, with anything secret-shaped in it
+    redacted, as in the report itself."""
+    reason = github.needs_person(report)
+    if reason is None:
+        return None
+    return secret_scan.redact(reason, (harness.read_credential(cfg),))[0]
 
 
 def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: harness.Outcome, start_head: str,
-           session_log: pathlib.Path) -> int:
+           session_log: pathlib.Path, resume: bool = False) -> int:
     job = f"worker-{number}"
-    found = problems(cfg, outcome, worktree, start_head)
+    found = problems(cfg, outcome, worktree, start_head, resume)
+    try:  # read before the push, for its NEEDS-PERSON; an unreadable log never holds the commits back
+        report = harness.last_text(session_log).strip() or "(the session left no final message)"
+    except harness.HarnessError as exc:
+        report = f"(the session's final message could not be read: {exc})"
+    person = person_reason(cfg, report)
+    if person is not None:  # the worker stopped for a person: never armed, and the card parks at once
+        found.append(f"the worker says it needs a person: {person}")
     idle, parked_now = harness.note_run(number, common.wt_git(cfg, worktree, "rev-parse", "HEAD") != start_head)
     if idle:
         common.log(job, f"no new commit — idle run {idle} of {harness.IDLE_RUN_LIMIT}")
     if dispatch_card._count(cfg.checkout, f"wt/issue-{number}") == 0:
         common.log(job, "the session ended with no commits — no pull request. " + "; ".join(found))
-        if parked_now:
+        if person is not None:
+            park_for_person(cfg, number, number, person)
+        elif parked_now:
             park(cfg, number, number, "idle", idle)
         return 1
+    not_ready = ""
     try:
         result = dispatch_card.dispatch(cfg.checkout, number, arm=not found, known=(harness.read_credential(cfg),))
+    except open_pr.ReadyRunError as exc:
+        # pushed and marked ready, but CI never ran it as ready: left unarmed, and parked by name below
+        not_ready = str(exc)
+        common.log(job, f"#{exc.number} — {not_ready}")
+        found.append(not_ready)
+        result = {"number": exc.number, "auto_merge": "not armed"}
     except open_pr.SecretFound as exc:
         # nothing was pushed; the card stops here until a person looks (#12). The kind, never the value.
         common.log(job, f"secret scan: {exc}")
@@ -301,29 +349,48 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
         return 1
     head = common.wt_git(cfg, worktree, "rev-parse", "HEAD")[:9]
     lines = [f"**Worker session** on `{cfg.worker_model}` at `{head}`, {outcome.elapsed // 60} min."]
-    if found:
+    if not_ready:
+        lines.append(f"**Marked ready, but not armed:** {not_ready}.")
+    elif found:
         lines.append(f"**Incomplete — the pull request stays a draft and auto-merge is {result['auto_merge']}:** "
                      + "; ".join(found) + ".")
-    report = harness.last_text(session_log).strip() or "(the session left no final message)"
-    kind = harness.secret_kind(report, (harness.read_credential(cfg),))
-    if kind:
-        common.log(job, f"the session's final message holds something shaped like a {kind} — not posted; "
-                        f"it stays in {session_log}")
-        report = WITHHELD.format(kind=kind)
+    report, kinds = secret_scan.redact(report, (harness.read_credential(cfg),))
+    for kind in kinds:  # each span is replaced, the rest is posted; the full message stays in the local log
+        common.log(job, f"the session's final message holds something shaped like a {kind} — redacted before "
+                        f"posting; the full message stays in {session_log}")
     lines.append("\n" + report)
     open_pr.comment(result["number"], "\n".join(lines)[:COMMENT_LIMIT])
     method = (f" (queue {result['queue_method']}, GitHub records {result.get('merge_method') or 'none'})"
               if result.get("queue_method") else "")
     common.log(job, f"#{result['number']} pushed at {head}, auto-merge {result['auto_merge']}{method}"
                + (f" — {'; '.join(found)}" if found else ""))
-    if parked_now:
+    if person is not None:
+        park_for_person(cfg, number, result["number"], person)
+    elif not_ready:
+        if harness.park(number, "ready", not_ready):
+            park(cfg, number, result["number"], "ready", detail=not_ready)
+    elif parked_now:
         park(cfg, number, result["number"], "idle", idle)
     return 1 if found else 0
+
+
+def park_for_person(cfg: common.Config, card: int, target: int, reason: str) -> None:
+    """The worker wrote NEEDS-PERSON: park the card now, with its reason, whatever the counters say."""
+    if harness.park(card, "person", reason):
+        park(cfg, card, target, "person", detail=f"the worker says it needs a person: {reason}")
 
 
 PARK_WHY = {
     "idle": "{n} worker runs in a row ended with no new commit (cap: {cap})",
     "reworks": "it went back to a worker {n} times (cap: {cap}) and is still not ready",
+}
+
+
+PARK_ADVICE = {
+    "default": "split or clarify the card, or push a fix",
+    "person": "make the decision or supply what the reason names, on the card or the pull request",
+    "ready": "the pull request is ready with auto-merge off; convert it to a draft and mark it ready again, and "
+             "check that CI starts a run that sees it as ready",
 }
 
 
@@ -343,9 +410,9 @@ def park(cfg: common.Config, card: int, target: int, why: str, n: int = 0, detai
     cap = harness.IDLE_RUN_LIMIT if why == "idle" else harness.REWORK_LIMIT
     reason = PARK_WHY[why].format(n=n, cap=cap) if why in PARK_WHY else detail
     open_pr.comment(target, (
-        f"**Lane: card #{card} is parked.** {reason[:1].upper() + reason[1:]}, so the feeder will not start or "
-        f"rework it again. It needs a person: split or clarify the card, or push a fix. To let the lane pick it up "
-        f"again, delete `{record}` on the lane host."))
+        f"**Lane: card #{card} is parked.** {reason[:1].upper() + reason[1:].rstrip('.')}. The feeder will not start "
+        f"or rework it again. It needs a person: {PARK_ADVICE.get(why, PARK_ADVICE['default'])}. To let the lane "
+        f"pick it up again, delete `{record}` on the lane host."))
     label = {"idle": f"after {n} idle runs", "reworks": f"after {n} rework rounds"}.get(why, f"({why})")
     common.log(f"worker-{card}", f"parked {label} — commented on #{target}")
 

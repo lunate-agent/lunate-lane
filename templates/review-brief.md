@@ -47,6 +47,15 @@ not met, a scope violation, a hand-edited spec, an archive that is not last, a m
 that does not test the change, a spec delta that contradicts main's spec or another open PR unannounced, a wrong
 or missing intent decision, or anything you could not establish. The lane posts this as a real review.
 
+**An acceptance check that cannot be evidenced in a pull request** — it needs a maintainer's decision, or only a
+real release can show it — is not something a worker can fix. Use REQUEST_CHANGES and put this line in the body:
+
+    NEEDS-PERSON: <the check, by number, and why no pull request can evidence it>
+
+The lane then parks the card for a person instead of sending it back for another round. Never use NEEDS-PERSON
+for something the worker can fix, and never APPROVE with it: an approval with a NEEDS-PERSON line is posted as
+a request for changes.
+
 ## The issue (#{{CARD}})
 
 {{BODY}}

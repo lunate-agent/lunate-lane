@@ -59,6 +59,15 @@ headed **Intent decisions** listing each grill-me question with the answer you c
 checks those answers. A wrong
 "done" is worse than an honest "blocked": if you cannot finish, commit what you have and say what is missing.
 
+**When only a person can resolve it, say so and stop.** If a finding or an acceptance check cannot be met inside
+this card — it needs a maintainer's decision, the failure is in code the diff does not touch, or the evidence
+can only come from a real release — do not work around it and do not guess. Commit what you have, then put this
+line in your final report and end the session:
+
+    NEEDS-PERSON: <what has to be decided or supplied, and why it cannot be done in this card>
+
+The lane parks the card at once with that reason and does not send it back to a worker.
+
 ## The card (verbatim)
 
 {{BODY}}

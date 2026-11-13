@@ -620,3 +620,22 @@ class WorkerRecordTests(HarnessCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RedactTests(unittest.TestCase):
+    """E: each secret-shaped span is replaced by its kind; nothing else changes."""
+
+    def test_each_span_is_replaced_and_the_kinds_are_named(self) -> None:
+        from scripts import secret_scan
+
+        token, aws = "ghp_" + "K4m" * 10, "AKIA" + "ABCDEFGHIJKLMNOP"
+        text, kinds = secret_scan.redact(f"a {token} b {aws} c known-value-123 d", ("known-value-123",))
+        self.assertEqual(text, "a [redacted: GitHub token] b [redacted: AWS access key] c "
+                               "[redacted: configured credential] d")
+        self.assertEqual(kinds, ("configured credential", "GitHub token", "AWS access key"))
+
+    def test_clean_text_and_commit_shas_are_untouched(self) -> None:
+        from scripts import secret_scan
+
+        text = "merged 3d35f9855" + "a" * 31 + " into main; 14 passed"
+        self.assertEqual(secret_scan.redact(text), (text, ()))

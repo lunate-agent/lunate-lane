@@ -45,3 +45,27 @@ def secret_kind(text: str, known: tuple = (), strict: bool = False) -> str | Non
     if not strict and any(_opaque(match.group(0)) for match in _OPAQUE.finditer(text)):
         return "opaque key-like string"
     return None
+
+
+def redact(text: str, known: tuple = ()) -> tuple[str, tuple]:
+    """`text` with each secret-shaped span replaced by `[redacted: <kind>]`, and the kinds found, in order of first
+    appearance. Same shapes as `secret_kind` (not strict): known values first, then each shape, then opaque runs.
+    If anything secret-shaped is still found afterwards — a shape the replacement split oddly — the whole text is
+    withheld instead: a posted report never carries a partial secret."""
+    kinds: list = []
+
+    def mark(kind: str) -> str:
+        if kind not in kinds:
+            kinds.append(kind)
+        return f"[redacted: {kind}]"
+
+    for value in known:
+        if value and value in text:
+            text = text.replace(value, mark("configured credential"))
+    for kind, pattern in SECRET_SHAPES:
+        text = pattern.sub(lambda m, kind=kind: mark(kind), text)
+    text = _OPAQUE.sub(lambda m: mark("opaque key-like string") if _opaque(m.group(0)) else m.group(0), text)
+    left = secret_kind(text, known)
+    if left:
+        return f"[redacted: the whole message — something shaped like a {left} remained]", tuple(kinds) or (left,)
+    return text, tuple(kinds)

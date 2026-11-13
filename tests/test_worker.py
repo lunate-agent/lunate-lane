@@ -358,8 +358,8 @@ class BriefTests(unittest.TestCase):
                 worker.rework_findings(self.cfg, 12)
 
 
-class DriveTests(RepoCase):
-    """A whole run: the session commits, the PR opens unarmed at the first commit, then is armed at the end."""
+class DriveCase(RepoCase):
+    """The fixture of a whole run: the session, the dispatch and the comments replaced."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -406,6 +406,11 @@ class DriveTests(RepoCase):
             return harness.Outcome(rc, stalled, 60, False)
 
         return mock.patch.object(harness, "run_session", side_effect=run)
+
+
+
+class DriveTests(DriveCase):
+    """A whole run: the session commits, the PR opens unarmed at the first commit, then is armed at the end."""
 
     def test_a_clean_run_opens_early_unarmed_then_arms_and_reports(self) -> None:
         with self.fake_session():
@@ -515,7 +520,7 @@ class DriveTests(RepoCase):
         self.assertIn("auto-merge is not armed", self.comments[0][1])
         self.assertIn("auto-merge not armed", (self.cfg.state / "logs" / "worker-3.log").read_text())
 
-    def test_a_token_in_the_final_message_is_withheld_and_logged(self) -> None:
+    def test_a_token_in_the_final_message_is_redacted_and_the_rest_posted(self) -> None:
         token = "ghs_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"
         for text, kind in ((f"done, and here is {token}", "GitHub token"),
                            ("my key is model-credential-value-1234", "configured credential")):
@@ -524,13 +529,35 @@ class DriveTests(RepoCase):
                 with self.fake_session(text=text):
                     worker.drive(self.cfg, 3, None)
                 body = self.comments[0][1]
-                self.assertIn("Output withheld", body)
-                self.assertIn(kind, body)
+                self.assertIn(f"[redacted: {kind}]", body)
                 self.assertNotIn(token, body)
                 self.assertNotIn("model-credential-value-1234", body)
                 log = (self.cfg.state / "logs" / "worker-3.log").read_text()
-                self.assertIn(f"shaped like a {kind} — not posted", log)
+                self.assertIn(f"shaped like a {kind} — redacted before posting", log)
                 self.assertNotIn(token, log)
+
+    def test_a_report_quoting_a_ci_log_line_with_a_key_keeps_everything_but_the_key(self) -> None:
+        """E: the report quotes the failing CI line; only the key-shaped span goes, the evidence stays."""
+        key = "sk-proj-" + "Q7mZ2xK9pL4vR8tW1nB6"
+        line = f"2026-11-12T22:50:01.1234567Z ##[error]ProviderTests.Rejects_bad_key: Authorization: Bearer {key} (401)"
+        text = ("1. met — src/Provider.cs:42.\\n2. not met: CI fails on a test I did not touch:\\n    " + line
+                + "\\nTests: 14 passed.")
+        with self.fake_session(text=text):
+            worker.drive(self.cfg, 3, None)
+        body = self.comments[0][1]
+        self.assertNotIn(key, body)
+        self.assertNotIn(key[3:], body)
+        self.assertIn("##[error]ProviderTests.Rejects_bad_key: Authorization: Bearer [redacted: API key] (401)", body)
+        self.assertIn("1. met — src/Provider.cs:42.", body)
+        self.assertIn("Tests: 14 passed.", body)
+        self.assertNotIn("Output withheld", body)
+        log = (self.cfg.state / "logs" / "worker-3.log").read_text()
+        self.assertIn("shaped like a API key — redacted before posting", log)
+        self.assertNotIn(key, log)
+        self.assertIn(key, self.session_log_text(), "the full message stays in the local session log")
+
+    def session_log_text(self) -> str:
+        return "".join(p.read_text() for p in (self.cfg.state / "sessions").glob("issue-3-*.jsonl"))
 
     def test_a_committed_secret_is_never_pushed_and_parks_the_card_naming_only_its_kind(self) -> None:
         """#12, through the real dispatch and open_pr: the scan stops both the early open and the finish."""
@@ -649,3 +676,121 @@ class DriveTests(RepoCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OrphanBriefTests(unittest.TestCase):
+    """A: the brief of an orphaned draft says what its last run reported, and lets a complete branch finish
+    without a new commit."""
+
+    setUp, tearDown = BriefTests.setUp, BriefTests.tearDown
+
+    REPORT = ("**Worker session** on `m` at `3d35f9855`, 24 min.\n**Incomplete — the pull request stays a draft and "
+              "auto-merge is not armed:** the session made no new commit.\n\nAll checks met.")
+
+    def test_816s_brief_names_the_last_runs_reason_and_resumes(self) -> None:
+        p = pull(816, 780, head="3d35f9855", draft=True, checks=RED)
+        with mock.patch.object(github, "pull", return_value=p), \
+                mock.patch.object(github, "worker_report", return_value=self.REPORT):
+            text, resume = worker.rework_brief(self.cfg, 816)
+        self.assertTrue(resume)
+        self.assertIn("### The last run did not finish", text)
+        self.assertIn("> **Incomplete — the pull request stays a draft and auto-merge is not armed:** the session "
+                      "made no new commit.", text)
+        self.assertIn("no new commit is needed then", text)
+        self.assertNotIn("Checks are failing", text, "a draft's deliberate ci-ok failure is not a finding")
+
+    def test_a_draft_with_a_request_for_changes_is_not_a_resume(self) -> None:
+        p = pull(816, 780, draft=True, reviews=[review("CHANGES_REQUESTED", body="fix x.cs:3")])
+        with mock.patch.object(github, "pull", return_value=p), \
+                mock.patch.object(github, "worker_report", return_value=""):
+            text, resume = worker.rework_brief(self.cfg, 816)
+        self.assertFalse(resume)
+        self.assertIn("fix x.cs:3", text)
+        self.assertIn("(no reason on record", text)
+
+
+class OrphanDriveTests(DriveCase):
+    def test_a_resume_that_finds_the_work_complete_is_marked_ready_without_a_commit(self) -> None:
+        sha = self.push_branch("wt/issue-3", "first.cs")
+        with mock.patch.object(github, "pull", return_value=pull(77, 3, head=sha, draft=True)), \
+                mock.patch.object(github, "worker_report", return_value=""):
+            harness.note_attempt(3)
+            with self.fake_session(commit=False, text="verified: 1. met — a.cs:1"):
+                self.assertEqual(worker.drive(self.cfg, 3, 77), 0)
+        self.assertEqual(self.dispatched, [True], "clean with no new commit: pushed, marked ready and armed")
+        self.assertNotIn("Incomplete", self.comments[0][1])
+        self.assertEqual(harness.idle_runs(3), 1, "it still counts as an idle run toward the cap")
+
+    def test_a_rework_with_changes_requested_still_needs_a_commit(self) -> None:
+        sha = self.push_branch("wt/issue-3", "first.cs")
+        with mock.patch.object(github, "pull", return_value=pull(77, 3, head=sha, draft=True,
+                                                                 reviews=[review("CHANGES_REQUESTED", commit=sha)])), \
+                mock.patch.object(github, "worker_report", return_value=""):
+            with self.fake_session(commit=False):
+                self.assertEqual(worker.drive(self.cfg, 3, 77), 1)
+        self.assertEqual(self.dispatched, [False])
+        self.assertIn("the session made no new commit", self.comments[0][1])
+
+
+class ReadyRunDriveTests(DriveCase):
+    def test_ci_never_running_it_as_ready_parks_the_card_by_name_and_still_posts_the_report(self) -> None:
+        reason = "#77: the ready CI run on 3d35f9855 was cancelled again after one draft/ready toggle (run(s) 9)"
+
+        def dispatch(repo, number, arm=True, known=()):
+            self.dispatched.append(arm)
+            if arm:
+                raise open_pr.ReadyRunError(77, reason)
+            return {"number": 77, "auto_merge": "not armed"}
+
+        dispatch_card.dispatch.side_effect = dispatch
+        with self.fake_session():
+            self.assertEqual(worker.drive(self.cfg, 3, None), 1)
+        self.assertEqual(harness.parked_info(), {3: ("ready", reason)})
+        report, parking = self.comments
+        self.assertIn(f"**Marked ready, but not armed:** {reason}.", report[1])
+        self.assertIn("done: 1. met", report[1])
+        self.assertEqual(parking[0], 77)
+        self.assertIn("convert it to a draft and mark it ready again", parking[1])
+
+
+class NeedsPersonDriveTests(DriveCase):
+    def test_a_worker_that_says_needs_person_is_pushed_unarmed_and_parked_at_once(self) -> None:
+        with self.fake_session(text="1. met. 2. not met.\\nNEEDS-PERSON: check 2 needs a maintainer decision on the API"):
+            self.assertEqual(worker.drive(self.cfg, 3, None), 1)
+        self.assertEqual(self.dispatched, [False, False], "never armed")
+        self.assertEqual(harness.parked_info(), {3: ("person", "check 2 needs a maintainer decision on the API")})
+        report, parking = self.comments
+        self.assertIn("the worker says it needs a person: check 2 needs a maintainer decision", report[1])
+        self.assertEqual(parking[0], 77)
+        self.assertIn("card #3 is parked", parking[1])
+
+    def test_with_no_commits_the_issue_gets_the_reason(self) -> None:
+        with self.fake_session(commit=False, text="NEEDS-PERSON: the failure is in src/Other.cs, which the card does not touch"):
+            worker.drive(self.cfg, 3, None)
+        self.assertEqual([c[0] for c in self.comments], [3])
+        self.assertIn("the failure is in src/Other.cs", self.comments[0][1])
+        self.assertEqual(harness.parked_cards(), frozenset({3}))
+
+    def test_the_brief_tells_the_worker_how_to_stop(self) -> None:
+        text = worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), None, "", True)
+        self.assertIn("NEEDS-PERSON: <what has to be decided or supplied", text)
+        self.assertIn("evidence\ncan only come from a real release", text)
+
+
+class ReleaseBriefTests(unittest.TestCase):
+    """D: a release card may edit CHANGELOG.md and needs no fragment; every other card keeps the rule."""
+
+    setUp, tearDown = BriefTests.setUp, BriefTests.tearDown
+
+    def test_a_chore_release_card_may_edit_the_changelog(self) -> None:
+        release = {**ISSUE, "title": "chore(release): 0.4.0"}
+        text = worker.brief(self.cfg, release, pathlib.Path("/w"), 820, "", True)
+        self.assertIn("you may edit `CHANGELOG.md`", text)
+        self.assertIn("needs no `changes/<n>.md` fragment", text)
+        self.assertNotIn("Never edit `CHANGELOG.md`", text)
+
+    def test_any_other_card_keeps_the_fragment_rule(self) -> None:
+        for title in ("Fix the loop", "chore: release notes typo", "docs(release): explain"):
+            with self.subTest(title=title):
+                text = worker.brief(self.cfg, {**ISSUE, "title": title}, pathlib.Path("/w"), 820, "", True)
+                self.assertIn("Never edit `CHANGELOG.md`. Write the change's line(s) to `changes/820.md`", text)

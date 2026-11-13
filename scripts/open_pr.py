@@ -24,11 +24,15 @@ import urllib.parse
 import urllib.request
 
 try:  # imported as scripts.open_pr by the tests, or run as a script
-    from . import common, identity, secret_scan
+    from . import common, github, identity, secret_scan
 except ImportError:  # pragma: no cover - the script path
+    import sys
+
     import common
     import identity
     import secret_scan
+    sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
+    from scripts import github
 
 SLUG = common.config().slug
 API = "https://api.github.com"
@@ -37,6 +41,15 @@ WORKER_LOGIN = "lunate-worker[bot]"
 
 class OpenPrError(common.LaneError):
     """Anything that stops the pull request being opened. Never carries a token."""
+
+
+class ReadyRunError(OpenPrError):
+    """The pull request was marked ready, but CI never ran it as ready on its head — not even after one draft and
+    ready toggle. It is left ready and unarmed; the card is parked with this as the reason."""
+
+    def __init__(self, number: int, message: str) -> None:
+        super().__init__(message)
+        self.number = number
 
 
 class SecretFound(OpenPrError):
@@ -349,6 +362,68 @@ def wait_for_head(token: str, number: int, node_id: str | None, head: str) -> No
         time.sleep(HEAD_POLL)
 
 
+RUN_WAIT = 180  # seconds GitHub gets to start the draft (synchronize/opened) CI run for a pushed head
+READY_WAIT = 300  # seconds it gets to start a CI run that sees the pull request as ready
+READY_SETTLE = 20.0  # a ready run must still be uncancelled this long after it is first seen
+RUN_POLL = 5.0
+
+
+def wait_for_draft_run(number: int, head: str) -> frozenset:
+    """Return the ids of the CI runs on `head` once at least one exists — the run the push started while the pull
+    request is a draft. Marking it ready before that run exists let the late draft run cancel the ready run
+    through CI's concurrency group (#816: ready run 43322494831 cancelled by draft run 43322494914, created the same
+    second), leaving the head with only ci-ok's deliberate draft failure."""
+    cfg = common.config()
+    deadline = time.monotonic() + RUN_WAIT
+    while True:
+        runs = github.ci_runs(cfg, head)
+        if runs:
+            return frozenset(r.id for r in runs)
+        if time.monotonic() >= deadline:
+            raise OpenPrError(f"#{number}: no {cfg.ci_workflow} run started on the pushed {head[:9]} within "
+                              f"{RUN_WAIT}s — not marked ready; it stays a draft and the feeder relaunches it")
+        time.sleep(RUN_POLL)
+
+
+def ensure_ready_run(token: str, number: int, node_id: str, head: str, draft_runs: frozenset) -> str:
+    """After marking ready: return once a CI run that saw the pull request as ready (`github.ready_run`) is on
+    `head` and has not been cancelled, read twice READY_SETTLE seconds apart. If the only ready run was cancelled
+    (CI's concurrency group), toggle draft then ready once and wait for the new one. Anything else — a second
+    cancelled ready run, or none at all within READY_WAIT — is a `ReadyRunError`. Returns what happened."""
+    cfg = common.config()
+    toggled, seen = False, None
+    deadline = time.monotonic() + READY_WAIT
+    while True:
+        runs = github.ci_runs(cfg, head)
+        ready = [r for r in runs if github.ready_run(r, draft_runs)]
+        live = [r for r in ready if not r.cancelled]
+        fresh_cancelled = [r for r in ready if r.cancelled and r.id not in draft_runs]
+        if live:
+            if seen is None:
+                seen = time.monotonic()
+            elif time.monotonic() - seen >= READY_SETTLE:
+                return f"ready run {live[-1].id}" + (" after one draft/ready toggle" if toggled else "")
+        elif fresh_cancelled:
+            seen = None
+            ids = ", ".join(str(r.id) for r in fresh_cancelled)
+            if toggled:
+                raise ReadyRunError(number, f"#{number}: the ready {cfg.ci_workflow} run on {head[:9]} was cancelled "
+                                            f"again after one draft/ready toggle (run(s) {ids})")
+            convert_to_draft(token, node_id)
+            draft_runs = frozenset(r.id for r in runs)  # every run so far: the next new one is the ready one
+            mark_ready(token, node_id)
+            toggled = True
+            deadline = time.monotonic() + READY_WAIT
+            continue
+        else:
+            seen = None
+        if time.monotonic() >= deadline:
+            raise ReadyRunError(number, f"#{number}: no {cfg.ci_workflow} run saw it as ready on {head[:9]} within "
+                                        f"{READY_WAIT}s of marking it ready"
+                                        + (" (after one draft/ready toggle)" if toggled else ""))
+        time.sleep(RUN_POLL)
+
+
 def auto_merge_state(token: str, node_id: str | None) -> tuple[bool, str | None]:
     """(on, the merge method GitHub records) for this pull request."""
     state = pr_state(token, node_id)
@@ -396,12 +471,17 @@ def _settle(token: str, number: int, node_id: str | None, arm: bool, base: str, 
     recorded MERGE on a pull request armed with SQUASH (#813), while the queue landed every merge as one squash
     commit. What lands is checked on the merged commit instead (`github.landed_parents`).
     """
-    queue = None
+    queue, ready = None, ""
     if arm:
         if head:
             wait_for_head(token, number, node_id, head)  # ready_for_review must carry the pushed head
         if pr_state(token, node_id)["draft"]:
+            # the draft run first, so it cannot start after the ready run and cancel it; then a ready run that
+            # stays uncancelled, before arming — a ReadyRunError leaves it ready and unarmed
+            draft_runs = wait_for_draft_run(number, head) if head else frozenset()
             mark_ready(token, node_id)  # type: ignore[arg-type]
+            if head:
+                ready = ensure_ready_run(token, number, node_id, head, draft_runs)  # type: ignore[arg-type]
         queue = queue_method(token, base)
         arm_auto_merge(token, node_id, queue)
     else:
@@ -412,7 +492,7 @@ def _settle(token: str, number: int, node_id: str | None, arm: bool, base: str, 
                           f"it as {'a draft' if state['draft'] else 'ready'}, auto-merge "
                           f"{'on' if state['armed'] else 'off'}")
     return {"auto_merge": "armed" if state["armed"] else "not armed", "draft": state["draft"],
-            "queue_method": queue, "merge_method": state["merge_method"]}
+            "queue_method": queue, "merge_method": state["merge_method"], "ready_run": ready}
 
 
 def _worker_token() -> str:

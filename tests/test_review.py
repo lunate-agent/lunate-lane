@@ -283,3 +283,35 @@ class ErrorTypeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NeedsPersonVerdictTests(unittest.TestCase):
+    setUp, tearDown = VerdictTests.setUp, VerdictTests.tearDown
+
+    def test_an_approval_with_needs_person_is_posted_as_a_request_for_changes(self) -> None:
+        body = "1. met.\n4. cannot tell.\nNEEDS-PERSON: check 4 needs a real release"
+        self.path.write_text(json.dumps({"event": "APPROVE", "body": body}))
+        self.assertEqual(review.read_verdict(self.path), ("REQUEST_CHANGES", body))
+
+    def test_the_review_brief_offers_needs_person_for_what_no_pull_request_can_evidence(self) -> None:
+        text = (review.common.ROOT / "templates" / "review-brief.md").read_text()
+        self.assertIn("NEEDS-PERSON: <the check, by number, and why no pull request can evidence it>", text)
+
+
+class ReleaseFragmentTests(unittest.TestCase):
+    """D: the review brief's changelog rule for a release pull request and for every other one."""
+
+    def test_a_release_branch_or_title_may_edit_the_changelog(self) -> None:
+        for p in (pull(820, None, branch="release/0.4.0", title="Release 0.4.0"),
+                  pull(821, 830, title="chore(release): 0.4.0")):
+            with self.subTest(p=p.number):
+                text = review.fragment_check(p, True)
+                self.assertIn("may edit `CHANGELOG.md` and needs no `changes/<n>.md` fragment", text)
+
+    def test_other_pull_requests_keep_the_rule(self) -> None:
+        for p in (pull(822, 9, title="Fix x"), pull(823, None, branch="release/0.4.0/x", title="x"),
+                  pull(824, None, branch="feature/release", title="chore: release prep")):
+            with self.subTest(p=p.number):
+                self.assertEqual(review.fragment_check(p, True),
+                                 f"never edit `CHANGELOG.md`; the PR must add `changes/{p.number}.md`.")
+        self.assertIn("not on main yet", review.fragment_check(pull(825, 9), False))

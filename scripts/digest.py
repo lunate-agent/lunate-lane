@@ -61,7 +61,15 @@ def age_days(created: str, now: datetime.datetime) -> float:
 
 
 PARKED_WHY = {"idle": "runs with no new commit", "reworks": "rework rounds used up",
-              "secret": "secret-shaped text in a push"}
+              "secret": "secret-shaped text in a push", "person": "needs a person",
+              "ready": "CI never ran it as ready"}
+
+
+def parked_line(why) -> str:
+    """One parked card's reason: the kind, and for a person's decision or a failed ready run, the words why."""
+    reason, detail = why if isinstance(why, tuple) else (why, "")
+    text = PARKED_WHY.get(reason, reason)
+    return f"{text}: {detail}" if detail else text
 
 
 def in_flight(cfg: common.Config, pulls: list, running: dict) -> list[str]:
@@ -79,12 +87,16 @@ def in_flight(cfg: common.Config, pulls: list, running: dict) -> list[str]:
     return items
 
 
-def stuck(cfg: common.Config, pulls: list, required: frozenset, now: datetime.datetime) -> list[tuple]:
+def stuck(cfg: common.Config, pulls: list, required: frozenset, now: datetime.datetime,
+          running=frozenset(), parked=frozenset()) -> list[tuple]:
     """(number, why) for every open pull request that is stuck: a worker PR that is red, conflicting or out of
-    the queue (the feeder sends those back), and any pull request open for more than a day, with its state."""
+    the queue, or an orphaned draft (the feeder sends those back), and any pull request open for more than a
+    day, with its state."""
     found = []
     for p in sorted(pulls, key=lambda p: p.number):
         why = github.stuck_reason(p, required, cfg.reviewer_app) if p.author == cfg.worker_app else None
+        if why is None and p.author == cfg.worker_app and github.orphaned_draft(p, running, parked):
+            why = "orphaned draft — no worker on it; the feeder relaunches it"
         age = age_days(p.created, now)
         if why or age > 1:
             parts = [why] if why else [pull_state(p, required, cfg.reviewer_app)]
@@ -104,14 +116,14 @@ def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required
     lines.append(f"Open PRs ({len(pulls)}):" if pulls else "Open PRs: none")
     for p in sorted(pulls, key=lambda p: p.number):
         lines.append(f"  #{p.number} {p.title[:60]} — {pull_state(p, required, cfg.reviewer_app)}")
-    held = stuck(cfg, pulls, required, now)
+    parked = parked or {}
+    held = stuck(cfg, pulls, required, now, running, frozenset(parked))
     lines.append(f"Stuck ({len(held)}):" if held else "Stuck: none")
     lines += [f"  #{number} — {why}" for number, why in held]
-    parked = parked or {}
     lines.append(f"Parked cards ({len(parked)}) — delete <state>/attempts/<card>.json to unpark:" if parked
                  else "Parked cards: none")
     for number in sorted(parked):
-        lines.append(f"  #{number} — {PARKED_WHY.get(parked[number], parked[number])}")
+        lines.append(f"  #{number} — {parked_line(parked[number])}")
     kept = kept or {}
     lines.append(f"Kept by cleanup ({len(kept)}) — its PR is closed, but removing it would lose work:" if kept
                  else "Kept by cleanup: none")
@@ -128,7 +140,7 @@ def tick() -> None:
     cards = github.milestone_cards(cfg)
     pulls = [github.pull(cfg, p.number) for p in github.open_pulls(cfg)]
     merged = merged_since(cfg, now - datetime.timedelta(days=1))
-    message = compose(cfg, cards, pulls, merged, required, now, harness.parked_details(), harness.running_workers(),
+    message = compose(cfg, cards, pulls, merged, required, now, harness.parked_info(), harness.running_workers(),
                       cleanup.read_held())
     latest = common.state_dir("digest") / "latest.md"
     try:

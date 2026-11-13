@@ -16,7 +16,9 @@
   },
   "checks": {
     "aggregate": "ci-ok",
-    "aggregate_step": "Every required job succeeded"
+    "aggregate_step": "Every required job succeeded",
+    "workflow": "CI",
+    "ready_job": "plan"
   },
   "labels": {
     "bug": "kind/bug",

@@ -476,3 +476,84 @@ def stuck_reason(p: Pull, required: frozenset, reviewer: str, reran: frozenset =
     if reviewer_verdict(p, reviewer) == "APPROVED" and not p.in_queue and not p.auto_merge and p.queue_removal:
         return f"out of the merge queue after approval ({p.queue_removal.lower()})"
     return None
+
+
+def orphaned_draft(p: Pull, running, parked) -> bool:
+    """A worker pull request left a draft with nobody on it: no worker running its card, and the card not parked.
+    A run that does not finish cleanly leaves its pull request a draft; nothing else moves a draft, so it would
+    sit unseen (#816). The feeder relaunches it, with idle runs counted, and parks it at the cap."""
+    return p.state == "OPEN" and p.draft and p.card is not None and p.card not in running and p.card not in parked
+
+
+NEEDS_PERSON = re.compile(r"NEEDS-PERSON\b[*_`]*\s*[:—–-]?\s*(.*)")
+REASON_LIMIT = 300
+
+
+def needs_person(text: str) -> str | None:
+    """The reason after the first `NEEDS-PERSON:` in a worker's report or a review body, or None when there is no
+    such line. A finding nobody can meet inside the card — a maintainer's decision, a failure in code the diff
+    does not touch, evidence only a real release gives — stops the card for a person instead of another round."""
+    match = NEEDS_PERSON.search(text or "")
+    if not match:
+        return None
+    reason = match.group(1).strip().strip("*_` ").strip()
+    return reason[:REASON_LIMIT] or "(no reason given)"
+
+
+class CiRun(typing.NamedTuple):
+    """One run of the pull-request CI workflow on a head. `ready_job` is the status or conclusion of the job that
+    only runs on a ready pull request ('SKIPPED' on a draft), '' while it does not exist yet."""
+    id: int
+    status: str
+    conclusion: str
+    created: str
+    ready_job: str
+
+    @property
+    def cancelled(self) -> bool:
+        return self.conclusion == "CANCELLED"
+
+
+CI_RUNS = """query($owner:String!,$name:String!,$oid:GitObjectID!,$job:String!){repository(owner:$owner,name:$name){
+object(oid:$oid){... on Commit{checkSuites(first:100){pageInfo{hasNextPage} nodes{status conclusion createdAt
+workflowRun{databaseId event workflow{name}} checkRuns(first:10,filterBy:{checkName:$job}){nodes{status conclusion}}}}}}}}"""
+
+
+def ci_runs(cfg: common.Config, head: str) -> list[CiRun]:
+    """Every pull-request run of the CI workflow (`checks.workflow`) on `head`, oldest first. An unreadable head is
+    a GhError, never 'no runs'."""
+    data = common.graphql(CI_RUNS, owner=cfg.owner, name=cfg.name, oid=head, job=cfg.ready_job)
+    commit = (data.get("repository") or {}).get("object")
+    if not isinstance(commit, dict) or "checkSuites" not in commit:
+        raise GhError(f"the commit {head[:9]} was not found in {cfg.slug}")
+    found = []
+    for suite in _complete(commit["checkSuites"], f"{head[:9]}'s check suites"):
+        run = suite.get("workflowRun") or {}
+        if (run.get("workflow") or {}).get("name") != cfg.ci_workflow or run.get("event") != "pull_request":
+            continue
+        jobs = (suite.get("checkRuns") or {}).get("nodes") or []
+        job = jobs[-1] if jobs else {}
+        found.append(CiRun(int(run.get("databaseId") or 0), str(suite.get("status") or ""),
+                           str(suite.get("conclusion") or ""), str(suite.get("createdAt") or ""),
+                           str(job.get("conclusion") or job.get("status") or "")))
+    return sorted(found, key=lambda r: r.id)
+
+
+def ready_run(r: CiRun, draft_runs: frozenset) -> bool:
+    """Whether a CI run saw the pull request as ready: its ready-only job ran (anything but SKIPPED). Before that
+    job exists — a run cancelled while queued never gets it — a run that was not on the head yet when the pull
+    request was marked ready (`draft_runs`) is the ready_for_review run."""
+    if r.ready_job:
+        return r.ready_job != "SKIPPED"
+    return r.id not in draft_runs
+
+
+RELEASE_BRANCH = re.compile(r"^release/[^/]+$")
+RELEASE_TITLE = "chore(release)"
+
+
+def is_release(branch: str, title: str) -> bool:
+    """A release pull request — branch `release/<version>`, or a title starting with `chore(release)` — may edit
+    CHANGELOG.md (it collects the fragments) and needs no `changes/<n>.md` of its own. Who opens and merges
+    release pull requests is not decided yet; this is only the exception in both briefs."""
+    return bool(RELEASE_BRANCH.match(branch or "")) or (title or "").strip().startswith(RELEASE_TITLE)
