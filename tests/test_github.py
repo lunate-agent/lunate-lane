@@ -689,3 +689,52 @@ class WaitsOnTests(unittest.TestCase):
                                                               {"number": 1, "state": "CLOSED"}])}}}
         with mock.patch.object(common, "graphql", return_value=answer):
             self.assertEqual(github.open_blockers(CFG, 751), (749, 750))
+
+
+class RunDraftTests(unittest.TestCase):
+    """Whether a workflow run started from a draft payload, read from its ci-ok job's log (#815's two runs)."""
+
+    DRAFT_LOG = ("2026-11-12T22:13:05.7385814Z   EVENT_NAME: pull_request\n2026-11-12T22:13:05.7385814Z   DRAFT: true\n"
+                 "2026-11-12T22:13:05.7585875Z ##[error]ci-ok: the head is a draft (draft=true), so no gate ran\n")
+    READY_LOG = "2026-11-12T22:33:17.2280238Z   DRAFT: false\r\n2026-11-12T22:33:17.2441609Z ci-ok: draft=false\n"
+
+    def setUp(self) -> None:
+        from tests.helpers import TempState
+
+        self.state = TempState()
+        self.cfg = self.state.cfg
+
+    def tearDown(self) -> None:
+        self.state.close()
+
+    def draft(self, jobs, logs):
+        def log(*args, **_):
+            job = int(args[1].rsplit("/", 2)[-2])
+            if job not in logs:
+                raise GhError("gh api failed (1): HTTP 404")
+            return logs[job]
+
+        with mock.patch.object(common, "gh_json", return_value={"jobs": jobs}) as listing, \
+                mock.patch.object(common, "gh", side_effect=log):
+            found = github.run_draft(self.cfg, 43317817862)
+        self.assertEqual(listing.call_args.args,
+                         ("api", "repos/lunate-agent/lunate/actions/runs/43317817862/jobs?filter=all&per_page=100"))
+        return found
+
+    def test_the_payload_flag_is_read_from_the_aggregate_jobs_log(self) -> None:
+        jobs = [{"id": 7, "name": "plan"}, {"id": 8, "name": "ci-ok"}]
+        self.assertIs(self.draft(jobs, {7: "x  DRAFT: false\n", 8: self.DRAFT_LOG}), True)
+        self.assertIs(self.draft(jobs, {8: self.READY_LOG}), False)
+
+    def test_an_attempt_without_a_log_falls_back_to_another_attempt(self) -> None:
+        jobs = [{"id": 8, "name": "ci-ok"}, {"id": 9, "name": "ci-ok"}]  # attempt 2 (9) was cancelled unstarted
+        self.assertIs(self.draft(jobs, {8: self.READY_LOG}), False)
+
+    def test_no_log_and_no_flag_are_unknown(self) -> None:
+        self.assertIsNone(self.draft([{"id": 8, "name": "ci-ok"}], {}))
+        self.assertIsNone(self.draft([{"id": 8, "name": "ci-ok"}], {8: "x  DRAFT: \n"}), "a merge_group run")
+        self.assertIsNone(self.draft([], {}))
+
+    def test_a_failed_job_listing_raises(self) -> None:
+        with mock.patch.object(common, "gh_json", side_effect=GhError("HTTP 502")), self.assertRaises(GhError):
+            github.run_draft(self.cfg, 1)

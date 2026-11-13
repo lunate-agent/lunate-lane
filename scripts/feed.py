@@ -60,17 +60,41 @@ def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[
 
 
 def rerun(cfg: common.Config, p: github.Pull, dry_run: bool) -> None:
-    """Rerun the failed jobs of an infra failure, once per head, and record it before anything else can fail."""
+    """Rerun the failed jobs of an infra failure, once per head, and record it before anything else can fail.
+
+    Only a workflow run whose event payload had draft=false (the ready run) is rerun. A draft run's aggregate
+    check fails on purpose ("the head is a draft"): rerunning it reports a new red `ci-ok` that is newer than the
+    ready run's green one and overrides it (#815). A run whose flag cannot be read is not rerun either. With
+    nothing left to rerun, the head is still recorded, so a second tick sends it back as a rework, which pushes a
+    new head with fresh runs."""
     runs = github.infra_runs(p)
     what = f"#{p.number}'s required checks were cancelled or timed out at {p.head[:8]}"
-    if dry_run:
-        common.log(JOB, f"would rerun the failed jobs of run(s) {', '.join(map(str, runs))} — {what}")
+    try:
+        drafts = {run_id: github.run_draft(cfg, run_id) for run_id in runs}
+    except LaneError as exc:
+        common.log(JOB, f"did not rerun #{p.number}: could not read whether its run(s) were draft runs ({exc}); "
+                        "next tick tries again")
         return
-    harness.note_rerun(p.number, p.head, runs)
-    for run_id in runs:
+    ready = tuple(run_id for run_id in runs if drafts[run_id] is False)
+    held = [f"{run_id} ({'draft=true' if drafts[run_id] else 'draft flag unread'})"
+            for run_id in runs if drafts[run_id] is not False]
+    if held:
+        common.log(JOB, f"{'would not rerun' if dry_run else 'not rerunning'} run(s) {', '.join(held)} of #{p.number}: "
+                        "only a run whose event payload had draft=false is rerun — a draft run's rerun reports a "
+                        "new red ci-ok over the ready run's")
+    if dry_run:
+        if ready:
+            common.log(JOB, f"would rerun the failed jobs of run(s) {', '.join(map(str, ready))} — {what}")
+        return
+    harness.note_rerun(p.number, p.head, ready)
+    for run_id in ready:
         common.gh("run", "rerun", str(run_id), "--failed", "-R", cfg.slug)
-    common.log(JOB, f"reran the failed jobs of run(s) {', '.join(map(str, runs))} — {what}; a second such failure "
-                    "on this head is a rework")
+    if ready:
+        common.log(JOB, f"reran the failed jobs of run(s) {', '.join(map(str, ready))} — {what}; a second such "
+                        "failure on this head is a rework")
+    else:
+        common.log(JOB, f"nothing rerun for #{p.number} — {what}, in no ready run; the next tick sends it back as "
+                        "a rework")
 
 
 def start(cfg: common.Config, launch: cards.Launch) -> int:

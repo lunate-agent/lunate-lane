@@ -586,6 +586,30 @@ def infra_runs(p: Pull) -> tuple:
     return tuple(sorted({r.run_id for r in p.runs if r.conclusion and r.conclusion not in PASSED and r.run_id}))
 
 
+# the aggregate job's step prints the payload's flag in its log, as its env `DRAFT: ${{ github.event.pull_request.draft }}`
+DRAFT_ENV = re.compile(r"^\S*\s+DRAFT: (true|false)\s*$", re.MULTILINE)
+
+
+def run_draft(cfg: common.Config, run_id: int) -> bool | None:
+    """The `draft` flag of the pull_request event payload a workflow run started from: True, False, or None when
+    no log of its aggregate job shows it (none ran, the logs expired, or the run is not a pull_request run).
+
+    GitHub's API does not return a run's payload, and a draft run looks like the ready run in every field it does
+    return. The aggregate job (`ci-ok`) of the CI workflow prints it. Every attempt of a run keeps the first
+    attempt's payload, so any attempt's log answers. A failed read raises."""
+    jobs = common.gh_json("api", f"repos/{cfg.slug}/actions/runs/{int(run_id)}/jobs?filter=all&per_page=100")
+    for job in sorted((j for j in jobs.get("jobs") or [] if j.get("name") == cfg.aggregate_check),
+                      key=lambda j: -int(j.get("id") or 0)):
+        try:
+            log = common.gh("api", f"repos/{cfg.slug}/actions/jobs/{int(job['id'])}/logs")
+        except GhError:
+            continue  # a job that never started has no log; another attempt's may
+        found = DRAFT_ENV.search(log)
+        if found:
+            return found.group(1) == "true"
+    return None
+
+
 def needs_rearm(p: Pull, required: frozenset, reviewer: str) -> bool:
     """A clean, ready, approved pull request that is not armed and not queued — the state a clean finish leaves
     when arming fails after `mark_ready` (review of #17). Not when a person turned auto-merge off, and not when it

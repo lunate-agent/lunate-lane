@@ -25,6 +25,7 @@ class FeedTests(unittest.TestCase):
             mock.patch.object(feed, "start", side_effect=lambda cfg, launch: self.started.append(launch) or 1),
             mock.patch.object(cleanup, "tidy"),
             mock.patch("sys.stdout", new=io.StringIO()),
+            mock.patch.object(github, "run_draft", return_value=False),  # a ready run unless a test says otherwise
         ]
         for patch in self.patches:
             patch.start()
@@ -234,6 +235,49 @@ class FeedTests(unittest.TestCase):
         gh.assert_not_called()
         self.assertEqual(harness.reran(), frozenset())
         self.assertIn("would rerun the failed jobs of run(s) 4321", (self.state.cfg.state / "logs" / "feed.log").read_text())
+
+    def test_a_draft_run_is_never_rerun(self) -> None:
+        """#815: rerunning a draft run reports a new red ci-ok ("the head is a draft (draft=true), so no gate ran")
+        that is newer than the ready run's green one and overrides it."""
+        runs = (github.Run("ci-ok", "CANCELLED", 1, "u", 4321), github.Run("verify", "TIMED_OUT", 2, "u", 4322))
+        github.pull.return_value = pull(50, 9, checks=(("ci-ok", "COMPLETED", "CANCELLED"),), runs=runs)
+        github.run_draft.side_effect = lambda cfg, run_id: {4321: True, 4322: False}[run_id]
+        with mock.patch.object(common, "gh", return_value="") as gh:
+            feed.main()
+        self.assertEqual([c.args for c in gh.call_args_list],
+                         [("run", "rerun", "4322", "--failed", "-R", "lunate-agent/lunate")], "the ready run only")
+        log = (self.state.cfg.state / "logs" / "feed.log").read_text()
+        self.assertIn("not rerunning run(s) 4321 (draft=true) of #50", log)
+        self.assertIn("reran the failed jobs of run(s) 4322", log)
+
+    def test_only_draft_or_unread_runs_are_not_rerun_and_the_head_goes_back_as_a_rework(self) -> None:
+        github.pull.return_value = self.infra_pull()
+        for flag in (True, None):
+            with self.subTest(draft=flag):
+                self.started.clear()
+                harness.prune_reruns([])
+                github.run_draft.return_value = flag
+                with mock.patch.object(common, "gh", return_value="") as gh:
+                    feed.main()
+                    self.assertNotIn(("run", "rerun"), [c.args[:2] for c in gh.call_args_list])
+                    self.assertEqual(harness.reran(), frozenset({(50, "h1")}), "recorded: the next tick reworks it")
+                    self.assertNotIn(50, [l.rework_pr for l in self.started])
+                    feed.main()
+                    self.assertNotIn(("run", "rerun"), [c.args[:2] for c in gh.call_args_list])
+                self.assertIn(50, [l.rework_pr for l in self.started])
+        log = (self.state.cfg.state / "logs" / "feed.log").read_text()
+        self.assertIn("not rerunning run(s) 4321 (draft flag unread) of #50", log)
+        self.assertIn("nothing rerun for #50", log)
+
+    def test_a_failed_draft_read_reruns_nothing_and_records_nothing(self) -> None:
+        github.pull.return_value = self.infra_pull()
+        github.run_draft.side_effect = GhError("gh api failed (1): HTTP 502")
+        with mock.patch.object(common, "gh", return_value="") as gh:
+            self.assertEqual(feed.main(), 0)
+        self.assertNotIn(("run", "rerun"), [c.args[:2] for c in gh.call_args_list])
+        self.assertEqual(harness.reran(), frozenset(), "the next tick tries again")
+        self.assertIn("did not rerun #50: could not read whether its run(s) were draft runs",
+                      (self.state.cfg.state / "logs" / "feed.log").read_text())
 
     def test_a_stuck_pull_request_is_reworked_and_the_log_says_why(self) -> None:
         github.pull.return_value = pull(50, 9, mergeable="CONFLICTING")
