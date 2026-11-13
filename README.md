@@ -83,7 +83,10 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      either cap. The running workers are read before the pull requests, so a worker finishing between the reads
      never makes its own pull request look orphaned. A request for changes whose body says **`NEEDS-PERSON:
      <reason>`** is not reworked: the card is parked at once with that reason, and the comment and the digest
-     say it;
+     say it — unless the reason only says one other pull request or card must merge first (its first sentence
+     says so and it names no other `#n`, as #807's "PR #827 … must merge first, or …"): then the lane records that
+     card as blocking this one (GitHub's blocked-by, read back) instead of parking, the card and its draft wait,
+     and once the blocker closes it is reworked on the review's findings (the same for a worker's NEEDS-PERSON);
    - **then new cards**, in order: the pins file (if any), then `kind/bug`, then cards that other open issues
      depend on (native GitHub dependency edges), then oldest first. A card waiting on an open issue is skipped —
      GitHub's native blocked-by is the only blocking mechanism, there is no blocking label; so is a card any open
@@ -125,7 +128,11 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      one. It prints each verdict, and a request for changes' blocking findings one line each. A
      park lifted any other way (its attempts record edited or removed by hand) is named in `feed.log` at the
      next tick. A card parked by hand shows in the digest as "parked by hand" with
-     its reason.
+     its reason. **Every park is visible on GitHub** (`scripts/parked.py`): the card and its open pull request get
+     the label `parked.label` (`lane/parked`) and are assigned to `parked.assignee` (lane.json), as the worker
+     identity, read back; an unpark takes the label off and the assignment where the lane added it. A failure is
+     logged and listed under "Waiting on you", and the feeder retries it each tick (it also flags a park and
+     unflags an unpark made any other way). A parked card that is closed is unparked by the feeder, logged.
    - **enqueuing**: a worker pull request that is ready, approved at its head, green, MERGEABLE and not in the
      merge queue — armed or not: arming alone does not put it in the queue, and a removal turns auto-merge off —
      is enqueued (`enqueuePullRequest` with its head as the expected head) and its queue entry read back. Not when
@@ -208,7 +215,8 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    plus the auto-merge the worker armed.
 5. **Digest** (`scripts/digest.py`, daily). One short message on stdout and in `<state>/digest/latest.md`. It
    opens with **Waiting on you**, short enough for a phone: open `kind/decision` issues (oldest first, with the
-   open cards each blocks), open cards parked for a person (the reason and a link), pull requests that are ready
+   open cards each blocks), every parked card whatever its reason (the reason and a link), a park whose label or
+   assignment failed, pull requests that are ready
    and green but still need a maintainer's or code owner's approval (the bot approved the head, or it carries no
    card), and a card still open after the pull request closing it merged. Then: open issues in the milestone; WIP against its limit, with what is in flight (as the feeder counts it); every open
    pull request with its state; what is stuck and why (a worker pull request that is red, conflicting or out of

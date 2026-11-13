@@ -98,7 +98,7 @@ class WhoAndWhyTests(unittest.TestCase):
                 mock.patch.object(lane.getpass, "getuser", return_value="lane-host-user"):
             run("park", "794", "--reason", "waits on #820")
             run("unpark", "794", "--reason", "#820 decided")
-        park, unpark = self.log().strip().splitlines()
+        park, unpark = [line for line in self.log().strip().splitlines() if "by hand" in line]
         self.assertRegex(park, r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d lane: parked card #794 by hand — by daniel as "
                                r"lane-host-user via \S+, (no )?terminal — reason: waits on #820$")
         self.assertRegex(unpark, r"^\d{4}-\d\d-\d\d \d\d:\d\d:\d\d lane: unparked card #794 by hand \(was parked "

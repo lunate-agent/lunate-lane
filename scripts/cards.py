@@ -22,7 +22,7 @@ import json
 import pathlib
 
 from scripts.common import ConfigError
-from scripts.github import Card, Pull, needs_person, stuck_reason, verdict
+from scripts.github import Card, Pull, needs_person, stuck_reason, verdict, waits_line
 
 ORPHANED = "orphaned draft"
 PERSON = "needs a person: "
@@ -124,6 +124,10 @@ def plan(*, cards: list[Card], open_pulls: list[Pull], worker_pulls: list[Pull],
     taken = {n for p in open_pulls for n in (p.card, *p.cards) if n is not None} | set(running)
 
     reasons = {p.number: rework_reason(p, rules.reviewer_app, required, reran) for p in worker_pulls}
+    for p in worker_pulls:  # a draft whose card waits on an open issue resumes when that closes, not before
+        if reasons[p.number] == ORPHANED and p.waits_on and p.card not in running and p.card not in parked:
+            reasons[p.number] = None
+            notes.append(f"#{p.number} is a draft and card #{p.card} {waits_line(p.waits_on)} — resumes when they close")
     launches = [Launch(p.card, p.number, pull_areas(p), reasons[p.number])
                 for p in sorted(worker_pulls, key=lambda p: p.number)
                 if p.card is not None and p.card not in running and p.card not in parked and reasons[p.number]]

@@ -24,7 +24,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from scripts import cards, common, dispatch_card, github, harness, open_pr, secret_scan  # noqa: E402
+from scripts import cards, common, dispatch_card, github, harness, open_pr, parked, secret_scan  # noqa: E402
 from scripts.common import GitError, LaneError  # noqa: E402
 
 COMMENT_LIMIT = 60000
@@ -448,7 +448,11 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
 
 
 def park_for_person(cfg: common.Config, card: int, target: int, reason: str) -> None:
-    """The worker wrote NEEDS-PERSON: park the card now, with its reason, whatever the counters say."""
+    """The worker wrote NEEDS-PERSON: park the card now, with its reason, whatever the counters say — unless it only
+    says another pull request or card must merge first: then the card waits on it (blocked-by), or, when that has
+    merged already, the feeder takes the draft up again."""
+    if parked.defer(cfg, card, reason, f"worker-{card}") != parked.PARK:
+        return
     if harness.park(card, "person", reason):
         park(cfg, card, target, "person", detail=f"the worker says it needs a person: {reason}")
 
@@ -487,6 +491,7 @@ def park(cfg: common.Config, card: int, target: int, why: str, n: int = 0, detai
         f"pick it up again, run `scripts/lane.py unpark {card} --reason '...'` on the lane host."))
     label = {"idle": f"after {n} idle runs", "reworks": f"after {n} rework rounds"}.get(why, f"({why})")
     common.log(f"worker-{card}", f"parked {label} — commented on #{target}")
+    parked.flag(cfg, card, target if target != card else None, job=f"worker-{card}")
 
 
 def main() -> int:

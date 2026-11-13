@@ -387,6 +387,26 @@ def open_blockers(cfg: common.Config, card: int) -> tuple:
                         if b.get("state") == "OPEN"))
 
 
+# "PR #827 (S7, head `b468752d`) must merge first, or …" (#807), "#755 has to land first", "waits on #755",
+# "blocked by card #755": the reason's first sentence is a merge-first dependency on one pull request or card
+MERGE_FIRST = re.compile(
+    r"^[\s>*_`-]*(?:(?:PR|pull request|card|issue)\s+)?#(\d+)\b[^.;:]*?\b(?:must|has to|needs to|should)\s+"
+    r"(?:be\s+)?(?:merge|merged|land|landed)\s+first\b"
+    r"|^[\s>*_`-]*(?:it\s+|this\s+card\s+)?(?:waits on|is blocked by|blocked by|depends on)\s+"
+    r"(?:(?:PR|pull request|card|issue)\s+)?#(\d+)\b", re.IGNORECASE)
+REF = re.compile(r"(?<![\w/])#(\d+)\b")
+
+
+def merge_first(reason: str) -> int | None:
+    """The one pull request or card a NEEDS-PERSON reason only asks to merge first, else None: its first sentence
+    says so, and it names no other `#n`. Anything more — two dependencies, a decision — stays a park."""
+    match = MERGE_FIRST.match(reason or "")
+    if not match:
+        return None
+    ref = int(match.group(1) or match.group(2))
+    return ref if {int(n) for n in REF.findall(reason)} == {ref} else None
+
+
 def waits_line(blockers) -> str:
     return "waits on " + ", ".join(f"#{n}" for n in blockers)
 
