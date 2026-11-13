@@ -56,7 +56,7 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(len(comments), 1)
         self.assertEqual(comments[0][0], 50)
         self.assertIn("went back to a worker 3 times (cap: 3)", comments[0][1])
-        self.assertIn("attempts/9.json", comments[0][1])
+        self.assertIn("scripts/lane.py unpark 9", comments[0][1])
         log = (self.state.cfg.state / "logs" / "feed.log").read_text()
         self.assertIn("parked card #9 after 3 rework rounds on #50", log)
         self.assertIn("#50 needs rework (changes requested) but card #9 is parked", log)
@@ -442,3 +442,21 @@ class NeedsPersonFeedTests(unittest.TestCase):
         log = (self.state.cfg.state / "logs" / "feed.log").read_text()
         self.assertIn("parked card #9 — the review of #50 says NEEDS-PERSON: check 2", log)
         self.assertIn("#50 needs rework (needs a person: check 2", log)
+
+
+class PersonOutranksFeedTests(unittest.TestCase):
+    setUp, tearDown = FeedTests.setUp, FeedTests.tearDown
+
+    def test_813s_shape_is_not_reworked_and_is_re_armed(self) -> None:
+        from scripts import open_pr
+
+        github.milestone_cards.return_value = []
+        github.open_pulls.return_value = [pull(813, 794)]
+        github.pull.return_value = pull(813, 794, head="5809330d1", node_id="PR_813", reviews=[
+            review("DISMISSED", commit="5809330d1"), review("APPROVED", commit="5809330d1", author="a-maintainer")])
+        with mock.patch.object(open_pr, "rearm", return_value={"auto_merge": "armed", "queue_method": "SQUASH",
+                                                               "merge_method": "MERGE"}) as rearm:
+            self.assertEqual(feed.main(), 0)
+        self.assertEqual(self.started, [])
+        rearm.assert_called_once_with(813, "PR_813", "main")
+        self.assertIn("re-armed #813", (self.state.cfg.state / "logs" / "feed.log").read_text())

@@ -45,6 +45,9 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
 1. **Feeder** (`scripts/feed.py`, every 10 minutes). Reads the open issues of the milestone, every open pull
    request, the worker identity's pull requests in full, and the running-worker records, then starts:
    - **rework first**: a worker pull request whose reviewer requested changes *on its current head* goes back to
+     a worker — unless a person outranks the bot: a dismissed `lunate-reviewer` review counts for nothing, and a
+     person's approval on the head after the bot's last request for changes there means no rework (the reviewer
+     does not review that head again, and a ready, green, unarmed pull request is re-armed). It goes back to
      a worker on the same branch, with the review's findings in the brief. So does a **stuck** one — ready (not a
      draft) and red on a required check, `CONFLICTING` with main, or approved but removed from the merge queue
      (neither queued nor armed, and the queue's latest removal was of the current head — one from before the last
@@ -81,10 +84,19 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      request (on the issue if there is none), and the digest lists it. A new commit resets the idle-run count (and
      lifts an idle park) but not the rework rounds. Both counts are taken when the feeder launches a run, before
      anything that can fail, so a run whose setup keeps failing (a held worktree, a closed issue, a broken
-     checkout) still reaches its cap and is parked on the next tick instead of relaunching forever. To give a parked card back to the lane, delete
-     `<state>/attempts/<card>.json`; that clears both counts.
+     checkout) still reaches its cap and is parked on the next tick instead of relaunching forever. Use
+     `scripts/lane.py` rather than touching `<state>/attempts/` by hand:
+
+         .venv/bin/python scripts/lane.py status 794                  # worker, idle runs, rework rounds, parked and why
+         .venv/bin/python scripts/lane.py park 794 --reason "waits on the API decision"
+         .venv/bin/python scripts/lane.py unpark 794                  # unparked, both counts cleared
+
+     Park and unpark take the feeder's lock (refused while a tick runs — try again in a minute); unpark is
+     refused while a worker runs the card. A card parked by hand shows in the digest as "parked by hand" with
+     its reason.
    - **re-arming**: a worker pull request that is ready, approved at its head, green, not conflicting, neither
-     queued nor armed — the state a clean finish leaves when arming fails after it was marked ready — is armed
+     queued nor armed — the state a clean finish leaves when arming fails after it was marked ready, or a person's
+     approval after the bot's request for changes — is armed
      again with the queue's method and read back. Not when a person turned auto-merge off last.
    - **tidying, after the launches** (`scripts/cleanup.py`): a card whose lane pull request (`wt/issue-N`) is merged
      or closed, with none open and no worker running, loses its worktree, its local branch and its scratch
@@ -171,6 +183,7 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
 | `scripts/worker.py` | The detached driver for one card's worker session. |
 | `scripts/review.py` | Cron entry point: reviewer dispatch. |
 | `scripts/digest.py` | Cron entry point: the daily digest. |
+| `scripts/lane.py` | A person's commands for one card: `status`, `park --reason`, `unpark` (refused while its worker runs). |
 | `scripts/dispatch_card.py` | A card becomes (or reuses) its pull request: reads the issue, checks the branch, writes the body. |
 | `scripts/open_pr.py` | Pushes and opens a pull request as `lunate-worker`, optionally arms auto-merge, comments as the worker. |
 | `scripts/identity.py` | Mints installation tokens for either App. |
@@ -189,7 +202,7 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
   session does not start. It is exported to the session as `harness.credential_env` and never logged or put in
   argv. (The old lane's `~/.hermes/.env` is no longer read.)
 - State: `~/.local/state/lunate-lane/`: `locks/`, `logs/`, `workers/` (one pid file per running worker, with
-  its session's process group), `attempts/` (idle-run counts; a parked card's file is deleted to unpark it),
+  its session's process group), `attempts/` (idle-run and rework counts, and parks — read and changed with `scripts/lane.py`),
   `worktrees/`, `reviews/`, `reviewing/` (one record per running review), `scratch/` (each session's TMPDIR and its own `home/`), `sessions/` (Pi event logs),
   `digest/`.
 - The session's HOME: `<scratch>/home`, wiped and reseeded before every session. It gets copies of

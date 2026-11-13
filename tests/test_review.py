@@ -315,3 +315,10 @@ class ReleaseFragmentTests(unittest.TestCase):
                 self.assertEqual(review.fragment_check(p, True),
                                  f"never edit `CHANGELOG.md`; the PR must add `changes/{p.number}.md`.")
         self.assertIn("not on main yet", review.fragment_check(pull(825, 9), False))
+
+
+class PersonOutranksSkipTests(unittest.TestCase):
+    def test_a_head_a_person_approved_after_the_bot_was_dismissed_is_not_reviewed_again(self) -> None:
+        p = pull(813, 794, head="5809330d1", reviews=[a_review("DISMISSED", commit="5809330d1"),
+                                                      a_review("APPROVED", commit="5809330d1", author="a-maintainer")])
+        self.assertEqual(review.skip_reason(p, REQUIRED, {}, "lunate-reviewer"), "@a-maintainer approved it at 5809330d")

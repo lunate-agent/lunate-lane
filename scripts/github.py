@@ -299,6 +299,30 @@ def reviewer_verdict(p: Pull, reviewer: str) -> str | None:
     return states[-1] if states else None
 
 
+def verdict(p: Pull, reviewer: str) -> str | None:
+    """The verdict the lane acts on at the current head: a person outranks the reviewer bot.
+
+    A dismissed bot review counts for nothing (`reviewer_verdict`). A person's APPROVED on the head after the bot's
+    last CHANGES_REQUESTED there (or with no bot verdict at all) is APPROVED: no rework, and a ready, green, unarmed
+    pull request is re-armed. A person's own request for changes is theirs to follow up, not a rework trigger, so
+    only approvals are read from people.
+    """
+    on_head = [r for r in p.reviews if r.commit == p.head and r.state in ("APPROVED", "CHANGES_REQUESTED")]
+    last_bot_change = max((i for i, r in enumerate(on_head) if r.author == reviewer and r.state == "CHANGES_REQUESTED"),
+                          default=-1)
+    if any(r.author != reviewer and r.state == "APPROVED" for r in on_head[last_bot_change + 1:]):
+        return "APPROVED"
+    return reviewer_verdict(p, reviewer)
+
+
+def person_approved(p: Pull, reviewer: str) -> str:
+    """The login of a person (not the reviewer bot) whose approval on the current head stands, or ''."""
+    if verdict(p, reviewer) != "APPROVED":
+        return ""
+    people = [r.author for r in p.reviews if r.commit == p.head and r.state == "APPROVED" and r.author != reviewer]
+    return people[-1] if people else ""
+
+
 def landed_parents(cfg: common.Config, number: int) -> tuple[str, int]:
     """(merge commit, its parent count) of a merged pull request: 1 is a squash, 2 a merge commit (#6)."""
     data = common.graphql("""query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){
@@ -452,7 +476,7 @@ def needs_rearm(p: Pull, required: frozenset, reviewer: str) -> bool:
     is stuck (that is a rework) or its checks are not green."""
     return (p.state == "OPEN" and not p.draft and not p.auto_merge and not p.in_queue and not p.disarmed_by
             and p.mergeable != "CONFLICTING" and not p.queue_removal and check_state(p, required) == "green"
-            and reviewer_verdict(p, reviewer) == "APPROVED")
+            and verdict(p, reviewer) == "APPROVED")
 
 
 def stuck_reason(p: Pull, required: frozenset, reviewer: str, reran: frozenset = frozenset()) -> str | None:
@@ -473,7 +497,7 @@ def stuck_reason(p: Pull, required: frozenset, reviewer: str, reran: frozenset =
         return None  # the feeder reruns it once instead
     if p.disarmed_by:
         return None  # a person turned auto-merge off: their decision, not a rework (the digest says who)
-    if reviewer_verdict(p, reviewer) == "APPROVED" and not p.in_queue and not p.auto_merge and p.queue_removal:
+    if verdict(p, reviewer) == "APPROVED" and not p.in_queue and not p.auto_merge and p.queue_removal:
         return f"out of the merge queue after approval ({p.queue_removal.lower()})"
     return None
 

@@ -566,3 +566,22 @@ class NeedsPersonTests(unittest.TestCase):
     def test_no_line_is_none(self) -> None:
         for text in ("", "all checks met", "needs a person? no"):
             self.assertIsNone(github.needs_person(text))
+
+
+class PersonOutranksTests(unittest.TestCase):
+    SHAPE = dict(head="5809330d1", reviews=[helper_review("DISMISSED", commit="5809330d1"),
+                                            helper_review("APPROVED", commit="5809330d1", author="a-maintainer")])
+
+    def test_813s_shape_is_re_armed_when_ready_and_green(self) -> None:
+        self.assertTrue(github.needs_rearm(pull(813, 794, **self.SHAPE), REQUIRED, "lunate-reviewer"))
+        self.assertEqual(github.person_approved(pull(813, 794, **self.SHAPE), "lunate-reviewer"), "a-maintainer")
+
+    def test_not_re_armed_as_a_draft_or_red_or_already_armed(self) -> None:
+        for over in (dict(draft=True), dict(checks=(("ci-ok", "COMPLETED", "FAILURE"),)), dict(auto_merge=True)):
+            with self.subTest(over=over):
+                self.assertFalse(github.needs_rearm(pull(813, 794, **self.SHAPE, **over), REQUIRED, "lunate-reviewer"))
+
+    def test_the_bots_own_approval_alone_is_not_a_person(self) -> None:
+        p = pull(813, 794, reviews=[helper_review("APPROVED")])
+        self.assertEqual(github.verdict(p, "lunate-reviewer"), "APPROVED")
+        self.assertEqual(github.person_approved(p, "lunate-reviewer"), "")

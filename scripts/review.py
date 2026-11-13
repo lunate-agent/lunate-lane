@@ -50,6 +50,9 @@ def skip_reason(p: github.Pull, required: frozenset, running: dict, reviewer: st
         return f"required checks are {checks}"
     if github.reviewer_verdict(p, reviewer) is not None:
         return f"already reviewed at {p.head[:8]}"
+    person = github.person_approved(p, reviewer)
+    if person:  # the bot's review was dismissed and a person approved: reviewing again would overrule them
+        return f"@{person} approved it at {p.head[:8]}"
     overlap = github.spec_overlap(p, [o for o in others if o.number != p.number])
     if overlap:
         older, shared = overlap

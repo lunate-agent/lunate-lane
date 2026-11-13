@@ -19,7 +19,7 @@ import json
 import pathlib
 
 from scripts.common import ConfigError
-from scripts.github import Card, Pull, needs_person, reviewer_verdict, stuck_reason
+from scripts.github import Card, Pull, needs_person, stuck_reason, verdict
 
 ORPHANED = "orphaned draft"
 PERSON = "needs a person: "
@@ -78,7 +78,7 @@ def rework_reason(p: Pull, reviewer_app: str, required: frozenset = frozenset(),
     push since then clears it), a stuck pull request — red, conflicting, or out of the queue (#8) — or a draft
     nobody is working on (the caller leaves out running and parked cards). A request for changes that says
     NEEDS-PERSON is `needs a person: <reason>`: the feeder parks the card instead."""
-    if reviewer_verdict(p, reviewer_app) == "CHANGES_REQUESTED":
+    if verdict(p, reviewer_app) == "CHANGES_REQUESTED":  # a dismissed one, or one a person approved over, is not
         bodies = [r.body for r in p.reviews if r.author == reviewer_app and r.commit == p.head
                   and r.state == "CHANGES_REQUESTED"]
         person = needs_person(bodies[-1]) if bodies else None
