@@ -406,13 +406,12 @@ def rework_pr_of(cfg: common.Config, card: int) -> int | None:
 
 def park(cfg: common.Config, card: int, target: int, why: str, n: int = 0, detail: str = "") -> None:
     """Say, once, on the pull request (or the issue when there is none), that the lane stops working this card."""
-    record = cfg.state / "attempts" / f"{card}.json"
     cap = harness.IDLE_RUN_LIMIT if why == "idle" else harness.REWORK_LIMIT
     reason = PARK_WHY[why].format(n=n, cap=cap) if why in PARK_WHY else detail
     open_pr.comment(target, (
         f"**Lane: card #{card} is parked.** {reason[:1].upper() + reason[1:].rstrip('.')}. The feeder will not start "
         f"or rework it again. It needs a person: {PARK_ADVICE.get(why, PARK_ADVICE['default'])}. To let the lane "
-        f"pick it up again, delete `{record}` on the lane host."))
+        f"pick it up again, run `scripts/lane.py unpark {card}` on the lane host."))
     label = {"idle": f"after {n} idle runs", "reworks": f"after {n} rework rounds"}.get(why, f"({why})")
     common.log(f"worker-{card}", f"parked {label} — commented on #{target}")
 

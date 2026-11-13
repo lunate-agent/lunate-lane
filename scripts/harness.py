@@ -623,7 +623,7 @@ def prune_reruns(open_prs) -> int:
 
 
 # --- attempts: a card is parked after IDLE_RUN_LIMIT runs with no new commit, or after REWORK_LIMIT rework rounds
-#     on one pull request (#9). Deleting <state>/attempts/<card>.json unparks it and clears both counts.
+#     on one pull request (#9). `scripts/lane.py unpark <card>` unparks it and clears both counts.
 
 IDLE_RUN_LIMIT = 3
 REWORK_LIMIT = 3
@@ -727,6 +727,24 @@ def parked_details() -> dict:
         if data["parked"]:
             found[int(path.stem)] = data["reason"] or "idle"
     return found
+
+
+def attempts(card: int) -> dict:
+    """The card's attempts record as read: idle runs, rework rounds per pull request, parked, reason, detail."""
+    return _read_attempts(_attempts(card))
+
+
+def unpark(card: int) -> bool:
+    """Remove the card's attempts record — unparked, both counts cleared. Returns whether there was one."""
+    path = _attempts(card)
+    _read_attempts(path)  # a record that cannot be read is named, not silently removed
+    if not path.exists():
+        return False
+    try:
+        path.unlink()
+    except OSError as exc:
+        raise StateError(f"the attempts record {path} could not be removed: {exc}") from exc
+    return True
 
 
 def parked_info() -> dict:

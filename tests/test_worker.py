@@ -601,7 +601,7 @@ class DriveTests(DriveCase):
         target, body = self.comments[0]
         self.assertEqual(target, 3, "no pull request exists, so the issue gets the comment")
         self.assertIn("card #3 is parked", body)
-        self.assertIn("attempts/3.json", body)
+        self.assertIn("scripts/lane.py unpark 3", body)
         self.assertIn("parked after 3 idle runs", (self.cfg.state / "logs" / "worker-3.log").read_text())
 
     def test_a_rework_returns_its_pull_request_to_draft_before_the_session(self) -> None:

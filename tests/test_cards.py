@@ -268,3 +268,27 @@ class NeedsPersonPlanTests(unittest.TestCase):
         self.assertEqual(launch.reason, "needs a person: check 3 can only be evidenced by a real release")
         self.assertEqual(launch.person, "check 3 can only be evidenced by a real release")
         self.assertIsNone(plan([], worker_pulls=[pull(813, 794, reviews=[review("CHANGES_REQUESTED")])])[0][0].person)
+
+
+class PersonOutranksTests(unittest.TestCase):
+    """A person outranks the reviewer bot (#813): GitHub turns a dismissed review's state to DISMISSED."""
+
+    def test_813s_shape_dismissed_then_a_person_approves_is_no_rework(self) -> None:
+        p = pull(813, 794, head="5809330d1", reviews=[review("DISMISSED", commit="5809330d1"),
+                                                      review("APPROVED", commit="5809330d1", author="a-maintainer")])
+        self.assertIsNone(cards.rework_reason(p, "lunate-reviewer", REQUIRED))
+        self.assertFalse(cards.needs_rework(p, "lunate-reviewer", REQUIRED))
+        self.assertEqual(started(plan([], worker_pulls=[p])[0]), [])
+
+    def test_a_person_approving_after_the_bots_request_for_changes_outranks_it(self) -> None:
+        p = pull(813, 794, reviews=[review("CHANGES_REQUESTED"), review("APPROVED", author="a-maintainer")])
+        self.assertIsNone(cards.rework_reason(p, "lunate-reviewer", REQUIRED))
+
+    def test_the_bots_request_for_changes_after_the_person_still_reworks(self) -> None:
+        p = pull(813, 794, reviews=[review("APPROVED", author="a-maintainer"), review("CHANGES_REQUESTED")])
+        self.assertEqual(cards.rework_reason(p, "lunate-reviewer", REQUIRED), "changes requested")
+
+    def test_a_person_approving_an_older_head_does_not_count(self) -> None:
+        p = pull(813, 794, head="h2", reviews=[review("CHANGES_REQUESTED", commit="h2"),
+                                               review("APPROVED", commit="h1", author="a-maintainer")])
+        self.assertEqual(cards.rework_reason(p, "lunate-reviewer", REQUIRED), "changes requested")

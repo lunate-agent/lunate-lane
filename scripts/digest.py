@@ -34,7 +34,7 @@ def pull_state(p: github.Pull, required: frozenset, reviewer: str) -> str:
         return "merge conflict"
     if checks == "pending":
         return "checks running"
-    verdict = github.reviewer_verdict(p, reviewer)
+    verdict = github.verdict(p, reviewer)
     if verdict == "CHANGES_REQUESTED":
         return "changes requested"
     if verdict == "APPROVED":
@@ -62,7 +62,7 @@ def age_days(created: str, now: datetime.datetime) -> float:
 
 PARKED_WHY = {"idle": "runs with no new commit", "reworks": "rework rounds used up",
               "secret": "secret-shaped text in a push", "person": "needs a person",
-              "ready": "CI never ran it as ready"}
+              "ready": "CI never ran it as ready", "manual": "parked by hand"}
 
 
 def parked_line(why) -> str:
@@ -120,7 +120,7 @@ def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required
     held = stuck(cfg, pulls, required, now, running, frozenset(parked))
     lines.append(f"Stuck ({len(held)}):" if held else "Stuck: none")
     lines += [f"  #{number} — {why}" for number, why in held]
-    lines.append(f"Parked cards ({len(parked)}) — delete <state>/attempts/<card>.json to unpark:" if parked
+    lines.append(f"Parked cards ({len(parked)}) — `scripts/lane.py unpark <card>` to unpark:" if parked
                  else "Parked cards: none")
     for number in sorted(parked):
         lines.append(f"  #{number} — {parked_line(parked[number])}")
