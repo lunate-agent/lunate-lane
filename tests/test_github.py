@@ -585,3 +585,67 @@ class PersonOutranksTests(unittest.TestCase):
         p = pull(813, 794, reviews=[helper_review("APPROVED")])
         self.assertEqual(github.verdict(p, "lunate-reviewer"), "APPROVED")
         self.assertEqual(github.person_approved(p, "lunate-reviewer"), "")
+
+
+class DecisionReadTests(unittest.TestCase):
+    """3 and 5: decision issues, oldest first with what they block; the Decision: comment of a closed blocker."""
+
+    def test_open_decisions_come_oldest_first_with_the_open_cards_they_block(self) -> None:
+        nodes = [{"number": 822, "title": "b", "createdAt": "2026-11-05T00:00:00Z", "blocking": page([])},
+                 {"number": 820, "title": "a", "createdAt": "2026-11-01T00:00:00Z",
+                  "blocking": page([{"number": 794, "state": "OPEN"}, {"number": 700, "state": "CLOSED"}])}]
+        with mock.patch.object(common, "graphql", return_value={"repository": {"issues": page(nodes)}}) as gql:
+            got = github.decision_issues(CFG)
+        self.assertEqual([(d.number, d.blocking) for d in got], [(820, (794,)), (822, ())])
+        self.assertEqual(gql.call_args.kwargs["label"], "kind/decision")
+
+    def blocker(self, number, state, labels, comments, older=False):
+        return {"number": number, "title": f"decide {number}", "state": state, "labels": page([{"name": n} for n in labels]),
+                "comments": {"pageInfo": {"hasPreviousPage": older},
+                             "nodes": [{"body": b, "authorAssociation": a} for a, b in comments]}}
+
+    def read(self, *blockers):
+        answer = {"repository": {"issue": {"blockedBy": page(list(blockers))}}}
+        with mock.patch.object(common, "graphql", return_value=answer):
+            return github.decisions_for(CFG, 794)
+
+    def test_the_latest_maintainer_decision_of_each_closed_decision_blocker_verbatim(self) -> None:
+        got = self.read(
+            self.blocker(820, "CLOSED", ["kind/decision"], [
+                ("OWNER", "Decision: the lane opens release PRs."),
+                ("NONE", "Decision: the lane merges them too."),  # not a maintainer
+                ("OWNER", "Thinking about it more."),
+                ("OWNER", "Decision: the lane opens release PRs; a maintainer merges them.\n\n- keep `--write`")]),
+            self.blocker(821, "OPEN", ["kind/decision"], [("OWNER", "Decision: still open, not decided")]),
+            self.blocker(700, "CLOSED", ["kind/feature"], [("OWNER", "Decision: not a decision issue")]),
+            self.blocker(823, "CLOSED", ["kind/decision"], [("MEMBER", "closing, see chat")]))
+        self.assertEqual(got, [
+            github.Decision(820, "decide 820", "Decision: the lane opens release PRs; a maintainer merges them.\n\n"
+                                               "- keep `--write`"),
+            github.Decision(823, "decide 823", "")])
+        section = github.decisions_section(got)
+        self.assertIn("## Decisions this card waited on (verbatim)", section)
+        self.assertIn("### #820 decide 820\n\nDecision: the lane opens release PRs; a maintainer merges them.", section)
+        self.assertIn("### #823 decide 823\n\n(closed with no `Decision:` comment", section)
+        self.assertEqual(github.decisions_section([]), "")
+
+    def test_a_decision_beyond_the_comments_read_is_refused(self) -> None:
+        with self.assertRaises(GhError):
+            self.read(self.blocker(820, "CLOSED", ["kind/decision"], [("OWNER", "ok")], older=True))
+
+
+class WaitsForApprovalTests(unittest.TestCase):
+    def test_only_a_ready_green_head_the_bot_cannot_approve_further_waits_on_a_person(self) -> None:
+        bot_ok = [review("APPROVED")]
+        yes = [pull(815, 804, reviews=bot_ok, review_decision="REVIEW_REQUIRED"),
+               pull(900, None, author="a-maintainer", review_decision="REVIEW_REQUIRED")]
+        no = [pull(815, 804, reviews=bot_ok, review_decision="APPROVED"),
+              pull(815, 804, review_decision="REVIEW_REQUIRED"),  # the bot's turn
+              pull(815, 804, reviews=bot_ok, review_decision="REVIEW_REQUIRED", draft=True),
+              pull(815, 804, reviews=bot_ok, review_decision="REVIEW_REQUIRED", mergeable="CONFLICTING"),
+              pull(815, 804, reviews=bot_ok, review_decision="REVIEW_REQUIRED",
+                   checks=[("ci-ok", "COMPLETED", "FAILURE")])]
+        for p in yes:
+            self.assertTrue(github.waits_for_approval(p, REQUIRED, "lunate-reviewer"), p)
+        for p in no:
+            self.assertFalse(github.waits_for_approval(p, REQUIRED, "lunate-reviewer"), p)

@@ -311,6 +311,7 @@ class ReviewReapTests(unittest.TestCase):
         with mock.patch.object(harness, "run_session", side_effect=session), \
                 mock.patch.object(review.dispatch_card, "card", return_value={"body": "b"}), \
                 mock.patch.object(github, "worker_report", return_value=""), \
+                mock.patch.object(github, "decisions_for", return_value=[]), \
                 mock.patch.object(github, "open_pulls", return_value=[]):
             result = review.run_review(self.cfg, pull(5, 9, head=head, files=("docs/a.md",)))
         self.assertEqual(result, ("APPROVE", "ok", self.cfg.reviewer_light))

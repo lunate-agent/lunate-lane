@@ -14,7 +14,6 @@ from __future__ import annotations
 import argparse
 import json
 import pathlib
-import re
 import subprocess
 
 try:  # imported as scripts.dispatch_card by the tests, or run as a script
@@ -106,32 +105,12 @@ def _count(repo: pathlib.Path, name: str) -> int:
     return int(raw)
 
 
-# closing keywords, their colon form, owner/repo#N, and the full issue URL form
-CLOSING_KEYWORDS = re.compile(
-    r"\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b(\s*:?\s*)([\w.-]+/[\w.-]+)?#(\d+)"
-    r"|\b(close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b(\s*:?\s*)(https?://\S*?/issues/\d+)",
-    re.IGNORECASE,
-)
-
-
 def body_for(data: dict) -> str:
-    """The pull request body: what closes, and the first part of the issue.
-
-    The issue's own text is truncated, and any `Closes #n` inside it is defused: a copied closing keyword
-    would close unrelated issues on merge, and GitHub caps a pull request body at 65,536 characters.
+    """The pull request body: the closing keyword and a link to the card, nothing else. The card is the one copy of
+    its text: a copy here goes stale when the card is edited, and copied closing keywords would close other issues.
     """
-    closes = f"Closes #{data['number']}"
-    milestone = (data.get("milestone") or {}).get("title")
-    head = closes + (f" · milestone {milestone}" if milestone else "")
-    def escape(match: "re.Match[str]") -> str:
-        if match.group(4):  # keyword #N, optionally owner/repo#N
-            return f"{match.group(1)}{match.group(2)}{match.group(3) or ''}\\#{match.group(4)}"
-        return f"{match.group(5)}{match.group(6)}\\{match.group(7)}"  # the URL form
-
-    issue_text = CLOSING_KEYWORDS.sub(escape, data.get("body") or "(the issue states no body)")
-    if len(issue_text) > 8000:
-        issue_text = issue_text[:8000] + "\n…truncated; the issue holds the rest."
-    return f"{head}\n\n{issue_text}\n"
+    number = int(data["number"])
+    return f"Closes #{number}\n\nCard: https://github.com/{SLUG}/issues/{number}\n"
 
 
 def dispatch(repo: pathlib.Path, number: int, arm: bool = True, known: tuple = ()) -> dict:

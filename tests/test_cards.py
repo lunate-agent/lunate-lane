@@ -214,15 +214,49 @@ class ParkedTests(unittest.TestCase):
     def test_a_parked_card_is_not_started_and_the_next_one_is(self) -> None:
         launches, notes = plan([card(1, "kind/bug"), card(2)], parked={1})
         self.assertEqual(started(launches), [(2, None)])
-        self.assertIn("#1 is parked after runs with no new commit — left for a person", notes)
+        self.assertIn("#1 is parked — left for a person", notes)
 
-    def test_a_parked_card_is_not_sent_back_for_rework_but_still_counts_as_in_flight(self) -> None:
+    def test_a_parked_card_is_not_sent_back_for_rework_and_frees_its_wip_slot(self) -> None:
         sent_back = pull(101, 1, reviews=[review("CHANGES_REQUESTED")])
         rules = cards.Rules(1, "lunate-worker", "lunate-reviewer", "kind/bug", "area/")
         launches, notes = plan([card(5)], worker_pulls=[sent_back], parked={1}, rules=rules)
-        self.assertEqual(started(launches), [])
+        self.assertEqual(started(launches), [(5, None)], "a parked card waits on a person, not on the lane")
         self.assertIn("#101 needs rework (changes requested) but card #1 is parked — left for a person", notes)
+
+    def test_a_parked_card_keeps_its_area_occupied(self) -> None:
+        held = pull(101, 1, labels=["area/cli"])
+        launches, notes = plan([card(5, "area/cli"), card(6, "area/tui")], worker_pulls=[held], parked={1})
+        self.assertEqual(started(launches), [(6, None)])
+        self.assertIn("#5 skipped — area/cli already in flight", notes)
+
+    def test_a_parked_card_whose_worker_still_runs_counts(self) -> None:
+        rules = cards.Rules(1, "lunate-worker", "lunate-reviewer", "kind/bug", "area/")
+        launches, notes = plan([card(5)], worker_pulls=[pull(101, 1)], parked={1},
+                               running={1: frozenset()}, rules=rules)
+        self.assertEqual(started(launches), [])
         self.assertIn("WIP 1 of 1 — no new card", notes)
+
+    def test_wip_counts_only_unparked_cards(self) -> None:
+        rules = cards.Rules(2, "lunate-worker", "lunate-reviewer", "kind/bug", "area/")
+        flight = [pull(101, 1), pull(102, 2), pull(103, 3)]
+        launches, notes = plan([card(7), card(8)], worker_pulls=flight, parked={1, 2}, rules=rules)
+        self.assertEqual(started(launches), [(7, None)])
+        self.assertIn("WIP 2 of 2 — no new card", notes)
+
+
+class DecisionTests(unittest.TestCase):
+    """A `kind/decision` issue asks a maintainer to decide; it is not work, whatever its order."""
+
+    def test_a_decision_issue_is_never_started_and_takes_no_wip(self) -> None:
+        decision = card(1, "kind/decision", blocking=(2,))  # blocking others would sort it first
+        launches, notes = plan([decision, card(2, blocked_by=(1,)), card(3)])
+        self.assertEqual(started(launches), [(3, None)])
+        self.assertIn("#2 waits on #1", notes)
+        self.assertFalse(any("#1 " in n for n in notes if "waits" not in n), notes)
+
+    def test_a_pinned_decision_issue_is_still_skipped(self) -> None:
+        launches, _ = plan([card(1, "kind/decision"), card(2)], pins=(1,))
+        self.assertEqual(started(launches), [(2, None)])
 
 
 if __name__ == "__main__":
@@ -292,3 +326,10 @@ class PersonOutranksTests(unittest.TestCase):
         p = pull(813, 794, head="h2", reviews=[review("CHANGES_REQUESTED", commit="h2"),
                                                review("APPROVED", commit="h1", author="a-maintainer")])
         self.assertEqual(cards.rework_reason(p, "lunate-reviewer", REQUIRED), "changes requested")
+
+
+class DecisionLabelConfigTests(unittest.TestCase):
+    def test_the_feeder_takes_the_decision_label_from_lane_json(self) -> None:
+        from scripts import common, feed
+
+        self.assertEqual(feed.rules(common.load_config()).decision_label, "kind/decision")

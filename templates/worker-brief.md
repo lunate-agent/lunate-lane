@@ -68,6 +68,7 @@ line in your final report and end the session:
 
 The lane parks the card at once with that reason and does not send it back to a worker.
 
+{{DECISIONS}}
 ## The card (verbatim)
 
 {{BODY}}

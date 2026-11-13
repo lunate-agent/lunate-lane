@@ -150,7 +150,7 @@ class RestTests(unittest.TestCase):
 class RenderTests(unittest.TestCase):
     def test_inserted_text_is_never_substituted_again(self) -> None:
         values = {k: "v" for k in ("NUMBER", "REPO", "TITLE", "WORKTREE", "BRANCH", "BASE", "PR_LINE",
-                                   "FRAGMENT_RULE", "REWORK")}
+                                   "FRAGMENT_RULE", "REWORK", "DECISIONS")}
         text = common.render("worker-brief.md", **values, BODY="literal {{TITLE}} and {braces}")
         self.assertIn("literal {{TITLE}} and {braces}", text)
 

@@ -165,6 +165,7 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str, str]:
                                WORKTREE=str(worktree), BASE=cfg.base, DIFF_FILE=str(diff_file),
                                FRAGMENT_CHECK=fragments, VERDICT_FILE=str(verdict_file), CARD=str(p.card),
                                SPEC_NEIGHBOURS=spec_neighbours(p, github.open_pulls(cfg)), WORKER_REPORT=report,
+                               DECISIONS=github.decisions_section(github.decisions_for(cfg, p.card)),
                                BODY=(issue.get("body") or "").strip())
         log_path = common.state_dir("sessions") / f"review-{p.number}-{p.head[:8]}.jsonl"
         outcome = harness.run_session(cfg, model=model, worktree=worktree, prompt=prompt,

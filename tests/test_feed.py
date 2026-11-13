@@ -109,7 +109,7 @@ class FeedTests(unittest.TestCase):
         self.assertIn("3 worker runs in a row ended with no new commit", comments[0][1])
         log = (self.state.cfg.state / "logs" / "feed.log").read_text()
         self.assertIn("parked card #2 after 3 runs with no new commit", log)
-        self.assertIn("#2 is parked after runs with no new commit — left for a person", log)
+        self.assertIn("#2 is parked — left for a person", log)
 
     def test_a_dry_run_counts_nothing_and_only_says_it_would_park(self) -> None:
         github.milestone_cards.return_value = [card(2)]

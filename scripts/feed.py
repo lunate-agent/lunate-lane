@@ -24,7 +24,8 @@ JOB = "feed"
 
 
 def rules(cfg: common.Config) -> cards.Rules:
-    return cards.Rules(cfg.wip_limit, cfg.worker_app, cfg.reviewer_app, cfg.bug_label, cfg.area_prefix)
+    return cards.Rules(cfg.wip_limit, cfg.worker_app, cfg.reviewer_app, cfg.bug_label, cfg.area_prefix,
+                       cfg.decision_label)
 
 
 def decide(cfg: common.Config) -> tuple[list[cards.Launch], list[str]]:

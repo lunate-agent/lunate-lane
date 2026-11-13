@@ -199,7 +199,7 @@ def rework_brief(cfg: common.Config, pr: int, worktree: pathlib.Path | None = No
 
 
 def brief(cfg: common.Config, issue: dict, worktree: pathlib.Path, pr: int | None, findings: str,
-          fragments: bool) -> str:
+          fragments: bool, decisions: str = "") -> str:
     number = issue["number"]
     if pr is not None:
         pr_line = f"It is #{pr}."
@@ -229,7 +229,8 @@ def brief(cfg: common.Config, issue: dict, worktree: pathlib.Path, pr: int | Non
                   + findings.strip() + "\n")
     return common.render("worker-brief.md", NUMBER=str(number), REPO=cfg.slug, TITLE=issue["title"],
                          WORKTREE=str(worktree), BRANCH=f"wt/issue-{number}", BASE=cfg.base, PR_LINE=pr_line,
-                         FRAGMENT_RULE=fragment, REWORK=rework, BODY=(issue.get("body") or "").strip())
+                         FRAGMENT_RULE=fragment, REWORK=rework, DECISIONS=decisions,
+                         BODY=(issue.get("body") or "").strip())
 
 
 def problems(cfg: common.Config, outcome: harness.Outcome, worktree: pathlib.Path, start_head: str,
@@ -269,7 +270,8 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
             pr_file.write_text(str(rework_pr))
     except OSError as exc:
         raise common.StateError(f"the pull request number file {pr_file} could not be written: {exc}") from exc
-    text = brief(cfg, issue, worktree, rework_pr, findings, has_fragments(cfg, cfg.checkout))
+    text = brief(cfg, issue, worktree, rework_pr, findings, has_fragments(cfg, cfg.checkout),
+                 github.decisions_section(github.decisions_for(cfg, number)))
     start_head = common.wt_git(cfg, worktree, "rev-parse", "HEAD")
     opened: dict = {"pr": rework_pr, "tried": False}
 

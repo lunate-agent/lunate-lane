@@ -72,15 +72,20 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      <reason>`** is not reworked: the card is parked at once with that reason, and the comment and the digest
      say it;
    - **then new cards**, in order: the pins file (if any), then `kind/bug`, then cards that other open issues
-     depend on (native GitHub dependency edges), then oldest first. A card waiting on an open issue is skipped;
-     so is a card any open pull request (any author) already carries or closes.
+     depend on (native GitHub dependency edges), then oldest first. A card waiting on an open issue is skipped —
+     GitHub's native blocked-by is the only blocking mechanism, there is no blocking label; so is a card any open
+     pull request (any author) already carries or closes. An issue labelled **`kind/decision`** (`labels.decision`)
+     is a question for a maintainer, not work: it is never started, and the digest lists it under "Waiting on you".
+     A maintainer answers it in a comment that starts with **`Decision:`** and closes it; the worker and reviewer
+     briefs of every card it blocked then carry that comment verbatim, in case the card text was not updated.
    - **limits**: total WIP ≤ `wip_limit`, where WIP is the cards in flight — each open worker pull request plus
-     each running worker, a worker and its own pull request counted once — and at most one card in flight per
-     `area/*` label. A card without an area label has no area limit.
+     each running worker, a worker and its own pull request counted once, leaving out parked cards with no worker
+     running (they wait on a person, not on the lane) — and at most one card in flight per `area/*` label, where a
+     parked card's open pull request still holds its areas. A card without an area label has no area limit.
    - **parked cards**: a card is parked when its worker runs ended with no new commit three times in a row (new
      card or rework), or when one pull request has gone back to a worker three times, whatever the causes — the
      feeder parks it instead of starting a fourth rework. The feeder no longer starts or reworks a parked card, its
-     open pull request still counts toward WIP, the run that parked it says so once in a comment on the pull
+     open pull request no longer counts toward WIP but keeps its areas occupied, the run that parked it says so once in a comment on the pull
      request (on the issue if there is none), and the digest lists it. A new commit resets the idle-run count (and
      lifts an idle park) but not the rework rounds. Both counts are taken when the feeder launches a run, before
      anything that can fail, so a run whose setup keeps failing (a held worktree, a closed issue, a broken
@@ -109,7 +114,7 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      after the launches.
 2. **Worker** (`scripts/worker.py --issue N [--rework PR]`, started detached by the feeder). Cuts or continues
    the worktree `<state>/worktrees/issue-N` of the checkout on `wt/issue-N`, renders `templates/worker-brief.md`
-   with the issue body, and runs one Pi session on the worker model. The session has no GitHub credential; the
+   with the issue body (and the `Decision:` comment of each closed `kind/decision` issue that blocked it), and runs one Pi session on the worker model. The session has no GitHub credential; the
    lane pushes. At the branch's first commit the pull request is opened **as a draft**, without auto-merge (so
    the worker can name its `changes/<pr>.md` fragment, and Lunate's CI skips its heavy legs on work still being
    written); when the session ends with commits the branch is pushed again, the session's final report is posted
@@ -162,8 +167,11 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    be deleted, so a person has to dismiss it. A missing or malformed verdict posts nothing.
 4. **Merging** is GitHub's: the ruleset (one approval, code-owner review for `adr/`, required checks, merge queue)
    plus the auto-merge the worker armed.
-5. **Digest** (`scripts/digest.py`, daily). One short message on stdout and in `<state>/digest/latest.md`: open
-   issues in the milestone; WIP against its limit, with what is in flight (as the feeder counts it); every open
+5. **Digest** (`scripts/digest.py`, daily). One short message on stdout and in `<state>/digest/latest.md`. It
+   opens with **Waiting on you**, short enough for a phone: open `kind/decision` issues (oldest first, with the
+   open cards each blocks), open cards parked for a person (the reason and a link), pull requests that are ready
+   and green but still need a maintainer's or code owner's approval (the bot approved the head, or it carries no
+   card), and a card still open after the pull request closing it merged. Then: open issues in the milestone; WIP against its limit, with what is in flight (as the feeder counts it); every open
    pull request with its state; what is stuck and why (a worker pull request that is red, conflicting or out of
    the merge queue, and any pull request open for more than a day); the parked cards and why; and what merged
    since yesterday, with titles.
@@ -184,7 +192,7 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
 | `scripts/review.py` | Cron entry point: reviewer dispatch. |
 | `scripts/digest.py` | Cron entry point: the daily digest. |
 | `scripts/lane.py` | A person's commands for one card: `status`, `park --reason`, `unpark` (refused while its worker runs). |
-| `scripts/dispatch_card.py` | A card becomes (or reuses) its pull request: reads the issue, checks the branch, writes the body. |
+| `scripts/dispatch_card.py` | A card becomes (or reuses) its pull request: reads the issue, checks the branch, writes the body: `Closes #n` and a link to the card, no card copy. |
 | `scripts/open_pr.py` | Pushes and opens a pull request as `lunate-worker`, optionally arms auto-merge, comments as the worker. |
 | `scripts/identity.py` | Mints installation tokens for either App. |
 | `templates/worker-brief.md` | The worker's fixed brief: OpenSpec lifecycle, archive last, the changelog fragment (a release card — title starting `chore(release)` — may edit `CHANGELOG.md` and needs none), run only the named tests, and `NEEDS-PERSON` to stop for a person. |
@@ -239,14 +247,16 @@ the orchestrating user's crontab (`crontab -e`):
 delivers it (cron mail, or the orchestrator's own scheduler capturing stdout). Before the first real tick, run
 `feed.py --dry-run` and `review.py --dry-run` by hand and read what they would do.
 
-**WIP for the first unattended night is 3** (`wip_limit` in `lane.json`), not the 5 the lane is built for: fewer
-cards in flight while the crons run alone for the first time. Raise it to 5 once a night has run clean — nothing
-parked or kept by cleanup for a lane fault, no `FAILED` in `logs/feed.log` or `logs/review.log`, and the
-morning digest matching what GitHub shows. Then retire the old jobs in
+**WIP is 5** (`wip_limit` in `lane.json`); the first unattended nights ran at 3. Retire the old jobs in
 `~/.hermes` that feed, review or label the same repository, so two lanes never drive it at once.
 
 ## Known limitations
 
+- **A merge closes its card only if `lunate-worker` may write issues.** The worker arms auto-merge, so the merge
+  queue merges as `lunate-worker`, and GitHub closes the `Closes #n` issue as that actor. With the App's
+  `issues: read`, #813 merged and #794 stayed open (people's pull requests with the same line closed theirs). The
+  App needs **Issues: write** (App settings → Permissions, then accept the change on the installation). Until
+  then the digest lists every card still open after its pull request merged, under "Waiting on you".
 - **The sandbox is the v1 boundary, and it is deny-by-default for writes; a separate macOS user is the
   follow-up.** Every Pi session — worker and reviewer — runs under `sandbox-exec` with a profile
   (`harness.sandbox_profile`) that:

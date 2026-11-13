@@ -1,5 +1,5 @@
-"""Cron job: one short daily message — the milestone, WIP, the open pull requests, what is stuck and why, the
-parked cards, and what merged since yesterday.
+"""Cron job: one short daily message — what waits on a maintainer first, then the milestone, WIP, the open pull
+requests, what is stuck and why, the parked cards, and what merged since yesterday.
 
     .venv/bin/python scripts/digest.py
 
@@ -47,7 +47,7 @@ def pull_state(p: github.Pull, required: frozenset, reviewer: str) -> str:
 def merged_since(cfg: common.Config, since: datetime.datetime) -> list[dict]:
     stamp = since.strftime("%Y-%m-%dT%H:%M:%SZ")
     merged = common.gh_json("pr", "list", "-R", cfg.slug, "--state", "merged", "--search", f"merged:>={stamp}",
-                            "--limit", str(MERGED_LIMIT), "--json", "number,title,mergedAt")
+                            "--limit", str(MERGED_LIMIT), "--json", "number,title,mergedAt,closingIssuesReferences")
     if not isinstance(merged, list):
         raise GhError("the merged pull requests came back as something other than a list")
     if len(merged) >= MERGED_LIMIT:
@@ -72,13 +72,13 @@ def parked_line(why) -> str:
     return f"{text}: {detail}" if detail else text
 
 
-def in_flight(cfg: common.Config, pulls: list, running: dict) -> list[str]:
+def in_flight(cfg: common.Config, pulls: list, running: dict, parked=frozenset()) -> list[str]:
     """What counts toward WIP, as the feeder counts it: each worker pull request's card, and each running worker,
-    a worker and its own pull request once."""
+    a worker and its own pull request once. A parked card with no worker running does not count."""
     items, seen = [], set()
     for p in sorted((p for p in pulls if p.author == cfg.worker_app), key=lambda p: p.number):
         key = p.card if p.card is not None else ("pr", p.number)
-        if key in seen:
+        if key in seen or (p.card in parked and p.card not in running):
             continue
         seen.add(key)
         items.append(f"#{p.number} (card #{p.card}" + (", worker running)" if p.card in running else ")")
@@ -106,17 +106,56 @@ def stuck(cfg: common.Config, pulls: list, required: frozenset, now: datetime.da
     return found
 
 
+WAIT_TITLE = 32
+WAIT_REASON = 60
+
+
+def _short(text: str, limit: int) -> str:
+    text = " ".join(str(text).split())
+    return text if len(text) <= limit else text[:limit - 1] + "…"
+
+
+def waiting_on_you(cfg: common.Config, decisions: list, pulls: list, required: frozenset, parked: dict,
+                   merged: list, cards: list) -> list[str]:
+    """The lines a maintainer acts on, short enough for a phone: open decisions (oldest first, with the cards each
+    blocks), cards parked for a person, pull requests waiting for a maintainer's or code owner's approval, and a
+    merge that left its card open."""
+    url = f"https://github.com/{cfg.slug}"
+    lines = []
+    for d in decisions:
+        blocks = (" — blocks " + ", ".join(f"#{n}" for n in d.blocking)) if d.blocking else ""
+        lines.append(f"  decide #{d.number} {_short(d.title, WAIT_TITLE)}{blocks}")
+    pr_of = {p.card: p.number for p in pulls if p.author == cfg.worker_app and p.card is not None}
+    still_open = {c.number for c in cards}
+    for number in sorted(parked):
+        reason, detail = parked[number] if isinstance(parked[number], tuple) else (parked[number], "")
+        if reason != "person" or number not in still_open:  # a closed card waits on nobody
+            continue
+        link = f"{url}/pull/{pr_of[number]}" if number in pr_of else f"{url}/issues/{number}"
+        lines.append(f"  card #{number}: {_short(detail or 'needs a person', WAIT_REASON)} {link}")
+    for p in sorted(pulls, key=lambda p: p.number):
+        if github.waits_for_approval(p, required, cfg.reviewer_app):
+            lines.append(f"  approve #{p.number} {_short(p.title, WAIT_TITLE)} {url}/pull/{p.number}")
+    for m in merged:
+        for ref in m.get("closingIssuesReferences") or []:
+            if ref.get("number") in still_open:
+                lines.append(f"  close #{ref['number']} — #{m['number']} merged but it is still open")
+    return [f"Waiting on you ({len(lines)}):", *lines] if lines else ["Waiting on you: nothing"]
+
+
 def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required: frozenset,
             now: datetime.datetime, parked: dict | None = None, running: dict | None = None,
-            kept: dict | None = None) -> str:
+            kept: dict | None = None, decisions: list | None = None) -> str:
     running = running or {}
-    flight = in_flight(cfg, pulls, running)
-    lines = [f"Lunate lane — {now:%Y-%m-%d}", f"{cfg.milestone}: {len(cards)} open issue(s)",
+    parked = parked or {}
+    flight = in_flight(cfg, pulls, running, frozenset(parked))
+    lines = [f"Lunate lane — {now:%Y-%m-%d}",
+             *waiting_on_you(cfg, decisions or [], pulls, required, parked, merged, cards),
+             f"{cfg.milestone}: {len(cards)} open issue(s)",
              f"WIP {len(flight)} of {cfg.wip_limit}" + (": " + ", ".join(flight) if flight else "")]
     lines.append(f"Open PRs ({len(pulls)}):" if pulls else "Open PRs: none")
     for p in sorted(pulls, key=lambda p: p.number):
         lines.append(f"  #{p.number} {p.title[:60]} — {pull_state(p, required, cfg.reviewer_app)}")
-    parked = parked or {}
     held = stuck(cfg, pulls, required, now, running, frozenset(parked))
     lines.append(f"Stuck ({len(held)}):" if held else "Stuck: none")
     lines += [f"  #{number} — {why}" for number, why in held]
@@ -140,8 +179,9 @@ def tick() -> None:
     cards = github.milestone_cards(cfg)
     pulls = [github.pull(cfg, p.number) for p in github.open_pulls(cfg)]
     merged = merged_since(cfg, now - datetime.timedelta(days=1))
+    decisions = github.decision_issues(cfg)
     message = compose(cfg, cards, pulls, merged, required, now, harness.parked_info(), harness.running_workers(),
-                      cleanup.read_held())
+                      cleanup.read_held(), decisions)
     latest = common.state_dir("digest") / "latest.md"
     try:
         latest.write_text(message + "\n", encoding="utf-8")

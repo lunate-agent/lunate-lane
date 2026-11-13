@@ -72,6 +72,7 @@ class Pull:
     disarmed_by: str = ""  # a person who turned auto-merge off last (the latest auto-merge event is theirs)
     node_id: str = ""
     runs: tuple = ()  # Run, for every check run on the head
+    review_decision: str = ""  # GitHub's: APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED, or '' when none is required
 
     @property
     def capabilities(self) -> frozenset:
@@ -197,6 +198,87 @@ def milestone_cards(cfg: common.Config) -> list[Card]:
     return cards
 
 
+DECISIONS = """query($owner:String!,$name:String!,$label:String!,$cursor:String){repository(owner:$owner,name:$name){
+issues(first:50,after:$cursor,states:OPEN,labels:[$label],orderBy:{field:CREATED_AT,direction:ASC}){
+pageInfo{hasNextPage endCursor} nodes{number title createdAt
+blocking(first:50){pageInfo{hasNextPage} nodes{number state}}}}}}"""
+
+
+def decision_issues(cfg: common.Config) -> list[Card]:
+    """Every open issue labelled as a decision, in any milestone or none, oldest first, with the open issues it
+    blocks."""
+    nodes = _paged(DECISIONS, ("repository", "issues"), f"the open {cfg.decision_label} issues",
+                   owner=cfg.owner, name=cfg.name, label=cfg.decision_label)
+    found = [Card(number=int(n["number"]), title=str(n.get("title") or ""), created=str(n["createdAt"]),
+                  labels=frozenset({cfg.decision_label}),
+                  blocking=tuple(i["number"] for i in _complete(n["blocking"], f"issue #{n['number']}'s dependents")
+                                 if i.get("state") == "OPEN"))
+             for n in nodes]
+    return sorted(found, key=lambda c: (c.created, c.number))
+
+
+BLOCKERS = """query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){
+blockedBy(first:50){pageInfo{hasNextPage} nodes{number title state labels(first:50){pageInfo{hasNextPage} nodes{name}}
+comments(last:100){pageInfo{hasPreviousPage} nodes{body authorAssociation}}}}}}}"""
+
+MAINTAINERS = frozenset({"OWNER", "MEMBER", "COLLABORATOR"})
+DECISION = re.compile(r"^\s*\**decision\**\s*:", re.IGNORECASE)
+
+
+@dataclasses.dataclass(frozen=True)
+class Decision:
+    number: int
+    title: str
+    text: str  # the maintainer's latest `Decision:` comment, verbatim; '' when the issue was closed without one
+
+
+def decisions_for(cfg: common.Config, card: int) -> list[Decision]:
+    """For each closed decision issue that blocked `card`, the maintainer's latest comment that starts with
+    `Decision:`, verbatim. The card text may not have been updated with it yet."""
+    data = common.graphql(BLOCKERS, owner=cfg.owner, name=cfg.name, n=int(card))
+    issue = (data.get("repository") or {}).get("issue")
+    if not issue:
+        raise GhError(f"issue #{card} was not found in {cfg.slug}")
+    found = []
+    for node in _complete(issue["blockedBy"], f"issue #{card}'s blockers"):
+        what = f"issue #{node['number']}"
+        labels = {label["name"] for label in _complete(node["labels"], f"{what}'s labels")}
+        if node.get("state") != "CLOSED" or cfg.decision_label not in labels:
+            continue
+        comments = node["comments"]
+        said = [c["body"] for c in comments.get("nodes") or []
+                if c.get("authorAssociation") in MAINTAINERS and DECISION.match(c.get("body") or "")]
+        if not said and (comments.get("pageInfo") or {}).get("hasPreviousPage"):
+            raise GhError(f"{what} has more than 100 comments and none of the last 100 is a maintainer's Decision: — "
+                          "refusing to brief without it")
+        found.append(Decision(int(node["number"]), str(node.get("title") or ""), said[-1].strip() if said else ""))
+    return sorted(found, key=lambda d: d.number)
+
+
+def decisions_section(decisions: list[Decision]) -> str:
+    """The briefs' section for `decisions_for`, or '' when the card waited on none."""
+    if not decisions:
+        return ""
+    parts = ["## Decisions this card waited on (verbatim)\n\nA maintainer decided these before the card was started. "
+             "The card text may not have been updated with them yet: where the card and a decision disagree, the "
+             "decision wins."]
+    for d in decisions:
+        parts.append(f"### #{d.number} {d.title}\n\n" + (d.text or "(closed with no `Decision:` comment from a "
+                                                                    "maintainer — read the issue before relying on it)"))
+    return "\n\n".join(parts) + "\n"
+
+
+def waits_for_approval(p: Pull, required: frozenset, reviewer: str) -> bool:
+    """Ready, green, not conflicting, and GitHub still requires an approval the reviewer bot cannot give: the bot
+    approved the head (so a maintainer or code owner must), or the pull request carries no card (the bot never
+    reviews those)."""
+    if p.state != "OPEN" or p.draft or p.review_decision != "REVIEW_REQUIRED" or p.mergeable == "CONFLICTING":
+        return False
+    if check_state(p, required) != "green":
+        return False
+    return p.card is None or verdict(p, reviewer) == "APPROVED"
+
+
 OPEN_PULLS = """query($owner:String!,$name:String!,$cursor:String){repository(owner:$owner,name:$name){
 pullRequests(first:50,after:$cursor,states:OPEN){pageInfo{hasNextPage endCursor}
 nodes{number title isDraft author{login} headRefName closingIssuesReferences(first:10){pageInfo{hasNextPage} nodes{number}}
@@ -216,7 +298,8 @@ def open_pulls(cfg: common.Config) -> list[Pull]:
 
 
 PULL = """query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){pullRequest(number:$n){
-id number title state isDraft createdAt headRefName headRefOid mergeable author{login} autoMergeRequest{enabledAt}
+id number title state isDraft createdAt headRefName headRefOid mergeable reviewDecision author{login}
+autoMergeRequest{enabledAt}
 isInMergeQueue queueRemoval:timelineItems(last:1,itemTypes:[REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{
 ... on RemovedFromMergeQueueEvent{createdAt reason beforeCommit{oid}}}}
 autoMergeEvents:timelineItems(last:1,itemTypes:[AUTO_MERGE_ENABLED_EVENT,AUTO_MERGE_DISABLED_EVENT]){nodes{__typename
@@ -262,6 +345,7 @@ def pull(cfg: common.Config, number: int) -> Pull:
         queue_removal=_queue_removal(node), disarmed_by=_disarmed_by(node, cfg.worker_app),
         node_id=str(node.get("id") or ""),
         runs=tuple(_run(c) for c in newest),
+        review_decision=str(node.get("reviewDecision") or ""),
     )
 
 

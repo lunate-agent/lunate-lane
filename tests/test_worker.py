@@ -281,6 +281,14 @@ class BriefTests(unittest.TestCase):
         self.assertIn("never the full suite", text)
         self.assertIn(ISSUE["body"], text)
 
+    def test_a_closed_decision_that_blocked_the_card_is_in_the_brief_verbatim(self) -> None:
+        section = github.decisions_section([github.Decision(820, "Who opens release PRs?",
+                                                            "Decision: the lane opens them; a maintainer merges.")])
+        text = worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), None, "", True, section)
+        self.assertIn("### #820 Who opens release PRs?\n\nDecision: the lane opens them; a maintainer merges.", text)
+        self.assertLess(text.index("Decision: the lane"), text.index(ISSUE["body"]))
+        self.assertNotIn("Decisions this card waited on", worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), None, "", True))
+
     def test_the_brief_carries_the_spec_conflict_rule_and_asks_for_intent_decisions(self) -> None:
         text = worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), None, "", True)
         self.assertIn("is never resolved by hand", text)
@@ -368,6 +376,7 @@ class DriveCase(RepoCase):
         self.patches = [
             mock.patch.object(dispatch_card, "card", return_value=dict(ISSUE)),
             mock.patch.object(dispatch_card, "dispatch", side_effect=self.dispatch),
+            mock.patch.object(github, "decisions_for", return_value=[]),
             mock.patch.object(open_pr, "comment", side_effect=lambda n, body: self.comments.append((n, body))),
             mock.patch.object(harness, "read_credential", return_value="model-credential-value-1234"),
             mock.patch.object(open_pr, "return_to_draft", side_effect=lambda branch, pr: self.drafted.append(pr)),
