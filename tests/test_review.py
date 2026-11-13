@@ -261,7 +261,7 @@ class BriefTests(unittest.TestCase):
     def test_the_review_brief_carries_the_spec_comparison_the_neighbours_and_the_intent_decisions(self) -> None:
         text = common.render("review-brief.md", PR="6", REPO="o/r", TITLE="t", HEAD="abc", WORKTREE="/w",
                              BASE="main", DIFF_FILE="/d", FRAGMENT_CHECK="f", VERDICT_FILE="/v", CARD="9",
-                             SPEC_NEIGHBOURS="NEIGHBOURS-HERE", WORKER_REPORT="REPORT-HERE", BODY="b",
+                             SPEC_NEIGHBOURS="NEIGHBOURS-HERE", WORKER_REPORT="REPORT-HERE", BODY="b", SCOPE="SCOPE-HERE",
                              DECISIONS="## Decisions this card waited on (verbatim)\n\nDecision: DECIDED-HERE\n")
         self.assertIn("git show origin/main:openspec/specs/<capability>/spec.md", text)
         self.assertLess(text.index("Decision: DECIDED-HERE"), text.index("## The issue (#9)"))
@@ -306,7 +306,7 @@ class NeedsPersonVerdictTests(unittest.TestCase):
         self.assertIn("**Non-blocking**", verdict)
         self.assertIn("the pull request's title or description", verdict)
         self.assertIn("**Test evidence is CI's job**: never ask the worker to prove which tests it ran", text)
-        for gone in ("Report counts.", "the tests you ran with counts", "a scope violation",
+        for gone in ("Report counts.", "the tests you ran with counts", "a scope nit",
                      "a test\nthat does not test the change", "or anything you could not establish"):
             self.assertNotIn(gone, text)
 
@@ -346,3 +346,31 @@ class WaitsOnReviewTests(unittest.TestCase):
         p = pull(820, 751, waits_on=(749, 750))
         self.assertEqual(review.skip_reason(p, REQUIRED, {}, "lunate-reviewer"), "waits on #749, #750")
         self.assertIsNone(review.skip_reason(pull(820, 751), REQUIRED, {}, "lunate-reviewer"))
+
+
+class ScopeTests(unittest.TestCase):
+    """Scope blocks only outside the card's area or on a file another open pull request changes; a test that
+    passes with the change reverted blocks only when the acceptance asks for it."""
+
+    def test_the_brief_draws_the_lines(self) -> None:
+        text = (review.common.ROOT / "templates" / "review-brief.md").read_text()
+        verdict = text[text.index("## Your verdict"):]
+        blocking = verdict[:verdict.index("**Everything else is non-blocking**")]
+        rest = verdict[verdict.index("**Everything else is non-blocking**"):]
+        self.assertIn("a scope violation: a change outside the card's area, or to a file another open pull request "
+                      "also changes", blocking)
+        self.assertIn("a test the acceptance asks for that would pass with the change reverted", blocking)
+        self.assertIn("a small cleanup in the card's own area", rest)
+        self.assertIn("a test that would\npass with the change reverted when the acceptance does not ask for it", rest)
+        self.assertIn("## Scope\n\n{{SCOPE}}", text)
+
+    def test_the_scope_context_names_the_area_and_the_shared_files(self) -> None:
+        mine = pull(820, 751, labels=["area/docs", "kind/feature"],
+                    files=("docs/dev/plan.md", "docs/README.md", "changes/820.md"))
+        others = [mine, pull(818, 749, title="S1: the checker", files=("docs/README.md", "scripts/check")),
+                  pull(825, 752, title="S4", files=("changes/825.md",))]
+        text = review.scope_context(mine, others, "area/")
+        self.assertEqual(text, "The card's area: `area/docs`.\n- #818 \"S1: the checker\" also changes `docs/README.md`")
+        alone = review.scope_context(pull(9, 9, files=("a.cs",)), [], "area/")
+        self.assertEqual(alone, "The card has no area label: its area is what its own text names.\n"
+                                "No other open pull request changes a file this one changes.")
