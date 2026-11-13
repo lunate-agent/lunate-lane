@@ -24,12 +24,10 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from scripts import cards, common, dispatch_card, github, harness, open_pr  # noqa: E402
+from scripts import cards, common, dispatch_card, github, harness, open_pr, secret_scan  # noqa: E402
 from scripts.common import GitError, LaneError  # noqa: E402
 
 COMMENT_LIMIT = 60000
-WITHHELD = ("(Output withheld: the session's final message contained something shaped like a {kind}. "
-            "It stays in the lane's local session log.)")
 
 
 def ref_exists(repo: pathlib.Path, ref: str) -> bool:
@@ -303,13 +301,12 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
 
 
 def person_reason(cfg: common.Config, report: str) -> str | None:
-    """The worker's `NEEDS-PERSON: <reason>`, if its final message has one — the reason withheld when it holds
-    something secret-shaped, as the report itself would be."""
+    """The worker's `NEEDS-PERSON: <reason>`, if its final message has one, with anything secret-shaped in it
+    redacted, as in the report itself."""
     reason = github.needs_person(report)
     if reason is None:
         return None
-    kind = harness.secret_kind(reason, (harness.read_credential(cfg),))
-    return f"(the reason is withheld: it holds something shaped like a {kind})" if kind else reason
+    return secret_scan.redact(reason, (harness.read_credential(cfg),))[0]
 
 
 def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: harness.Outcome, start_head: str,
@@ -357,11 +354,10 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
     elif found:
         lines.append(f"**Incomplete — the pull request stays a draft and auto-merge is {result['auto_merge']}:** "
                      + "; ".join(found) + ".")
-    kind = harness.secret_kind(report, (harness.read_credential(cfg),))
-    if kind:
-        common.log(job, f"the session's final message holds something shaped like a {kind} — not posted; "
-                        f"it stays in {session_log}")
-        report = WITHHELD.format(kind=kind)
+    report, kinds = secret_scan.redact(report, (harness.read_credential(cfg),))
+    for kind in kinds:  # each span is replaced, the rest is posted; the full message stays in the local log
+        common.log(job, f"the session's final message holds something shaped like a {kind} — redacted before "
+                        f"posting; the full message stays in {session_log}")
     lines.append("\n" + report)
     open_pr.comment(result["number"], "\n".join(lines)[:COMMENT_LIMIT])
     method = (f" (queue {result['queue_method']}, GitHub records {result.get('merge_method') or 'none'})"

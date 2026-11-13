@@ -520,7 +520,7 @@ class DriveTests(DriveCase):
         self.assertIn("auto-merge is not armed", self.comments[0][1])
         self.assertIn("auto-merge not armed", (self.cfg.state / "logs" / "worker-3.log").read_text())
 
-    def test_a_token_in_the_final_message_is_withheld_and_logged(self) -> None:
+    def test_a_token_in_the_final_message_is_redacted_and_the_rest_posted(self) -> None:
         token = "ghs_" + "A1b2C3d4E5f6G7h8I9j0K1l2M3n4"
         for text, kind in ((f"done, and here is {token}", "GitHub token"),
                            ("my key is model-credential-value-1234", "configured credential")):
@@ -529,13 +529,35 @@ class DriveTests(DriveCase):
                 with self.fake_session(text=text):
                     worker.drive(self.cfg, 3, None)
                 body = self.comments[0][1]
-                self.assertIn("Output withheld", body)
-                self.assertIn(kind, body)
+                self.assertIn(f"[redacted: {kind}]", body)
                 self.assertNotIn(token, body)
                 self.assertNotIn("model-credential-value-1234", body)
                 log = (self.cfg.state / "logs" / "worker-3.log").read_text()
-                self.assertIn(f"shaped like a {kind} — not posted", log)
+                self.assertIn(f"shaped like a {kind} — redacted before posting", log)
                 self.assertNotIn(token, log)
+
+    def test_a_report_quoting_a_ci_log_line_with_a_key_keeps_everything_but_the_key(self) -> None:
+        """E: the report quotes the failing CI line; only the key-shaped span goes, the evidence stays."""
+        key = "sk-proj-" + "Q7mZ2xK9pL4vR8tW1nB6"
+        line = f"2026-11-12T22:50:01.1234567Z ##[error]ProviderTests.Rejects_bad_key: Authorization: Bearer {key} (401)"
+        text = ("1. met — src/Provider.cs:42.\\n2. not met: CI fails on a test I did not touch:\\n    " + line
+                + "\\nTests: 14 passed.")
+        with self.fake_session(text=text):
+            worker.drive(self.cfg, 3, None)
+        body = self.comments[0][1]
+        self.assertNotIn(key, body)
+        self.assertNotIn(key[3:], body)
+        self.assertIn("##[error]ProviderTests.Rejects_bad_key: Authorization: Bearer [redacted: API key] (401)", body)
+        self.assertIn("1. met — src/Provider.cs:42.", body)
+        self.assertIn("Tests: 14 passed.", body)
+        self.assertNotIn("Output withheld", body)
+        log = (self.cfg.state / "logs" / "worker-3.log").read_text()
+        self.assertIn("shaped like a API key — redacted before posting", log)
+        self.assertNotIn(key, log)
+        self.assertIn(key, self.session_log_text(), "the full message stays in the local session log")
+
+    def session_log_text(self) -> str:
+        return "".join(p.read_text() for p in (self.cfg.state / "sessions").glob("issue-3-*.jsonl"))
 
     def test_a_committed_secret_is_never_pushed_and_parks_the_card_naming_only_its_kind(self) -> None:
         """#12, through the real dispatch and open_pr: the scan stops both the early open and the finish."""

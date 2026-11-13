@@ -119,7 +119,8 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    request than the one sent (it recorded `MERGE` on #813, armed with `SQUASH`); the log shows both, and what
    actually lands is checked on the merged commit's parent count. The final report is scanned before posting: anything token- or key-shaped (GitHub
    tokens, `sk-` keys, private-key blocks, AWS keys, JWTs, `key=…`/`token=…` assignments, long opaque strings, or
-   the model credential itself) replaces it with a fixed "output withheld" note, and the worker log says so.
+   the model credential itself) has each matched span replaced by `[redacted: <kind>]` and the rest is posted; the
+   worker log names each kind, and the full message stays in the local session log.
    **Before every push** the diff's added lines (against `origin/main`), the pull request's title and its body
    are scanned for the shapes that are secrets by construction (private keys, GitHub tokens, `sk-`/`oc_` keys,
    AWS keys, JWTs) and the model credential. A match pushes nothing, parks the card, comments once naming the kind
