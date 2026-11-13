@@ -35,10 +35,12 @@ def decide(cfg: common.Config) -> tuple[list[cards.Launch], list[str]]:
 
 
 def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[github.Pull], list[github.Pull],
-                                            list[github.Pull]]:
+                                            list[github.Pull], list[github.Pull]]:
     """The launches and notes; the worker pull requests whose required checks failed for infra reasons and have
-    not been rerun on their head yet (rerun once, not reworked); those to re-arm; and armed ones whose card waits on
-    an open issue (disarmed: a slice started before its predecessor must not land first)."""
+    not been rerun on their head yet (rerun once, not reworked); those to enqueue; armed ones whose card waits on
+    an open issue (disarmed: a slice started before its predecessor must not land first); and approved ones the
+    merge queue removed at their head for an infra reason (re-enqueued, up to `github.REQUEUE_LIMIT` per head).
+    A queue removal that failed for real, or left a conflict, is a rework (`cards.plan`)."""
     # the running workers first: a worker that finishes between the two reads leaves its pull request ready, and
     # a draft read before that would look orphaned
     running = harness.running_workers()
@@ -53,10 +55,43 @@ def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[
     rerun = [p for p in worker_pulls if p.state == "OPEN" and not p.draft and p.card not in running
              and p.card not in parked and (p.number, p.head) not in reran
              and github.failure_kind(p, required) == "infra"]
-    rearm = [p for p in worker_pulls if p.card not in running and p.card not in parked
-             and github.needs_rearm(p, required, cfg.reviewer_app)]
+    enqueue = [p for p in worker_pulls if p.card not in running and p.card not in parked
+               and github.needs_enqueue(p, required, cfg.reviewer_app)]
     disarm = [p for p in worker_pulls if p.state == "OPEN" and p.auto_merge and p.waits_on]
-    return launches, notes, rerun, rearm, disarm
+    ejected = [p for p in worker_pulls if p.card not in running and p.card not in parked and p.state == "OPEN"
+               and not p.draft and not p.in_queue and not p.waits_on and not p.disarmed_by and not p.dequeued_by
+               and p.ejection is not None and p.ejection.kind == "infra"
+               and github.verdict(p, cfg.reviewer_app) == "APPROVED"]
+    return launches, notes, rerun, enqueue, disarm, ejected
+
+
+def requeue(cfg: common.Config, p: github.Pull, dry_run: bool) -> None:
+    """An infra removal from the merge queue at this head: enqueue it again, at most REQUEUE_LIMIT times per head;
+    past that, say once that it is stuck in the queue (the digest lists it) and leave it for a person. Each removal
+    is acted on once, and recorded before the enqueue, which can fail."""
+    e = p.ejection
+    assert e is not None
+    done = harness.requeues(p.number, p.head)
+    if e.at in done:
+        return  # acted on already: re-enqueued (and removed again since would be a newer removal), or stuck
+    label = "infra" if e.reason.lower() != "merge_conflict" else "queue conflict, mergeable now"
+    what = f"#{p.number} was removed from the merge queue at {p.head[:8]} ({e.reason}: {e.why})"
+    if len(done) >= github.REQUEUE_LIMIT:
+        if dry_run:
+            common.log(JOB, f"would leave {what} — stuck in queue after {len(done)} re-enqueues on this head")
+            return
+        harness.note_requeue(p.number, p.head, e.at)
+        harness.note_queue_event(f"stuck in queue #{p.number} ({label}, {len(done)} re-enqueues at {p.head[:8]})")
+        common.log(JOB, f"{what} — stuck in queue: re-enqueued {len(done)} times on this head already, left for a person")
+        return
+    if dry_run:
+        common.log(JOB, f"would re-enqueue {what}")
+        return
+    count = harness.note_requeue(p.number, p.head, e.at)
+    entry = open_pr.enqueue(p.number, p.node_id, p.head)
+    harness.note_queue_event(f"re-enqueued #{p.number} ({label})")
+    common.log(JOB, f"re-enqueued {what} — {count} of {github.REQUEUE_LIMIT} on this head; entry {entry['state']}, "
+                    f"position {entry['position']}")
 
 
 def rerun(cfg: common.Config, p: github.Pull, dry_run: bool) -> None:
@@ -123,7 +158,7 @@ def tick(dry_run: bool = False) -> None:
         for card in harness.lifted_by_hand():
             common.log(JOB, f"card #{card} is no longer parked, and not by `lane.py unpark`: its attempts record was "
                             "edited or removed by hand")
-    launches, notes, reruns, rearms, disarms = decide_all(cfg)
+    launches, notes, reruns, enqueues, disarms, ejected = decide_all(cfg)
     for p in reruns:
         rerun(cfg, p, dry_run)
     # the launches first, in the order they were chosen, then the notes on why nothing else was (#3)
@@ -169,24 +204,28 @@ def tick(dry_run: bool = False) -> None:
             harness.note_rework(launch.card, launch.rework_pr)
         pid = start(cfg, launch)
         common.log(JOB, f"started {what} (pid {pid})")
+        if launch.rework_pr and (launch.reason == github.QUEUE_CONFLICT or launch.reason.startswith(github.QUEUE_FAILURE)):
+            harness.note_queue_event(f"rework #{launch.rework_pr} ({launch.reason})")
     if not launches:
         common.log(JOB, "nothing to start")
     for note in notes:
         common.log(JOB, note)
-    for p in rearms:  # approved and clean, but its arming failed or never happened
+    for p in enqueues:  # approved, green and mergeable, but not in the queue: arming alone does not put it there
         if dry_run:
-            common.log(JOB, f"would re-arm #{p.number}: ready, approved at {p.head[:8]}, green, not armed")
+            common.log(JOB, f"would enqueue #{p.number}: ready, approved at {p.head[:8]}, green, not in the merge queue")
             continue
-        result = open_pr.rearm(p.number, p.node_id, cfg.base)
-        common.log(JOB, f"re-armed #{p.number}: approved at {p.head[:8]} but not armed — auto-merge {result['auto_merge']}"
-                        f" (queue {result['queue_method']}, GitHub records {result['merge_method'] or 'none'})")
+        entry = open_pr.enqueue(p.number, p.node_id, p.head)
+        common.log(JOB, f"enqueued #{p.number}: ready, approved at {p.head[:8]}, green, not in the merge queue — "
+                        f"entry {entry['state']}, position {entry['position']}")
+    for p in ejected:
+        requeue(cfg, p, dry_run)
     for p in disarms:
         what = f"#{p.number}: card #{p.card} {github.waits_line(p.waits_on)}"
         if dry_run:
             common.log(JOB, f"would turn auto-merge off on {what}")
             continue
         open_pr.disarm(p.number, p.node_id)
-        common.log(JOB, f"turned auto-merge off on {what} — it is re-armed once approved after they close")
+        common.log(JOB, f"turned auto-merge off on {what} — it is enqueued once approved after they close")
     # after the launches, so a cleanup that fails never holds work back — it still fails the tick, by name
     cleanup.tidy(cfg, JOB, github.open_pulls(cfg), harness.running_workers(), dry_run)
 

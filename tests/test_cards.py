@@ -167,12 +167,19 @@ class StuckTests(unittest.TestCase):
     """#8: a stuck worker pull request goes back to a worker like changes-requested, and adds nothing to WIP."""
 
     def test_red_conflicting_and_dropped_from_the_queue_each_go_back_with_their_reason(self) -> None:
+        from scripts import github
+        real = github.Ejection("real", "failed_checks", "t", "w", 1, "verify (macos-latest, 2/4)", 2, ("Verify (bash)",))
+        conflict = github.Ejection("conflict", "merge_conflict", "t", "w")
+        infra = github.Ejection("infra", "failed_checks", "t", "w", 1)
         pulls = [pull(101, 1, checks=RED), pull(102, 2, mergeable="CONFLICTING"),
-                 pull(103, 3, reviews=[review("APPROVED")], queue_removal="MERGE_CONFLICT")]
-        launches, _ = plan([card(9)], worker_pulls=pulls, rules=cards.Rules(3, *list(vars(RULES).values())[1:]))
+                 pull(103, 3, reviews=[review("APPROVED")], queue_removal="failed_checks", ejection=real),
+                 pull(104, 4, reviews=[review("APPROVED")], queue_removal="merge_conflict", ejection=conflict,
+                      mergeable="CONFLICTING"),
+                 pull(105, 5, reviews=[review("APPROVED")], queue_removal="failed_checks", ejection=infra)]
+        launches, _ = plan([card(9)], worker_pulls=pulls, rules=cards.Rules(5, *list(vars(RULES).values())[1:]))
         self.assertEqual([(l.card, l.rework_pr, l.reason) for l in launches], [
             (1, 101, "required checks failing"), (2, 102, "conflicts with the base branch"),
-            (3, 103, "out of the merge queue after approval (merge_conflict)")])
+            (3, 103, "queue failure: verify (macos-latest, 2/4)"), (4, 104, "queue conflict")])
 
     def test_a_running_card_or_a_parked_card_is_not_sent_back(self) -> None:
         self.assertEqual(started(plan([], worker_pulls=[pull(101, 1, checks=RED, draft=True)],

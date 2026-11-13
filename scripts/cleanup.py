@@ -217,6 +217,9 @@ def _after_cards(cfg: common.Config, job: str, open_pulls, held: dict, dry_run: 
     pruned_reruns = harness.prune_reruns(p.number for p in open_pulls)
     if pruned_reruns:
         common.log(job, f"pruned {pruned_reruns} rerun record(s) of pull requests no longer open")
+    pruned_requeues = harness.prune_requeues(p.number for p in open_pulls)
+    if pruned_requeues:
+        common.log(job, f"pruned {pruned_requeues} requeue record(s) of pull requests no longer open")
     for name in rotate_logs():
         common.log(job, f"rotated {name}")
     pruned = prune_sessions()

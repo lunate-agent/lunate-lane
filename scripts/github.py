@@ -8,6 +8,7 @@ page) is a `GhError`, because a partial list would be read as "nothing else exis
 from __future__ import annotations
 
 import dataclasses
+import datetime
 import re
 import typing
 
@@ -69,11 +70,14 @@ class Pull:
     files: tuple | None = None  # changed paths; None means not read
     in_queue: bool = False  # in the merge queue now
     queue_removal: str = ""  # why the merge queue removed it — only a removal of the current head counts
+    queue_removed_at: str = ""  # when (the removal's createdAt), with `queue_removal`
+    dequeued_by: str = ""  # a person who took the current head out of the queue: their decision, never re-enqueued
+    ejection: "Ejection | None" = None  # out of the queue at this head, not back in it: what the queue run says
     disarmed_by: str = ""  # a person who turned auto-merge off last (the latest auto-merge event is theirs)
     node_id: str = ""
     runs: tuple = ()  # Run, for every check run on the head
     review_decision: str = ""  # GitHub's: APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED, or '' when none is required
-    waits_on: tuple = ()  # open issues its card is blocked by: not reviewed, not armed, not re-armed until they close
+    waits_on: tuple = ()  # open issues its card is blocked by: not reviewed, not armed, not enqueued until they close
 
     @property
     def capabilities(self) -> frozenset:
@@ -303,14 +307,14 @@ PULL = """query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,na
 id number title state isDraft createdAt headRefName headRefOid mergeable reviewDecision author{login}
 autoMergeRequest{enabledAt}
 isInMergeQueue queueRemoval:timelineItems(last:1,itemTypes:[REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{
-... on RemovedFromMergeQueueEvent{createdAt reason beforeCommit{oid}}}}
+... on RemovedFromMergeQueueEvent{createdAt reason actor{__typename login}}}}
 autoMergeEvents:timelineItems(last:1,itemTypes:[AUTO_MERGE_ENABLED_EVENT,AUTO_MERGE_DISABLED_EVENT]){nodes{__typename
 ... on AutoMergeDisabledEvent{actor{__typename login}}}}
 closingIssuesReferences(first:10){pageInfo{hasNextPage} nodes{number labels(first:50){pageInfo{hasNextPage} nodes{name}}
 blockedBy(first:50){pageInfo{hasNextPage} nodes{number state}}}}
 reviews(last:100){pageInfo{hasPreviousPage} nodes{author{login} state body commit{oid}}}
 files(first:100){pageInfo{hasNextPage} nodes{path}}
-commits(last:1){nodes{commit{oid checkSuites(first:50){pageInfo{hasNextPage} nodes{databaseId status createdAt
+commits(last:1){nodes{commit{oid committedDate checkSuites(first:50){pageInfo{hasNextPage} nodes{databaseId status createdAt
 workflowRun{databaseId runAttempt workflow{databaseId}}}} statusCheckRollup{contexts(first:100){pageInfo{hasNextPage}
 nodes{__typename ... on CheckRun{name status conclusion databaseId detailsUrl checkSuite{databaseId status createdAt
 workflowRun{databaseId runAttempt workflow{databaseId}}}
@@ -331,21 +335,27 @@ def pull(cfg: common.Config, number: int) -> Pull:
     contexts = _complete(rollup["contexts"], f"#{number}'s checks") if rollup else []
     suites = _complete(commits[0]["commit"]["checkSuites"], f"#{number}'s check suites") if commits else []
     newest = newest_runs([c for c in contexts if c["__typename"] == "CheckRun"], suites)
+    removal = _queue_removal(node, commits[0]["commit"] if commits else {})
+    in_queue = bool(node.get("isInMergeQueue"))
+    mergeable = str(node.get("mergeable") or "")
+    ejection = None
+    if removal["reason"] and not in_queue and str(node["state"]) == "OPEN":
+        ejection = queue_ejection(cfg, int(number), removal["reason"], removal["at"], mergeable)
     checks = tuple((c["name"], c["status"], c.get("conclusion") or "") for c in newest) + tuple(
         (c["context"], "COMPLETED" if c["state"] not in ("PENDING", "EXPECTED") else c["state"], c["state"])
         for c in contexts if c["__typename"] != "CheckRun")
     return Pull(
         number=int(node["number"]), title=str(node.get("title") or ""), state=str(node["state"]),
         draft=bool(node["isDraft"]), created=str(node["createdAt"]), author=login(node.get("author")),
-        branch=str(node["headRefName"]), head=str(node["headRefOid"]), mergeable=str(node.get("mergeable") or ""),
+        branch=str(node["headRefName"]), head=str(node["headRefOid"]), mergeable=mergeable,
         auto_merge=node.get("autoMergeRequest") is not None, cards=tuple(i["number"] for i in issues),
         labels=frozenset(label["name"] for i in issues
                          for label in _complete(i["labels"], f"#{number}'s issue #{i['number']}'s labels")),
         reviews=tuple(Review(login(r.get("author")), str(r["state"]), str((r.get("commit") or {}).get("oid") or ""),
                              str(r.get("body") or "")) for r in node["reviews"]["nodes"]),
         checks=checks, files=_files(cfg, int(number), node["files"]),
-        in_queue=bool(node.get("isInMergeQueue")),
-        queue_removal=_queue_removal(node), disarmed_by=_disarmed_by(node, cfg.worker_app),
+        in_queue=in_queue, queue_removal=removal["reason"], queue_removed_at=removal["at"],
+        dequeued_by=removal["person"], ejection=ejection, disarmed_by=_disarmed_by(node, cfg.worker_app),
         node_id=str(node.get("id") or ""),
         runs=tuple(_run(c) for c in newest),
         review_decision=str(node.get("reviewDecision") or ""),
@@ -419,8 +429,8 @@ def verdict(p: Pull, reviewer: str) -> str | None:
     """The verdict the lane acts on at the current head: a person outranks the reviewer bot.
 
     A dismissed bot review counts for nothing (`reviewer_verdict`). A person's APPROVED on the head after the bot's
-    last CHANGES_REQUESTED there (or with no bot verdict at all) is APPROVED: no rework, and a ready, green, unarmed
-    pull request is re-armed. A person's own request for changes is theirs to follow up, not a rework trigger, so
+    last CHANGES_REQUESTED there (or with no bot verdict at all) is APPROVED: no rework, and a ready, green, unqueued
+    pull request is enqueued. A person's own request for changes is theirs to follow up, not a rework trigger, so
     only approvals are read from people.
     """
     on_head = [r for r in p.reviews if r.commit == p.head and r.state in ("APPROVED", "CHANGES_REQUESTED")]
@@ -523,13 +533,31 @@ def _run(c: dict) -> Run:
                str(c.get("detailsUrl") or ""), int(run_id or 0), bool(names), names)
 
 
-def _queue_removal(node: dict) -> str:
-    """The queue's reason for its latest removal — only when it removed the current head; one before the last
-    push is history, not a reason to rework (review of #17)."""
+def _when(stamp: str) -> datetime.datetime | None:
+    try:
+        return datetime.datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _queue_removal(node: dict, head_commit: dict) -> dict:
+    """The queue's latest removal, when it removed the current head: {reason, at, person}, empty strings otherwise.
+
+    The event's `beforeCommit` is the merge group's commit, not the pull request's head (#824: 94545e80, the queue's
+    squash of the head f6343b65), so it never names the head. A removal counts for the current head when it came
+    after the head was committed: a rework always ends in a new commit (it merges origin/main), so an older removal
+    is history, not a reason to act (review of #17). A removal by a person (a User) is their decision: `person`."""
+    found = {"reason": "", "at": "", "person": ""}
     for event in ((node.get("queueRemoval") or {}).get("nodes") or [])[-1:]:
-        if ((event.get("beforeCommit") or {}).get("oid") or "") == node.get("headRefOid"):
-            return str(event.get("reason") or "removed")
-    return ""
+        at, committed = _when(event.get("createdAt") or ""), _when(head_commit.get("committedDate") or "")
+        if at is None or committed is None or at <= committed:
+            continue
+        actor = event.get("actor") or {}
+        if actor.get("__typename") == "User":
+            found["person"] = login(actor)
+        else:
+            found.update(reason=str(event.get("reason") or "removed"), at=str(event["createdAt"]))
+    return found
 
 
 def _disarmed_by(node: dict, worker_app: str) -> str:
@@ -610,37 +638,148 @@ def run_draft(cfg: common.Config, run_id: int) -> bool | None:
     return None
 
 
-def needs_rearm(p: Pull, required: frozenset, reviewer: str) -> bool:
-    """A clean, ready, approved pull request that is not armed and not queued — the state a clean finish leaves
-    when arming fails after `mark_ready` (review of #17). Not when a person turned auto-merge off, and not when it
-    is stuck (that is a rework) or its checks are not green."""
-    return (p.state == "OPEN" and not p.draft and not p.auto_merge and not p.in_queue and not p.disarmed_by
-            and not p.waits_on
-            and p.mergeable != "CONFLICTING" and not p.queue_removal and check_state(p, required) == "green"
-            and verdict(p, reviewer) == "APPROVED")
+CONFLICT = "conflicts with the base branch"
+QUEUE_CONFLICT = "queue conflict"
+QUEUE_FAILURE = "queue failure: "
+REQUEUE_LIMIT = 2  # infra ejections re-enqueued per head; past it the digest says "stuck in queue"
+QUEUE_RUN_WINDOW = datetime.timedelta(hours=24)  # how far before its removal an entry's merge_group run is looked for
+RUN_LISTING_LIMIT = 1000  # GitHub's run search returns at most this many
+
+
+@dataclasses.dataclass(frozen=True)
+class Ejection:
+    """What took a pull request out of the merge queue at its current head, from the last merge_group run of its
+    entry (`gh-readonly-queue/<base>/pr-<n>-*`). `kind`: 'infra' (re-enqueue), 'conflict' (rework), 'real' (rework
+    with the failing job), or 'pending' (GitHub has not computed mergeability yet: next tick)."""
+    kind: str
+    reason: str  # GitHub's removal reason (failed_checks, merge_conflict, …)
+    at: str  # the removal's createdAt: one removal is acted on once
+    why: str  # one line: what was found
+    run_id: int = 0
+    job: str = ""  # real: the failing job's name
+    job_id: int = 0
+    steps: tuple = ()  # real: its failing steps
+
+    @property
+    def job_url(self) -> str:
+        return f"https://github.com/{common.config().slug}/actions/runs/{self.run_id}/job/{self.job_id}"
+
+
+def queue_run(cfg: common.Config, number: int, removed_at: str) -> dict | None:
+    """The last run of the CI workflow for this pull request's queue entry that started before its removal, or None.
+    The listing is complete or raises (rows counted against GitHub's total)."""
+    end = _when(removed_at)
+    if end is None:
+        raise GhError(f"#{number}'s queue removal has no readable time ({removed_at!r})")
+    start = end - QUEUE_RUN_WINDOW
+    stamp = "%Y-%m-%dT%H:%M:%SZ"
+    raw = common.gh("api", "--paginate", f"repos/{cfg.slug}/actions/runs?event=merge_group&per_page=100"
+                    f"&created={start.strftime(stamp)}..{end.strftime(stamp)}",
+                    "--jq", '"T\\t\\(.total_count)", (.workflow_runs[] | [.id, .name, .head_branch, .created_at] | @tsv)')
+    totals, rows = set(), []
+    for line in raw.splitlines():
+        cells = line.split("\t")
+        if cells[0] == "T" and len(cells) == 2:
+            totals.add(int(cells[1]))
+        elif len(cells) == 4:
+            rows.append(cells)
+        elif line.strip():
+            raise GhError(f"the merge_group run listing for #{number} has a line it cannot read: {line[:80]!r}")
+    if len(totals) != 1 or len(rows) != next(iter(totals)) or len(rows) >= RUN_LISTING_LIMIT:
+        raise GhError(f"the merge_group run listing for #{number} came back incomplete "
+                      f"({len(rows)} rows, total {sorted(totals) or 'unread'})")
+    prefix = f"gh-readonly-queue/{cfg.base}/pr-{int(number)}-"
+    mine = [r for r in rows if r[1] == cfg.ci_workflow and r[2].startswith(prefix)]
+    if not mine:
+        return None
+    run_id, name, branch, created = max(mine, key=lambda r: (r[3], int(r[0])))
+    return {"id": int(run_id), "name": name, "branch": branch, "created": created}
+
+
+PASSED_JOB = {"success", "skipped", "neutral"}
+
+
+def queue_ejection(cfg: common.Config, number: int, reason: str, at: str, mergeable: str) -> Ejection:
+    """Classify a removal of the current head from the merge queue.
+
+    conflict: GitHub reads the pull request CONFLICTING with the base. A merge_conflict removal of a pull request
+    that is MERGEABLE now conflicted with an entry ahead of it that has since left (#827): there is nothing to merge
+    in a rework, so it is re-enqueued like infra, under the same cap. UNKNOWN is 'pending'.
+    real: a job of the entry's merge_group run has a failing step — the aggregate check (`ci-ok`) only when it
+    failed at a step other than its aggregating one.
+    infra: everything else — the failed jobs were cancelled or timed out without a failing step (#824 and #829:
+    a macOS shard "not acquired by Runner", 0 steps), no job failed, or no merge_group run of the entry exists."""
+    if mergeable == "CONFLICTING":
+        return Ejection("conflict", reason, at, "GitHub reads it CONFLICTING with the base")
+    if reason.lower() == "merge_conflict":
+        if mergeable != "MERGEABLE":
+            return Ejection("pending", reason, at, f"the queue saw a conflict; GitHub reads it {mergeable or 'unread'}")
+        return Ejection("infra", reason, at, "the queue saw a conflict with an entry ahead of it; GitHub reads it "
+                                              "MERGEABLE with the base now")
+    run = queue_run(cfg, number, at)
+    if run is None:
+        return Ejection("infra", reason, at, "no merge_group run of its entry was found")
+    listing = common.gh_json("api", f"repos/{cfg.slug}/actions/runs/{run['id']}/jobs?filter=latest&per_page=100")
+    jobs = listing.get("jobs") if isinstance(listing, dict) else None
+    if not isinstance(jobs, list) or int(listing.get("total_count") or 0) != len(jobs):
+        raise GhError(f"the jobs of merge_group run {run['id']} (#{number}) came back incomplete")
+    real, infra = [], []
+    for job in sorted(jobs, key=lambda j: (j.get("name") == cfg.aggregate_check, str(j.get("name")))):
+        conclusion = str(job.get("conclusion") or "")
+        if not conclusion or conclusion in PASSED_JOB:
+            continue
+        steps = job.get("steps") or []
+        failed = tuple(str(s.get("name") or "") for s in steps if s.get("conclusion") == "failure")
+        name = str(job.get("name") or "")
+        if name == cfg.aggregate_check:
+            if failed and set(failed) != {cfg.aggregate_step}:
+                real.append((name, int(job.get("id") or 0), failed))
+            continue
+        if failed:
+            real.append((name, int(job.get("id") or 0), failed))
+        else:
+            infra.append(f"{name} {conclusion} with {len(steps)} step(s)")
+    if real:
+        name, job_id, failed = real[0]
+        return Ejection("real", reason, at, f"{name} failed at {', '.join(failed)} in merge_group run {run['id']}",
+                        run["id"], name, job_id, failed)
+    return Ejection("infra", reason, at, (", ".join(infra) if infra else "no job failed")
+                    + f" in merge_group run {run['id']}", run["id"])
+
+
+def needs_enqueue(p: Pull, required: frozenset, reviewer: str) -> bool:
+    """A ready, approved, green worker pull request that is not in the merge queue: the feeder enqueues it itself
+    (`enqueuePullRequest`) instead of arming auto-merge and trusting GitHub to add it. Not when a person turned
+    auto-merge off or took it out of the queue, not while its card waits on an open issue, not when GitHub does not
+    read it MERGEABLE, and not when the queue removed this head: that is an ejection (`Ejection`), handled by kind."""
+    return (p.state == "OPEN" and not p.draft and not p.in_queue and not p.disarmed_by and not p.dequeued_by
+            and not p.waits_on and p.mergeable == "MERGEABLE" and not p.queue_removal and p.ejection is None
+            and check_state(p, required) == "green" and verdict(p, reviewer) == "APPROVED")
 
 
 def stuck_reason(p: Pull, required: frozenset, reviewer: str, reran: frozenset = frozenset()) -> str | None:
     """Why an open, ready pull request is stuck and goes back to a worker (#8), or None.
 
-    Red on a required check, CONFLICTING with the base, or approved at its head but neither in the merge queue nor
-    armed, with a removal by the queue on record (approved and unarmed without one is a person's choice). A draft is unfinished work, not stuck; UNKNOWN mergeability is not a conflict.
+    Red on a required check; CONFLICTING with the base (a `queue conflict` when the queue removed this head); or
+    approved, removed from the merge queue at this head, and its merge_group run failed for real (a failing step:
+    `queue failure: <job>`). An infra ejection is not stuck: the feeder re-enqueues it. A draft is unfinished work,
+    not stuck; UNKNOWN mergeability is not a conflict.
     """
     if p.state != "OPEN" or p.draft:
         return None
     if p.mergeable == "CONFLICTING":
-        return "conflicts with the base branch"
+        return QUEUE_CONFLICT if p.ejection is not None else CONFLICT
     if check_state(p, required) == "failing":
         if failure_kind(p, required) == "real":
             return "required checks failing"
         if (p.number, p.head) in reran:  # `reran`: (pull request, head) pairs already rerun once
             return "required checks cancelled or timed out again after a rerun"
         return None  # the feeder reruns it once instead
-    if p.disarmed_by:
-        return None  # a person turned auto-merge off: their decision, not a rework (the digest says who)
-    if verdict(p, reviewer) == "APPROVED" and not p.in_queue and not p.auto_merge and p.queue_removal:
-        return f"out of the merge queue after approval ({p.queue_removal.lower()})"
-    return None
+    if p.disarmed_by or p.dequeued_by:
+        return None  # a person turned auto-merge off or dequeued it: their decision, not a rework (the digest says who)
+    if p.ejection is not None and p.ejection.kind == "real" and verdict(p, reviewer) == "APPROVED":
+        return QUEUE_FAILURE + p.ejection.job
+    return None  # an infra ejection is re-enqueued by the feeder; one still being read is left for the next tick
 
 
 def orphaned_draft(p: Pull, running, parked) -> bool:

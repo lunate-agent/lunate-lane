@@ -622,6 +622,84 @@ def prune_reruns(open_prs) -> int:
     return gone
 
 
+# --- queue ejections: an infra removal from the merge queue is re-enqueued at most REQUEUE_LIMIT times per head;
+#     <state>/requeues/<pr>.json names the head and the removals (by their time) already acted on. The queue's
+#     events (re-enqueued, sent back) go to <state>/queue/events.jsonl for the digest.
+
+QUEUE_EVENT_DAYS = 7
+
+
+def _requeue_record(pr: int) -> pathlib.Path:
+    return common.state_dir("requeues") / f"{int(pr)}.json"
+
+
+def requeues(pr: int, head: str) -> tuple:
+    """The removals of this head already acted on (their times), oldest first. Another head's are history."""
+    path = _requeue_record(pr)
+    if not path.exists():
+        return ()
+    try:
+        data = json.loads(path.read_text())
+        return tuple(str(at) for at in data["removals"]) if str(data["head"]) == str(head) else ()
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise StateError(f"the requeue record {path} could not be read: {exc}") from exc
+
+
+def note_requeue(pr: int, head: str, removed_at: str) -> int:
+    """Record that this removal of this head was acted on, before anything that can fail. Returns the count."""
+    done = requeues(pr, head)
+    if removed_at not in done:
+        done += (str(removed_at),)
+    _write_record(_requeue_record(pr), {"pr": int(pr), "head": str(head), "removals": list(done), "at": time.time()})
+    return len(done)
+
+
+def prune_requeues(open_prs) -> int:
+    """Remove the requeue records of pull requests that are no longer open. Returns how many went."""
+    keep, gone = {int(n) for n in open_prs}, 0
+    for path in _listing(common.state_dir("requeues")):
+        try:
+            pr = int(json.loads(path.read_text())["pr"])
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise StateError(f"the requeue record {path} could not be read: {exc}") from exc
+        if pr not in keep:
+            try:
+                path.unlink()
+            except OSError as exc:
+                raise StateError(f"the requeue record {path} could not be removed: {exc}") from exc
+            gone += 1
+    return gone
+
+
+def _queue_events() -> pathlib.Path:
+    return common.state_dir("queue") / "events.jsonl"
+
+
+def queue_events(since: float) -> list[str]:
+    """The queue's event lines since `since` (epoch seconds), oldest first. An unreadable file raises."""
+    path = _queue_events()
+    if not path.exists():
+        return []
+    try:
+        events = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+        return [str(e["line"]) for e in events if float(e["at"]) >= since]
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise StateError(f"the queue events {path} could not be read: {exc}") from exc
+
+
+def note_queue_event(line: str) -> None:
+    """Append one event line for the digest, keeping the last QUEUE_EVENT_DAYS days."""
+    path, now = _queue_events(), time.time()
+    try:
+        kept = [l for l in (path.read_text(encoding="utf-8").splitlines() if path.exists() else [])
+                if l.strip() and float(json.loads(l)["at"]) >= now - QUEUE_EVENT_DAYS * 86400]
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text("".join(f"{l}\n" for l in kept + [json.dumps({"at": now, "line": str(line)})]), encoding="utf-8")
+        os.replace(tmp, path)
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise StateError(f"the queue events {path} could not be written: {exc}") from exc
+
+
 # --- attempts: a card is parked after IDLE_RUN_LIMIT runs with no new commit, or after REWORK_LIMIT rework rounds
 #     on one pull request (#9). `scripts/lane.py unpark <card> --reason ...` unparks it and clears both counts.
 #     The feeder keeps last tick's parked set (`<state>/parked-seen.json`) and the cards the lane itself unparked

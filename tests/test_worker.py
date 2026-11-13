@@ -413,11 +413,34 @@ class BriefTests(unittest.TestCase):
             text = worker.rework_findings(self.cfg, 12)
         self.assertIn("(the log could not be read: gh api failed (1): HTTP 410)", text)
 
-    def test_a_queue_removal_goes_back_with_its_reason(self) -> None:
-        p = pull(12, 3, reviews=[review("APPROVED")], queue_removal="FAILED_CHECKS")
+    def test_a_real_queue_failure_goes_back_with_the_job_and_its_log_tail(self) -> None:
+        """#815's merge_group run 43474822487: verify (macos-latest, 2/4) failed at Verify (bash)."""
+        e = github.Ejection("real", "failed_checks", "2026-11-13T18:20:00Z", "w", 43474822487,
+                            "verify (macos-latest, 2/4)", 132055913825, ("Verify (bash)",))
+        p = pull(815, 3, reviews=[review("APPROVED")], queue_removal="failed_checks", ejection=e)
+        with mock.patch.object(github, "pull", return_value=p), \
+                mock.patch.object(common, "gh", return_value="2026-11-13T18:01:00.1Z Failed SetupWizardNavigationTests\n") as gh:
+            text = worker.rework_findings(self.cfg, 815)
+        gh.assert_called_once_with("api", f"repos/{self.cfg.slug}/actions/jobs/132055913825/logs", timeout=120)
+        self.assertIn("### The merge queue removed it: `verify (macos-latest, 2/4)` failed", text)
+        self.assertIn("merge_group run 43474822487", text)
+        self.assertIn("`Verify (bash)`", text)
+        self.assertIn("/actions/runs/43474822487/job/132055913825", text)
+        self.assertIn("Failed SetupWizardNavigationTests", text)
+
+    def test_a_queue_conflict_goes_back_as_a_conflict(self) -> None:
+        e = github.Ejection("conflict", "merge_conflict", "2026-11-13T17:38:36Z", "w")
+        p = pull(827, 3, reviews=[review("APPROVED")], queue_removal="merge_conflict", ejection=e, mergeable="CONFLICTING")
         with mock.patch.object(github, "pull", return_value=p):
-            text = worker.rework_findings(self.cfg, 12)
-        self.assertIn("out of the merge queue after approval (failed_checks)", text)
+            text = worker.rework_findings(self.cfg, 827)
+        self.assertIn("### The branch conflicts with `main`", text)
+        self.assertIn("The merge queue removed it for this conflict.", text)
+
+    def test_an_infra_ejection_is_not_a_rework(self) -> None:
+        e = github.Ejection("infra", "failed_checks", "2026-11-13T18:11:07Z", "w", 43474820240)
+        p = pull(824, 3, reviews=[review("APPROVED")], queue_removal="failed_checks", ejection=e)
+        with mock.patch.object(github, "pull", return_value=p), self.assertRaises(LaneError):
+            worker.rework_findings(self.cfg, 824)
 
     def test_the_rework_brief_says_merge_never_rebase_never_force(self) -> None:
         text = worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), 12, "### Checks are failing", True)
