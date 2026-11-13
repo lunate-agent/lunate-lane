@@ -20,6 +20,10 @@
     "workflow": "CI",
     "ready_job": "plan"
   },
+  "parked": {
+    "label": "lane/parked",
+    "assignee": "wdaniel1993"
+  },
   "labels": {
     "bug": "kind/bug",
     "decision": "kind/decision",

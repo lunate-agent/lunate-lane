@@ -137,22 +137,28 @@ class WaitingOnYouTests(unittest.TestCase):
                                700: ("person", "closed since: waits on nobody")},
                               decisions=decisions)
         lines = text.splitlines()
-        self.assertEqual(lines[1], "Waiting on you (5):")
+        self.assertEqual(lines[1], "Waiting on you (7):")
         self.assertEqual(lines[2], "  decide #820 Should release PRs be opened by… — blocks #794, #801")
         self.assertEqual(lines[3], "  decide #822 Pick the cache prune default")
-        self.assertEqual(lines[4], "  card #790: whether `cache prune` may delete pinned entries "
+        self.assertEqual(lines[4], "  parked #11: runs with no new commit https://github.com/lunate-agent/lunate/issues/11")
+        self.assertEqual(lines[5], "  parked #700: needs a person: closed since: waits on nobody "
+                                   "https://github.com/lunate-agent/lunate/issues/700")
+        self.assertEqual(lines[6], "  parked #790: needs a person: whether `cache prune` may delete pinne… "
                                    "https://github.com/lunate-agent/lunate/pull/817")
-        self.assertEqual(lines[5], "  approve #815 Add .github/CODEOWNERS so the r… "
+        self.assertEqual(lines[7], "  approve #815 Add .github/CODEOWNERS so the r… "
                                    "https://github.com/lunate-agent/lunate/pull/815")
-        self.assertEqual(lines[6], "  close #794 — #813 merged but it is still open")
-        self.assertNotIn("#816", "\n".join(lines[:7]))
-        self.assertNotIn("#700", "\n".join(lines[:7]))
-        bare = [line.split(" https://")[0] for line in lines[:7]]
+        self.assertEqual(lines[8], "  close #794 — #813 merged but it is still open")
+        self.assertNotIn("#816", "\n".join(lines[:9]))
+        bare = [line.split(" https://")[0] for line in lines[:9]]
         self.assertTrue(all(len(line) <= 72 for line in bare), "a phone line, before its link")
 
     def test_nothing_waiting_is_one_line(self) -> None:
-        text = digest.compose(CFG, [], [], [], REQUIRED, NOW, {3: ("idle", "")})
+        text = digest.compose(CFG, [], [], [], REQUIRED, NOW, {})
         self.assertEqual(text.splitlines()[1], "Waiting on you: nothing")
+        text = digest.compose(CFG, [], [], [], REQUIRED, NOW, {3: ("idle", "")})
+        self.assertEqual(text.splitlines()[1:3], ["Waiting on you (1):",
+                                                  "  parked #3: runs with no new commit https://github.com/lunate-agent/lunate/issues/3"],
+                         "every park is on you, not only a person-park")
 
     def test_a_parked_card_frees_its_wip_slot_in_the_digest_too(self) -> None:
         text = digest.compose(CFG, [], [pull(813, 794), pull(815, 804)], [], REQUIRED, NOW, {794: ("person", "x")})

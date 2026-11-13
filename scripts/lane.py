@@ -26,7 +26,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from scripts import common, github, harness, review  # noqa: E402
+from scripts import common, github, harness, parked, review  # noqa: E402
 from scripts.common import LaneError, LockBusy  # noqa: E402
 
 JOB = "lane"
@@ -83,7 +83,15 @@ def park(card: int, reason: str) -> str:
             raise RefusedError(f"card #{card} is already parked ({data['reason'] or 'idle'}"
                                + (f": {data['detail']}" if data["detail"] else "") + ")")
     common.log(JOB, f"parked card #{card} by hand — by {actor()} — reason: {reason.strip()}")
-    return f"card #{card} parked: {reason.strip()}"
+    failed = parked.flag(common.config(), card, job=JOB)
+    return f"card #{card} parked: {reason.strip()}" + flags_line(failed)
+
+
+def flags_line(failed: list) -> str:
+    cfg = common.config()
+    if failed:
+        return f"\n  FAILED to set or clear {cfg.parked_label} / @{cfg.parked_assignee}: " + "; ".join(failed)
+    return ""
 
 
 def unpark(card: int, reason: str) -> str:
@@ -99,7 +107,8 @@ def unpark(card: int, reason: str) -> str:
     was = f"parked ({before['reason'] or 'idle'})" if before["parked"] else "not parked"
     common.log(JOB, f"unparked card #{card} by hand (was {was}) — by {actor()} — reason: {reason.strip()}; "
                     "idle runs and rework rounds cleared")
-    return f"card #{card} unparked (was {was}); idle runs and rework rounds cleared"
+    failed = parked.unflag(common.config(), card, job=JOB) if card in parked.flagged() or before["parked"] else []
+    return f"card #{card} unparked (was {was}); idle runs and rework rounds cleared" + flags_line(failed)
 
 
 def blocking(body: str) -> list[str]:

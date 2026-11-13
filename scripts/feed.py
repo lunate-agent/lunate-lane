@@ -17,7 +17,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from scripts import cards, cleanup, common, github, harness, open_pr, worker  # noqa: E402
+from scripts import cards, cleanup, common, github, harness, open_pr, parked, worker  # noqa: E402
 from scripts.common import LaneError  # noqa: E402
 
 JOB = "feed"
@@ -158,6 +158,9 @@ def tick(dry_run: bool = False) -> None:
         for card in harness.lifted_by_hand():
             common.log(JOB, f"card #{card} is no longer parked, and not by `lane.py unpark`: its attempts record was "
                             "edited or removed by hand")
+    parked.clear_closed(cfg, harness.parked_cards(), JOB, dry_run)  # a closed card waits on nobody
+    if not dry_run:  # a park or unpark that happened without its label and assignment, or whose flagging failed
+        parked.reconcile(cfg, harness.parked_cards(), JOB)
     launches, notes, reruns, enqueues, disarms, ejected = decide_all(cfg)
     for p in reruns:
         rerun(cfg, p, dry_run)
@@ -165,6 +168,12 @@ def tick(dry_run: bool = False) -> None:
     for launch in launches:
         what = (f"rework of #{launch.rework_pr} for card #{launch.card} ({launch.reason})" if launch.rework_pr
                 else f"card #{launch.card}")
+        deferred = parked.defer(cfg, launch.card, launch.person, JOB, dry_run) if launch.person is not None else None
+        if deferred == parked.WAIT:  # it only asked for another pull request to merge first: the card waits on it
+            continue
+        if deferred == parked.DONE:  # that has merged already: an ordinary rework on the review's findings
+            launch = cards.Launch(launch.card, launch.rework_pr, launch.areas, "changes requested")
+            what = f"rework of #{launch.rework_pr} for card #{launch.card} ({launch.reason})"
         if launch.person is not None:  # the reviewer said a person must decide: parked at once, never reworked
             if dry_run:
                 common.log(JOB, f"would park card #{launch.card} — the review of #{launch.rework_pr} says NEEDS-PERSON: "

@@ -15,8 +15,86 @@ REQUIRED = frozenset({"ci-ok"})
 GREEN = (("ci-ok", "COMPLETED", "SUCCESS"),)
 
 
+class FakeIssues:
+    """GitHub's issues and pull requests as `scripts.parked` sees them: labels, assignees, state, blocked-by.
+    Installed by every TempState, so no test reaches GitHub through a park. `fail` names path fragments refused;
+    `drop_assignee` makes GitHub accept an assignment and not keep it (as it does for a user without access)."""
+
+    def __init__(self) -> None:
+        self.issues: dict = {}
+        self.labels_made: list = []
+        self.pulls_of: dict = {}  # card -> {open pull request numbers}
+        self.pr_card: dict = {}  # pull request -> its card
+        self.blocked: dict = {}  # card -> {blocker numbers}
+        self.fail: set = set()
+        self.drop_assignee = False
+        self.calls: list = []
+
+    def issue(self, number: int, **over) -> dict:
+        n = int(number)
+        if n not in self.issues:
+            self.issues[n] = {"number": n, "id": 10_000 + n, "state": "open", "labels": set(), "assignees": set()}
+        self.issues[n].update(over)
+        return self.issues[n]
+
+    def _shape(self, n: int) -> dict:
+        i = self.issue(n)
+        out = {"number": n, "id": i["id"], "state": i["state"], "labels": [{"name": x} for x in sorted(i["labels"])],
+               "assignees": [{"login": x} for x in sorted(i["assignees"])]}
+        if "pull_request" in i:
+            out["pull_request"] = i["pull_request"]
+        return out
+
+    def call(self, token, method, path, payload=None):
+        from scripts import open_pr
+        self.calls.append((method, path, payload))
+        if any(f in path for f in self.fail):
+            raise open_pr.OpenPrError(f"GitHub refused {method} {path} (403): forbidden")
+        parts = path.strip("/").split("/")  # repos/o/r/...
+        rest = parts[3:]
+        if rest == ["labels"]:
+            if payload["name"] in self.labels_made:
+                raise open_pr.OpenPrError(f"GitHub refused POST {path} (422): already_exists")
+            self.labels_made.append(payload["name"])
+            return {}
+        n, tail = int(rest[1]), rest[2:]
+        i = self.issue(n)
+        if method == "GET" and not tail:
+            return self._shape(n)
+        if tail == ["labels"] and method == "POST":
+            i["labels"] |= set(payload["labels"])
+        elif tail[:1] == ["labels"] and method == "DELETE":
+            import urllib.parse
+            i["labels"].discard(urllib.parse.unquote(tail[1]))
+        elif tail == ["assignees"] and method == "POST":
+            if not self.drop_assignee:
+                i["assignees"] |= set(payload["assignees"])
+        elif tail == ["assignees"] and method == "DELETE":
+            i["assignees"] -= set(payload["assignees"])
+        elif tail == ["dependencies", "blocked_by"] and method == "POST":
+            blocker = next(k for k, v in self.issues.items() if v["id"] == payload["issue_id"])
+            self.blocked.setdefault(n, set()).add(blocker)
+        else:
+            raise AssertionError(f"FakeIssues: unexpected {method} {path}")
+        return {}
+
+    def get(self, path):
+        return self.call("", "GET", "/" + path)
+
+    def install(self) -> list:
+        from unittest import mock
+        from scripts import parked
+        return [mock.patch.object(parked, "_token", return_value="t"), mock.patch.object(parked, "_call", self.call),
+                mock.patch.object(parked, "_get", self.get),
+                mock.patch.object(parked, "_card_pulls", lambda cfg, card: set(self.pulls_of.get(card, ()))),
+                mock.patch.object(parked, "_blockers", lambda cfg, card: tuple(sorted(
+                    b for b in self.blocked.get(card, ()) if self.issue(b)["state"] == "open"))),
+                mock.patch.object(parked, "_pr_card", lambda cfg, n: self.pr_card.get(n))]
+
+
 class TempState:
-    """Point the lane's config at a temporary state directory for the duration of a test."""
+    """Point the lane's config at a temporary state directory for the duration of a test, with a FakeIssues
+    standing in for GitHub wherever a park labels, assigns or links (`self.github`)."""
 
     def __init__(self, **over) -> None:
         self.root = pathlib.Path(tempfile.mkdtemp(prefix="lane-state-"))
@@ -25,11 +103,17 @@ class TempState:
                                        **over)
         self.saved = common._CONFIG
         common._CONFIG = self.cfg
+        self.github = FakeIssues()
+        self._fakes = self.github.install()
+        for patch in self._fakes:
+            patch.start()
 
     def close(self) -> None:
         import shutil
 
         common._CONFIG = self.saved
+        for patch in reversed(self._fakes):
+            patch.stop()
         shutil.rmtree(self.root, ignore_errors=True)
 
 
