@@ -635,11 +635,11 @@ def _attempts(card: int) -> pathlib.Path:
 
 def _read_attempts(path: pathlib.Path) -> dict:
     if not path.exists():
-        return {"idle_runs": 0, "parked": False, "reason": "", "reworks": {}}
+        return {"idle_runs": 0, "parked": False, "reason": "", "detail": "", "reworks": {}}
     try:
         data = json.loads(path.read_text())
         return {"idle_runs": int(data["idle_runs"]), "parked": bool(data["parked"]),
-                "reason": str(data.get("reason") or ""),
+                "reason": str(data.get("reason") or ""), "detail": str(data.get("detail") or ""),
                 "reworks": {str(int(k)): int(v) for k, v in (data.get("reworks") or {}).items()}}
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise StateError(f"the attempts record {path} could not be read: {exc}") from exc
@@ -707,13 +707,14 @@ def rework_rounds(card: int, pr: int) -> int:
     return _read_attempts(_attempts(card))["reworks"].get(str(int(pr)), 0)
 
 
-def park(card: int, reason: str) -> bool:
-    """Park the card for `reason` ('idle', 'reworks', 'secret'). Returns whether it was parked just now."""
+def park(card: int, reason: str, detail: str = "") -> bool:
+    """Park the card for `reason` ('idle', 'reworks', 'secret', 'person', 'ready'), with the words a person reads
+    in the digest (`detail`, for 'person' and 'ready'). Returns whether it was parked just now."""
     path = _attempts(card)
     data = _read_attempts(path)
     if data["parked"]:
         return False
-    data["parked"], data["reason"] = True, reason
+    data["parked"], data["reason"], data["detail"] = True, reason, detail
     _write_attempts(path, data)
     return True
 
@@ -725,6 +726,16 @@ def parked_details() -> dict:
         data = _read_attempts(path)
         if data["parked"]:
             found[int(path.stem)] = data["reason"] or "idle"
+    return found
+
+
+def parked_info() -> dict:
+    """card -> (why it is parked, the detail a person reads), for every parked card."""
+    found = {}
+    for path in _listing(common.state_dir("attempts")):
+        data = _read_attempts(path)
+        if data["parked"]:
+            found[int(path.stem)] = (data["reason"] or "idle", data["detail"])
     return found
 
 

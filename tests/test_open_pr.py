@@ -20,11 +20,17 @@ from scripts import open_pr  # noqa: E402
 from tests.helpers import TempState  # noqa: E402
 
 
+# the push's run while the pull request is a draft: its ready-only job (`plan`) skipped
+DRAFT_RUN = open_pr.github.CiRun(100, "COMPLETED", "FAILURE", "t", "SKIPPED")
+
+
 def fake_api(monkey_self=None, **_):
     raise AssertionError("should not be called")
 
 
-class FailurePathTests(unittest.TestCase):
+class OpenPrCase(unittest.TestCase):
+    """The fixture: a real repository; GitHub's draft and auto-merge state, the push and CI replaced."""
+
     def setUp(self) -> None:
         # a real repository, so a failure can only come from the branch being absent
         self._tmp = tempfile.mkdtemp(prefix="lane-test-")
@@ -53,6 +59,21 @@ class FailurePathTests(unittest.TestCase):
         self.events: list = []
         self.disarm_sticks = False
         open_pr._graphql = self.fake_graphql
+        # a fake of CI on the head: the push's draft run, then one ready run per `ready` event. `ci_script`
+        # replaces it with a test's own sequence of reads.
+        self.saved_ci = (open_pr.github.ci_runs, open_pr.RUN_WAIT, open_pr.READY_WAIT, open_pr.READY_SETTLE,
+                         open_pr.RUN_POLL)
+        open_pr.RUN_WAIT, open_pr.READY_WAIT, open_pr.READY_SETTLE, open_pr.RUN_POLL = 1, 1, 0.0, 0.01
+        self.ci_script = None
+        open_pr.github.ci_runs = self.fake_ci
+
+    def fake_ci(self, cfg, head):
+        self.events.append(("ci", head))
+        if self.ci_script is not None:
+            return self.ci_script()
+        readies = sum(1 for e in self.events if e[0] == "ready")
+        return [DRAFT_RUN] + [open_pr.github.CiRun(200 + i, "IN_PROGRESS", "", "t", "IN_PROGRESS")
+                              for i in range(readies)]
 
     def fake_graphql(self, token, query, variables, what):
         """GitHub's state per node: draft (a created or unknown pull request starts as one) and auto-merge."""
@@ -88,8 +109,13 @@ class FailurePathTests(unittest.TestCase):
         (open_pr._api, open_pr.identity.installation_token, open_pr.push, open_pr._graphql,
          open_pr.queue_method) = self.saved
         open_pr.HEAD_WAIT, open_pr.HEAD_POLL = self.saved_wait
+        (open_pr.github.ci_runs, open_pr.RUN_WAIT, open_pr.READY_WAIT, open_pr.READY_SETTLE,
+         open_pr.RUN_POLL) = self.saved_ci
         shutil.rmtree(self._tmp, ignore_errors=True)
 
+
+
+class FailurePathTests(OpenPrCase):
     def test_auto_merge_refused_is_a_failure_not_a_pass(self) -> None:
         """A PR that opens but cannot arm auto-merge must raise."""
         open_pr._api = lambda token, method, *a, **k: [] if method == "GET" else {
@@ -616,3 +642,102 @@ class FailurePathTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def ci(id_, conclusion="", ready_job="IN_PROGRESS", status=None):
+    status = status or ("COMPLETED" if conclusion else "IN_PROGRESS")
+    return open_pr.github.CiRun(id_, status, conclusion, "2026-11-12T22:43:19Z", ready_job)
+
+
+class ReadyRunTests(OpenPrCase):
+    """B: a clean finish waits for the push's draft CI run before marking ready, then for a CI run that saw the
+    pull request as ready and was not cancelled, before arming."""
+
+    # #816 at 22:43:19Z: the ready run 43322494831 (its `plan` job ran, then was cancelled) and the draft run
+    # 43322494914 (`plan` skipped, ci-ok's deliberate draft failure) created the same second; the draft run is
+    # the newer, and its concurrency group cancelled the ready one
+    READY_816 = ci(43322494831, "CANCELLED", "CANCELLED")
+    DRAFT_816 = ci(43322494914, "FAILURE", "SKIPPED")
+
+    reuse = FailurePathTests.reuse
+
+    def script(self, *reads):
+        """CI's answers, in order: each read returns the next, the last one repeats."""
+        reads = list(reads)
+        self.ci_script = lambda: reads.pop(0) if len(reads) > 1 else reads[0]
+
+    def kinds(self):
+        return [e[0] for e in self.events if e[0] in ("push", "ci", "ready", "draft", "arm")]
+
+    def test_ready_waits_for_the_pushs_draft_run_to_exist(self) -> None:
+        self.reuse()
+        self.drafts["N42"] = True
+        self.script([], [], [ci(1, ready_job="SKIPPED")], [ci(1, ready_job="SKIPPED"), ci(2)])
+        result = open_pr.open_pr(self.repo, "lane/x", "t", "b", arm=True)
+        kinds = self.kinds()
+        self.assertEqual(kinds[:5], ["push", "ci", "ci", "ci", "ready"], "marked ready only once a run existed")
+        self.assertEqual(kinds[-1], "arm")
+        self.assertEqual((result["draft"], result["auto_merge"], result["ready_run"]), (False, "armed", "ready run 2"))
+
+    def test_no_draft_run_is_a_named_failure_and_it_stays_a_draft(self) -> None:
+        self.reuse()
+        self.drafts["N42"] = True
+        self.script([])
+        with self.assertRaises(open_pr.OpenPrError) as caught:
+            open_pr.open_pr(self.repo, "lane/x", "t", "b", arm=True)
+        self.assertNotIsInstance(caught.exception, open_pr.ReadyRunError)
+        self.assertIn("no CI run started on the pushed", str(caught.exception))
+        self.assertNotIn("ready", self.kinds())
+        self.assertTrue(self.drafts["N42"])
+
+    def test_816s_cancelled_ready_run_is_toggled_once_and_then_armed(self) -> None:
+        self.reuse()
+        self.drafts["N42"] = True
+        draft_first = ci(43322494700, "CANCELLED", "SKIPPED")  # the run the push started, before the race
+        new_ready = ci(43322600000)
+        self.script([draft_first],  # before ready: the push's run is there
+                    [draft_first, self.READY_816, self.DRAFT_816],  # after ready: #816's race
+                    [draft_first, self.READY_816, self.DRAFT_816, new_ready])  # after the toggle
+        result = open_pr.open_pr(self.repo, "lane/x", "t", "b", arm=True)
+        kinds = [k for k in self.kinds() if k != "ci"]
+        self.assertEqual(kinds, ["push", "ready", "draft", "ready", "arm"])
+        self.assertEqual(result["ready_run"], "ready run 43322600000 after one draft/ready toggle")
+        self.assertEqual((result["draft"], result["auto_merge"]), (False, "armed"))
+
+    def test_a_ready_run_cancelled_again_after_the_toggle_is_a_named_failure_left_unarmed(self) -> None:
+        self.reuse()
+        self.drafts["N42"] = True
+        draft_first = ci(43322494700, "CANCELLED", "SKIPPED")
+        again = ci(43322600000, "CANCELLED", "")  # cancelled while queued: never got its `plan` job
+        self.script([draft_first], [draft_first, self.READY_816, self.DRAFT_816],
+                    [draft_first, self.READY_816, self.DRAFT_816, again])
+        with self.assertRaises(open_pr.ReadyRunError) as caught:
+            open_pr.open_pr(self.repo, "lane/x", "t", "b", arm=True)
+        self.assertEqual(caught.exception.number, 42)
+        self.assertIn("cancelled again after one draft/ready toggle (run(s) 43322600000)", str(caught.exception))
+        self.assertEqual([k for k in self.kinds() if k != "ci"], ["push", "ready", "draft", "ready"])
+        self.assertFalse(self.armed.get("N42"))
+
+    def test_no_ready_run_at_all_is_a_named_failure(self) -> None:
+        self.reuse()
+        self.drafts["N42"] = True
+        self.script([ci(1, ready_job="SKIPPED")])
+        with self.assertRaises(open_pr.ReadyRunError) as caught:
+            open_pr.open_pr(self.repo, "lane/x", "t", "b", arm=True)
+        self.assertIn("no CI run saw it as ready", str(caught.exception))
+        self.assertFalse(self.armed.get("N42"))
+
+    def test_a_ready_run_must_stay_uncancelled_across_two_reads(self) -> None:
+        self.reuse()
+        self.drafts["N42"] = True
+        first = ci(1, "CANCELLED", "SKIPPED")
+        self.script([first], [first, ci(2)], [first, ci(2, "CANCELLED", "CANCELLED")],
+                    [first, ci(2, "CANCELLED", "CANCELLED"), ci(3)])
+        result = open_pr.open_pr(self.repo, "lane/x", "t", "b", arm=True)
+        self.assertEqual(result["ready_run"], "ready run 3 after one draft/ready toggle")
+
+    def test_an_unarmed_finish_never_reads_ci(self) -> None:
+        self.reuse()
+        self.script([])
+        open_pr.open_pr(self.repo, "lane/x", "t", "b", arm=False)
+        self.assertNotIn("ci", self.kinds())

@@ -708,3 +708,24 @@ class OrphanDriveTests(DriveCase):
                 self.assertEqual(worker.drive(self.cfg, 3, 77), 1)
         self.assertEqual(self.dispatched, [False])
         self.assertIn("the session made no new commit", self.comments[0][1])
+
+
+class ReadyRunDriveTests(DriveCase):
+    def test_ci_never_running_it_as_ready_parks_the_card_by_name_and_still_posts_the_report(self) -> None:
+        reason = "#77: the ready CI run on 3d35f9855 was cancelled again after one draft/ready toggle (run(s) 9)"
+
+        def dispatch(repo, number, arm=True, known=()):
+            self.dispatched.append(arm)
+            if arm:
+                raise open_pr.ReadyRunError(77, reason)
+            return {"number": 77, "auto_merge": "not armed"}
+
+        dispatch_card.dispatch.side_effect = dispatch
+        with self.fake_session():
+            self.assertEqual(worker.drive(self.cfg, 3, None), 1)
+        self.assertEqual(harness.parked_info(), {3: ("ready", reason)})
+        report, parking = self.comments
+        self.assertIn(f"**Marked ready, but not armed:** {reason}.", report[1])
+        self.assertIn("done: 1. met", report[1])
+        self.assertEqual(parking[0], 77)
+        self.assertIn("convert it to a draft and mark it ready again", parking[1])

@@ -61,7 +61,15 @@ def age_days(created: str, now: datetime.datetime) -> float:
 
 
 PARKED_WHY = {"idle": "runs with no new commit", "reworks": "rework rounds used up",
-              "secret": "secret-shaped text in a push"}
+              "secret": "secret-shaped text in a push",
+              "ready": "CI never ran it as ready"}
+
+
+def parked_line(why) -> str:
+    """One parked card's reason: the kind, and for a failed ready run, the words why."""
+    reason, detail = why if isinstance(why, tuple) else (why, "")
+    text = PARKED_WHY.get(reason, reason)
+    return f"{text}: {detail}" if detail else text
 
 
 def in_flight(cfg: common.Config, pulls: list, running: dict) -> list[str]:
@@ -115,7 +123,7 @@ def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required
     lines.append(f"Parked cards ({len(parked)}) — delete <state>/attempts/<card>.json to unpark:" if parked
                  else "Parked cards: none")
     for number in sorted(parked):
-        lines.append(f"  #{number} — {PARKED_WHY.get(parked[number], parked[number])}")
+        lines.append(f"  #{number} — {parked_line(parked[number])}")
     kept = kept or {}
     lines.append(f"Kept by cleanup ({len(kept)}) — its PR is closed, but removing it would lose work:" if kept
                  else "Kept by cleanup: none")
@@ -132,7 +140,7 @@ def tick() -> None:
     cards = github.milestone_cards(cfg)
     pulls = [github.pull(cfg, p.number) for p in github.open_pulls(cfg)]
     merged = merged_since(cfg, now - datetime.timedelta(days=1))
-    message = compose(cfg, cards, pulls, merged, required, now, harness.parked_details(), harness.running_workers(),
+    message = compose(cfg, cards, pulls, merged, required, now, harness.parked_info(), harness.running_workers(),
                       cleanup.read_held())
     latest = common.state_dir("digest") / "latest.md"
     try:

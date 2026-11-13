@@ -509,3 +509,43 @@ class VerdictTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CiRunsTests(unittest.TestCase):
+    """B: the CI workflow's pull-request runs on a head, as GitHub returned them for #816's head 3d35f9855."""
+
+    @staticmethod
+    def suite(run_id, conclusion, workflow="CI", plan=None, event="pull_request"):
+        return {"status": "COMPLETED", "conclusion": conclusion, "createdAt": "2026-11-12T22:43:19Z",
+                "workflowRun": {"databaseId": run_id, "event": event, "workflow": {"name": workflow}},
+                "checkRuns": {"nodes": [plan] if plan else []}}
+
+    def answer(self, *suites, more=False):
+        return {"repository": {"object": {"checkSuites": page(list(suites), more)}}}
+
+    def test_816s_suites_read_as_one_cancelled_ready_run_and_one_draft_run(self) -> None:
+        data = self.answer(
+            self.suite(43322494831, "CANCELLED", plan={"status": "COMPLETED", "conclusion": "CANCELLED"}),
+            self.suite(43322494914, "FAILURE", plan={"status": "COMPLETED", "conclusion": "SKIPPED"}),
+            self.suite(43322495063, "SUCCESS", workflow="Process"),
+            self.suite(43322495125, "SUCCESS", workflow="pack"),
+            {"status": "COMPLETED", "conclusion": "SUCCESS", "createdAt": "t", "workflowRun": None,
+             "checkRuns": {"nodes": []}})
+        with mock.patch.object(common, "graphql", return_value=data) as read:
+            runs = github.ci_runs(common.config(), "3d35f9855" + "0" * 31)
+        self.assertEqual(read.call_args.kwargs["job"], "plan")
+        self.assertEqual([(r.id, r.conclusion, r.ready_job) for r in runs],
+                         [(43322494831, "CANCELLED", "CANCELLED"), (43322494914, "FAILURE", "SKIPPED")])
+        ready = [r.id for r in runs if github.ready_run(r, frozenset())]
+        self.assertEqual(ready, [43322494831])
+
+    def test_a_run_without_its_ready_job_is_ready_only_when_it_came_after_marking_ready(self) -> None:
+        queued = github.CiRun(7, "QUEUED", "", "t", "")
+        self.assertTrue(github.ready_run(queued, frozenset({6})))
+        self.assertFalse(github.ready_run(queued, frozenset({7})))
+
+    def test_an_unreadable_commit_or_a_cut_off_list_raises(self) -> None:
+        for data in ({"repository": {"object": None}}, self.answer(self.suite(1, "SUCCESS"), more=True)):
+            with self.subTest(data=data), mock.patch.object(common, "graphql", return_value=data):
+                with self.assertRaises(GhError):
+                    github.ci_runs(common.config(), "a" * 40)

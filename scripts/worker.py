@@ -310,8 +310,15 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
         if parked_now:
             park(cfg, number, number, "idle", idle)
         return 1
+    not_ready = ""
     try:
         result = dispatch_card.dispatch(cfg.checkout, number, arm=not found, known=(harness.read_credential(cfg),))
+    except open_pr.ReadyRunError as exc:
+        # pushed and marked ready, but CI never ran it as ready: left unarmed, and parked by name below
+        not_ready = str(exc)
+        common.log(job, f"#{exc.number} — {not_ready}")
+        found.append(not_ready)
+        result = {"number": exc.number, "auto_merge": "not armed"}
     except open_pr.SecretFound as exc:
         # nothing was pushed; the card stops here until a person looks (#12). The kind, never the value.
         common.log(job, f"secret scan: {exc}")
@@ -322,7 +329,9 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
         return 1
     head = common.wt_git(cfg, worktree, "rev-parse", "HEAD")[:9]
     lines = [f"**Worker session** on `{cfg.worker_model}` at `{head}`, {outcome.elapsed // 60} min."]
-    if found:
+    if not_ready:
+        lines.append(f"**Marked ready, but not armed:** {not_ready}.")
+    elif found:
         lines.append(f"**Incomplete — the pull request stays a draft and auto-merge is {result['auto_merge']}:** "
                      + "; ".join(found) + ".")
     report = harness.last_text(session_log).strip() or "(the session left no final message)"
@@ -337,7 +346,10 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
               if result.get("queue_method") else "")
     common.log(job, f"#{result['number']} pushed at {head}, auto-merge {result['auto_merge']}{method}"
                + (f" — {'; '.join(found)}" if found else ""))
-    if parked_now:
+    if not_ready:
+        if harness.park(number, "ready", not_ready):
+            park(cfg, number, result["number"], "ready", detail=not_ready)
+    elif parked_now:
         park(cfg, number, result["number"], "idle", idle)
     return 1 if found else 0
 
@@ -345,6 +357,13 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
 PARK_WHY = {
     "idle": "{n} worker runs in a row ended with no new commit (cap: {cap})",
     "reworks": "it went back to a worker {n} times (cap: {cap}) and is still not ready",
+}
+
+
+PARK_ADVICE = {
+    "default": "split or clarify the card, or push a fix",
+    "ready": "the pull request is ready with auto-merge off; convert it to a draft and mark it ready again, and "
+             "check that CI starts a run that sees it as ready",
 }
 
 
@@ -364,9 +383,9 @@ def park(cfg: common.Config, card: int, target: int, why: str, n: int = 0, detai
     cap = harness.IDLE_RUN_LIMIT if why == "idle" else harness.REWORK_LIMIT
     reason = PARK_WHY[why].format(n=n, cap=cap) if why in PARK_WHY else detail
     open_pr.comment(target, (
-        f"**Lane: card #{card} is parked.** {reason[:1].upper() + reason[1:]}, so the feeder will not start or "
-        f"rework it again. It needs a person: split or clarify the card, or push a fix. To let the lane pick it up "
-        f"again, delete `{record}` on the lane host."))
+        f"**Lane: card #{card} is parked.** {reason[:1].upper() + reason[1:].rstrip('.')}. The feeder will not start "
+        f"or rework it again. It needs a person: {PARK_ADVICE.get(why, PARK_ADVICE['default'])}. To let the lane "
+        f"pick it up again, delete `{record}` on the lane host."))
     label = {"idle": f"after {n} idle runs", "reworks": f"after {n} rework rounds"}.get(why, f"({why})")
     common.log(f"worker-{card}", f"parked {label} — commented on #{target}")
 

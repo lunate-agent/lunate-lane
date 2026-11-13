@@ -69,6 +69,8 @@ class Config:
     area_prefix: str
     aggregate_check: str  # the required check that rolls up the CI jobs (`ci-ok`)
     aggregate_step: str  # its step that fails when an aggregated job did not succeed
+    ci_workflow: str  # the workflow that runs on pull requests and reports the aggregate check (`CI`)
+    ready_job: str  # its job that is skipped on a draft and runs on a ready pull request (`plan`)
     harness: dict
     checkout: pathlib.Path
     state: pathlib.Path
@@ -111,6 +113,8 @@ def load_config(path: pathlib.Path | None = None) -> Config:
         bug_label=str(_need(data, "labels", "bug")), area_prefix=str(_need(data, "labels", "area_prefix")),
         aggregate_check=str(_need(data, "checks", "aggregate")),
         aggregate_step=str(_need(data, "checks", "aggregate_step")),
+        ci_workflow=str(_need(data, "checks", "workflow")),
+        ready_job=str(_need(data, "checks", "ready_job")),
         harness=dict(_need(data, "harness")),
         checkout=expand("paths", "checkout"), state=expand("paths", "state"),
         app_config=expand("paths", "app_config"), pins=expand("paths", "pins"),
