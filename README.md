@@ -168,7 +168,10 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    reviewer compares the spec delta with main's spec and with theirs, and checks the worker's **Intent
    decisions** (the grill-me questions it answered itself). It requests changes **only for a blocking finding**: an
    acceptance check not met, a behaviour or spec defect, a red or missing required gate, a missing changelog
-   fragment or archive, an OpenSpec lifecycle violation. Everything else — wording, style, the pull request's
+   fragment or archive, an OpenSpec lifecycle violation, a scope violation (a change outside the card's
+   `area/*`, or to a file another open pull request also changes — the brief lists both; a small cleanup in the
+   card's own area is not one), and a test the acceptance asks for that would pass with the change reverted (any
+   other such test is non-blocking). Everything else — wording, style, the pull request's
    description, suggestions — goes under **Non-blocking** in an approval. Test evidence is CI's: the reviewer
    never asks the worker which tests it ran. A **`NEEDS-PERSON:`** line counts only at the start of a line, in a
    review or a worker's report; a mention inside a sentence is not one. The worker's brief says a conflict in
