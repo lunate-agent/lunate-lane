@@ -3,11 +3,15 @@
     .venv/bin/python scripts/lane.py status 794                     # idle runs, rework rounds, parked and why
     .venv/bin/python scripts/lane.py park 794 --reason "waits on the API decision"
     .venv/bin/python scripts/lane.py unpark 794 --reason "decided in #820"   # unparked, both counts cleared
+    .venv/bin/python scripts/lane.py rereview 820                   # review again at its head, under today's brief
+    .venv/bin/python scripts/lane.py rereview --all-open            # every open worker pull request, in turn
 
 Park and unpark take the feeder's lock, so they never interleave with a tick (a busy lock is a refusal: try again
 in a minute). Unpark refuses while a worker runs the card. Both need a --reason, and both write a line to
 `<state>/logs/lane.log` with the time, who ran it (the login, `$LANE_ACTOR` if set, the parent process, and
-whether a terminal was attached) and the reason. Nothing here touches GitHub.
+whether a terminal was attached) and the reason. Only rereview touches GitHub: it takes the review job's lock,
+runs a review session on a ready, green worker pull request even if the bot reviewed its head already, dismisses
+the bot's standing review there ("superseded by re-review under the calibrated brief") and posts the new one.
 """
 
 from __future__ import annotations
@@ -22,11 +26,13 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from scripts import common, harness  # noqa: E402
+from scripts import common, github, harness, review  # noqa: E402
 from scripts.common import LaneError, LockBusy  # noqa: E402
 
 JOB = "lane"
 FEED = "feed"
+REVIEW = "review"
+FINDINGS = 8  # blocking findings shown per pull request
 
 
 class RefusedError(LaneError):
@@ -96,6 +102,49 @@ def unpark(card: int, reason: str) -> str:
     return f"card #{card} unparked (was {was}); idle runs and rework rounds cleared"
 
 
+def blocking(body: str) -> list[str]:
+    """The lines of a review's **Blocking** section (else its numbered or bulleted findings), one line each."""
+    lines = body.splitlines()
+    start = next((i for i, line in enumerate(lines) if "blocking" in line.lower() and "non-blocking" not in line.lower()
+                  and line.lstrip().startswith(("#", "*"))), None)
+    section = lines[start + 1:] if start is not None else lines
+    found = []
+    for line in section:
+        bare = line.strip()
+        if start is not None and bare.lstrip("#* ").lower().startswith(("non-blocking", "non blocking")):
+            break
+        if not bare:
+            continue
+        if bare[0] in "-*" or (bare[:1].isdigit() and bare[1:3].strip(" ").startswith((".", ")"))):
+            found.append(" ".join(bare.split())[:200])
+    return found[:FINDINGS]
+
+
+def rereview(numbers: list[int], all_open: bool) -> str:
+    cfg = common.config()
+    harness.exit_on_signals()  # a killed run still kills its session and removes its worktree
+    who = actor()
+    out = []
+    with common.job_lock(REVIEW):
+        if all_open:
+            numbers = sorted(p.number for p in github.open_pulls(cfg) if p.author == cfg.worker_app)
+        common.log(JOB, f"rereview of {', '.join(f'#{n}' for n in numbers) or 'nothing'} — by {who}")
+        for number in numbers:
+            try:
+                event, body = review.rereview(cfg, number, who)
+            except LaneError as exc:
+                out.append(f"#{number}: FAILED — {exc}")
+                continue
+            if event == "SKIPPED":
+                out.append(f"#{number}: not re-reviewed — {body}")
+            elif event == "APPROVE":
+                out.append(f"#{number}: APPROVE")
+            else:
+                out.append(f"#{number}: {event}")
+                out += [f"  {line}" for line in blocking(body)]
+    return "\n".join(out) or "no open worker pull requests"
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="lane.py", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -104,16 +153,24 @@ def main(argv=None) -> int:
         command = sub.add_parser(name)
         command.add_argument("card", type=int)
         command.add_argument("--reason", required=True)
+    again = sub.add_parser("rereview")
+    again.add_argument("pr", type=int, nargs="*")
+    again.add_argument("--all-open", action="store_true")
     args = parser.parse_args(argv)
+    if args.command == "rereview" and bool(args.pr) == args.all_open:
+        parser.error("rereview takes pull request numbers or --all-open, not both or neither")
     try:
         if args.command == "status":
             print(status(args.card))
+        elif args.command == "rereview":
+            print(rereview(args.pr, args.all_open))
         elif args.command == "park":
             print(park(args.card, args.reason))
         else:
             print(unpark(args.card, args.reason))
     except LockBusy as exc:
-        print(f"refused — a feeder tick is running ({exc}); try again in a minute", file=sys.stderr)
+        job = "a review run" if args.command == "rereview" else "a feeder tick"
+        print(f"refused — {job} is running ({exc}); try again in a minute", file=sys.stderr)
         return 1
     except LaneError as exc:
         print(f"refused — {exc}", file=sys.stderr)

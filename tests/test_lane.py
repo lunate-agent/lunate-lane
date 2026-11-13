@@ -133,3 +133,37 @@ class WhoAndWhyTests(unittest.TestCase):
                       "can't be fast-forwarded, you need to either:", text)
         harness.note_run(817, new_commit=False)
         self.assertNotIn("died", run("status", "817")[1], "a session that reached its end clears it")
+
+
+class RereviewCommandTests(unittest.TestCase):
+    setUp, tearDown = LaneTests.setUp, LaneTests.tearDown
+
+    def test_all_open_rereviews_each_worker_pull_request_and_prints_verdicts_and_blocking_lines(self) -> None:
+        from tests.helpers import pull
+
+        pulls = [pull(827, 760), pull(818, 749), pull(900, None, author="a-maintainer")]
+        verdicts = {818: ("APPROVE", "## Non-blocking\n\n- wording"),
+                    827: ("REQUEST_CHANGES", "Checks 1–3 met.\n\n## Blocking\n\n1. **Scope** — `docs/README.md` is "
+                                             "also changed by #820\n2. acceptance 4 not met — no `ci.md` page\n\n"
+                                             "## Non-blocking\n\n- a typo")}
+        seen = []
+        with mock.patch.object(lane.github, "open_pulls", return_value=pulls), \
+                mock.patch.object(lane.harness, "exit_on_signals"), \
+                mock.patch.object(lane.review, "rereview",
+                                  side_effect=lambda cfg, n, who: seen.append(n) or verdicts[n]):
+            rc, text = run("rereview", "--all-open")
+        self.assertEqual(rc, 0)
+        self.assertEqual(seen, [818, 827], "worker pull requests only, in number order")
+        self.assertIn("#818: APPROVE\n#827: REQUEST_CHANGES\n  1. **Scope** — `docs/README.md` is also changed by "
+                      "#820\n  2. acceptance 4 not met — no `ci.md` page", text)
+        self.assertNotIn("typo", text)
+        self.assertIn("rereview of #818, #827", (self.state.cfg.state / "logs" / "lane.log").read_text())
+
+    def test_a_running_review_is_a_refusal_and_numbers_or_all_open_is_required(self) -> None:
+        with mock.patch.object(lane.harness, "exit_on_signals"), common.job_lock("review"):
+            rc, text = run("rereview", "820")
+        self.assertEqual(rc, 1)
+        self.assertIn("a review run is running", text)
+        for argv in (["rereview"], ["rereview", "820", "--all-open"]):
+            with redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+                lane.main(argv)
