@@ -32,7 +32,7 @@ class ConfigTests(unittest.TestCase):
                          ("opencode-go/gpt-6-luna", "opencode-go/glm-5.3-flash"))
         self.assertNotIn(cfg.worker_model, (cfg.reviewer_full, cfg.reviewer_light))
         self.assertTrue(cfg.state.is_absolute())
-        self.assertEqual(cfg.wip_limit, 3, "3 for the first unattended night; 5 once a night has run clean")
+        self.assertEqual(cfg.wip_limit, 5)
 
     def test_a_missing_key_is_a_named_failure_not_a_default(self) -> None:
         del self.data["models"]["reviewer"]
