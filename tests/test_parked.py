@@ -268,3 +268,50 @@ class SeamTests(unittest.TestCase):
             self.assertEqual(parked._card_pulls(cfg, 807), {826})
             self.assertEqual(parked._blockers(cfg, 807), (755,))
             self.assertEqual(parked._pr_card(cfg, 827), 755)
+
+
+class DeathParksTests(Case):
+    """A worker that dies is retried, not parked — but each death is an idle run (counted at launch, never reset
+    by a run that did not reach its end), so after the third death in a row the next tick parks the card through
+    the normal idle path: comment, label, assignment, digest."""
+
+    def test_the_third_death_in_a_row_parks_the_card_as_idle(self) -> None:
+        import os
+        from scripts import dispatch_card
+
+        launched = []
+
+        def start(cfg, launch):  # the feeder's own record, then the real worker, whose run dies by name
+            launched.append(launch.card)
+            harness.record_worker(launch.card, os.getpid(), launch.areas, launch.rework_pr)
+            # this process stands in for the launched `worker.py --issue <n>` the feeder recorded
+            with mock.patch.object(sys, "argv", ["worker.py", "--issue", str(launch.card)]), \
+                    mock.patch.object(harness, "worker_alive", side_effect=lambda pid, c: pid == os.getpid()), \
+                    mock.patch.object(worker, "drive", side_effect=worker.WorktreeError("worktree in the way")):
+                self.assertEqual(worker.main(), 1)
+            return os.getpid()
+
+        comments = []
+        with mock.patch.object(github, "milestone_cards", return_value=[card(817)]), \
+                mock.patch.object(github, "open_pulls", return_value=[]), \
+                mock.patch.object(harness, "running_workers", return_value={}), \
+                mock.patch.object(github, "required_checks", return_value=REQUIRED), \
+                mock.patch.object(dispatch_card, "card", return_value={"labels": []}), \
+                mock.patch.object(feed, "start", side_effect=start), mock.patch.object(feed.cleanup, "tidy"), \
+                mock.patch.object(open_pr, "comment", side_effect=lambda n, body: comments.append((n, body))):
+            for death in (1, 2, 3):
+                self.assertEqual(feed.main(), 0)
+                self.assertEqual((harness.idle_runs(817), harness.died_info()), (death, {817: "worktree in the way"}))
+                self.assertEqual(harness.parked_cards(), frozenset(), "a death is retried, not parked")
+                self.assertEqual(self.has(817), (False, False))
+            self.assertEqual(feed.main(), 0)
+        self.assertEqual(launched, [817, 817, 817], "no fourth run")
+        self.assertEqual(harness.parked_details(), {817: "idle"})
+        self.assertEqual(self.has(817), (True, True))
+        self.assertEqual(len(comments), 1)
+        self.assertIn("3 worker runs in a row ended with no new commit (cap: 3)", comments[0][1])
+        self.assertIn("parked card #817 after 3 runs with no new commit", self.log("feed"))
+        text = digest.compose(self.cfg, [card(817)], [], [], REQUIRED,
+                              digest.datetime.datetime.now(digest.datetime.timezone.utc), harness.parked_info(),
+                              died=harness.died_info(), flag_errors=parked.errors())
+        self.assertIn("  parked #817: runs with no new commit https://github.com/lunate-agent/lunate/issues/817", text)
