@@ -59,7 +59,12 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      job with a failing step, or ci-ok failing anywhere else, is real. Any other required check that failed for
      real is real. For infra, the feeder reruns the
      failed jobs once for that head (`gh run rerun <id> --failed`, recorded in `<state>/reruns/`), and only a
-     second such failure on the same head, or any real failing step, goes back to a worker. Conflicts are resolved
+     second such failure on the same head, or any real failing step, goes back to a worker. Only a workflow run
+     whose event payload had `draft=false` (the ready run) is ever rerun: the API does not return the payload, so
+     the feeder reads it from the `DRAFT:` line in the ci-ok job's log. A draft run's rerun would report a new red
+     `ci-ok` ("the head is a draft") newer than the ready run's green one (#815). A run that is a draft run, or
+     whose flag cannot be read, is not rerun; with nothing left to rerun the head still counts as rerun, so the
+     next tick sends it back as a rework, which pushes a new head. Conflicts are resolved
      by merging `origin/main` into the branch, never by rebasing; the lane never force-pushes (a rewritten branch
      is refused). Then the named tests, the push, and a new review (the ruleset dismisses the stale approval). A
      rework does not add to WIP — its card is already in flight. An **orphaned draft** goes back too: a worker
