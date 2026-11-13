@@ -2,7 +2,7 @@
   "repo": "lunate-agent/lunate",
   "milestone": "0.4.0",
   "base": "main",
-  "wip_limit": 3,
+  "wip_limit": 5,
   "apps": {
     "worker": "lunate-worker",
     "reviewer": "lunate-reviewer"
@@ -22,6 +22,7 @@
   },
   "labels": {
     "bug": "kind/bug",
+    "decision": "kind/decision",
     "area_prefix": "area/"
   },
   "harness": {

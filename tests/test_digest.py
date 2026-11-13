@@ -115,3 +115,44 @@ class ParkedReasonTests(unittest.TestCase):
         self.assertIn("#780 — needs a person: check 2 needs a maintainer decision", text)
         self.assertIn("#804 — CI never ran it as ready: #815: the ready CI run on f9cb14ed9 was cancelled", text)
         self.assertIn("#794 — rework rounds used up", text)
+
+
+class WaitingOnYouTests(unittest.TestCase):
+    """3: the top of the digest is what a maintainer acts on, short enough for a phone."""
+
+    def test_decisions_person_parks_approvals_and_an_open_card_after_its_merge(self) -> None:
+        decisions = [github.Card(820, "Should release PRs be opened by the lane or by hand?", frozenset(),
+                                 "2026-11-01T00:00:00Z", blocking=(794, 801)),
+                     github.Card(822, "Pick the cache prune default", frozenset(), "2026-11-05T00:00:00Z")]
+        # #815: the bot approved its head, but the ruleset wants a code owner too
+        waiting = pull(815, 804, title="Add .github/CODEOWNERS so the ruleset can require a code-owner review",
+                       reviews=[review("APPROVED")], review_decision="REVIEW_REQUIRED")
+        not_yet = pull(816, 780, review_decision="REVIEW_REQUIRED")  # the bot has not reviewed it: not on you
+        person = pull(817, 790)
+        merged = [{"number": 813, "title": "Per-PR changelog fragments",
+                   "closingIssuesReferences": [{"number": 794}]}]
+        text = digest.compose(CFG, [card(794), card(790)], [waiting, not_yet, person], merged, REQUIRED, NOW,
+                              {790: ("person", "whether `cache prune` may delete pinned entries"), 11: ("idle", ""),
+                               700: ("person", "closed since: waits on nobody")},
+                              decisions=decisions)
+        lines = text.splitlines()
+        self.assertEqual(lines[1], "Waiting on you (5):")
+        self.assertEqual(lines[2], "  decide #820 Should release PRs be opened by… — blocks #794, #801")
+        self.assertEqual(lines[3], "  decide #822 Pick the cache prune default")
+        self.assertEqual(lines[4], "  card #790: whether `cache prune` may delete pinned entries "
+                                   "https://github.com/lunate-agent/lunate/pull/817")
+        self.assertEqual(lines[5], "  approve #815 Add .github/CODEOWNERS so the r… "
+                                   "https://github.com/lunate-agent/lunate/pull/815")
+        self.assertEqual(lines[6], "  close #794 — #813 merged but it is still open")
+        self.assertNotIn("#816", "\n".join(lines[:7]))
+        self.assertNotIn("#700", "\n".join(lines[:7]))
+        bare = [line.split(" https://")[0] for line in lines[:7]]
+        self.assertTrue(all(len(line) <= 72 for line in bare), "a phone line, before its link")
+
+    def test_nothing_waiting_is_one_line(self) -> None:
+        text = digest.compose(CFG, [], [], [], REQUIRED, NOW, {3: ("idle", "")})
+        self.assertEqual(text.splitlines()[1], "Waiting on you: nothing")
+
+    def test_a_parked_card_frees_its_wip_slot_in_the_digest_too(self) -> None:
+        text = digest.compose(CFG, [], [pull(813, 794), pull(815, 804)], [], REQUIRED, NOW, {794: ("person", "x")})
+        self.assertIn("WIP 1 of 5: #815 (card #804)", text)

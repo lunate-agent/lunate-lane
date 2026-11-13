@@ -79,8 +79,7 @@ class CardTests(unittest.TestCase):
         result = dispatch_card.dispatch(self.repo, 794)
         self.assertEqual(result["number"], 808)
         self.assertEqual(seen["branch"], "wt/issue-794")
-        self.assertIn("Closes #794", seen["body"])
-        self.assertIn("milestone 0.4.0", seen["body"])
+        self.assertEqual(seen["body"], "Closes #794\n\nCard: https://github.com/lunate-agent/lunate/issues/794\n")
         self.assertEqual(seen["title"], "Per-PR changelog fragments")
 
 
@@ -117,26 +116,14 @@ class AheadAndBodyTests(unittest.TestCase):
             dispatch_card.branch_for(self.repo, 1)
         self.assertIn("no commits ahead", str(caught.exception))
 
-    def test_every_closing_keyword_is_defused_whatever_its_case(self) -> None:
-        text = ("Fixes #3 and closes #4, Resolves lunate-agent/lunate#5, fix #6, resolved #7, "
-                "plus a normal #8 mention")
-        body = dispatch_card.body_for({"number": 1, "body": text, "milestone": None})
-        for leaked in ("Fixes #3", "closes #4", "Resolves lunate-agent/lunate#5", "fix #6", "resolved #7"):
-            self.assertNotIn(leaked, body, f"{leaked!r} would close an issue on merge")
-        self.assertIn("Closes #1", body)
-        self.assertIn("a normal #8 mention", body)
-
-    def test_the_colon_and_url_forms_are_defused_too(self) -> None:
-        text = "Fixes: #3 and Fixes https://github.com/lunate-agent/lunate/issues/4, plus a link with no keyword"
-        body = dispatch_card.body_for({"number": 1, "body": text, "milestone": None})
-        self.assertNotIn("Fixes: #3", body)
-        self.assertNotIn("Fixes https://github.com/lunate-agent/lunate/issues/4", body)
-        self.assertIn("link with no keyword", body)
-
-    def test_a_long_issue_body_is_truncated(self) -> None:
-        body = dispatch_card.body_for({"number": 1, "body": "x" * 9000, "milestone": None})
-        self.assertLess(len(body), 8300)
-        self.assertIn("truncated", body)
+    def test_the_body_is_the_closing_keyword_and_a_link_and_never_card_copy(self) -> None:
+        # #813's body opened with "Closes #794 · milestone 0.4.0" and then 8,000 characters of the card
+        card = {"number": 794, "milestone": {"title": "0.4.0"},
+                "body": "Two pull requests that both edit `CHANGELOG.md` conflict... Fixes #3 and closes #4"}
+        body = dispatch_card.body_for(card)
+        self.assertEqual(body, "Closes #794\n\nCard: https://github.com/lunate-agent/lunate/issues/794\n")
+        for leaked in ("CHANGELOG", "Fixes #3", "closes #4", "milestone"):
+            self.assertNotIn(leaked, body)
 
 
 class GhWrapperTests(unittest.TestCase):

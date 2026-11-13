@@ -261,8 +261,10 @@ class BriefTests(unittest.TestCase):
     def test_the_review_brief_carries_the_spec_comparison_the_neighbours_and_the_intent_decisions(self) -> None:
         text = common.render("review-brief.md", PR="6", REPO="o/r", TITLE="t", HEAD="abc", WORKTREE="/w",
                              BASE="main", DIFF_FILE="/d", FRAGMENT_CHECK="f", VERDICT_FILE="/v", CARD="9",
-                             SPEC_NEIGHBOURS="NEIGHBOURS-HERE", WORKER_REPORT="REPORT-HERE", BODY="b")
+                             SPEC_NEIGHBOURS="NEIGHBOURS-HERE", WORKER_REPORT="REPORT-HERE", BODY="b",
+                             DECISIONS="## Decisions this card waited on (verbatim)\n\nDecision: DECIDED-HERE\n")
         self.assertIn("git show origin/main:openspec/specs/<capability>/spec.md", text)
+        self.assertLess(text.index("Decision: DECIDED-HERE"), text.index("## The issue (#9)"))
         self.assertIn("NEIGHBOURS-HERE", text)
         self.assertIn("REPORT-HERE", text)
         self.assertIn("**Intent decisions**", text)

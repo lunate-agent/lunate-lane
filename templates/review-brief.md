@@ -56,6 +56,7 @@ The lane then parks the card for a person instead of sending it back for another
 for something the worker can fix, and never APPROVE with it: an approval with a NEEDS-PERSON line is posted as
 a request for changes.
 
+{{DECISIONS}}
 ## The issue (#{{CARD}})
 
 {{BODY}}

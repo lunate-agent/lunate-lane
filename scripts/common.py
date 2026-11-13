@@ -67,6 +67,7 @@ class Config:
     reviewer_light: str  # docs-only pull requests
     bug_label: str
     area_prefix: str
+    decision_label: str  # an issue that asks a maintainer to decide: never started, listed in the digest
     aggregate_check: str  # the required check that rolls up the CI jobs (`ci-ok`)
     aggregate_step: str  # its step that fails when an aggregated job did not succeed
     ci_workflow: str  # the workflow that runs on pull requests and reports the aggregate check (`CI`)
@@ -111,6 +112,7 @@ def load_config(path: pathlib.Path | None = None) -> Config:
         reviewer_full=str(_need(data, "models", "reviewer", "full")),
         reviewer_light=str(_need(data, "models", "reviewer", "light")),
         bug_label=str(_need(data, "labels", "bug")), area_prefix=str(_need(data, "labels", "area_prefix")),
+        decision_label=str(_need(data, "labels", "decision")),
         aggregate_check=str(_need(data, "checks", "aggregate")),
         aggregate_step=str(_need(data, "checks", "aggregate_step")),
         ci_workflow=str(_need(data, "checks", "workflow")),
