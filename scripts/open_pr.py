@@ -584,7 +584,7 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
 
 def disarm(number: int, node_id: str) -> None:
     """Turn auto-merge off on an armed pull request whose card waits on an open issue, as the worker identity, and
-    read it back. It stays ready; the feeder re-arms it once it is approved after the blockers close."""
+    read it back. It stays ready; the feeder enqueues it once it is approved after the blockers close."""
     token = _worker_token()
     if not pr_state(token, node_id)["armed"]:
         return
@@ -593,18 +593,43 @@ def disarm(number: int, node_id: str) -> None:
         raise OpenPrError(f"#{number}'s auto-merge still reads as on after turning it off")
 
 
-def rearm(number: int, node_id: str, base: str) -> dict:
-    """Arm a ready, approved pull request that is not armed, with the queue's method, and read it back."""
+ENQUEUE = ("mutation($id:ID!,$head:GitObjectID!){enqueuePullRequest(input:{pullRequestId:$id,expectedHeadOid:$head})"
+           "{mergeQueueEntry{state position}}}")
+QUEUE_ENTRY = ("query($id:ID!){node(id:$id){... on PullRequest{isDraft headRefOid isInMergeQueue "
+               "mergeQueueEntry{state position enqueuedAt}}}}")
+
+
+def queue_entry(token: str, node_id: str) -> dict:
+    """{draft, head, entry}: the pull request's merge queue entry as GitHub reads it now (entry None when it is not
+    queued). Unreadable is a failure, never 'not queued'."""
+    node = _graphql(token, QUEUE_ENTRY, {"id": node_id}, "merge queue entry read").get("node")
+    if not isinstance(node, dict) or "mergeQueueEntry" not in node or not isinstance(node.get("isDraft"), bool):
+        raise OpenPrError(f"pull request {node_id} came back without its merge queue state")
+    entry = node["mergeQueueEntry"] if isinstance(node["mergeQueueEntry"], dict) else None
+    return {"draft": node["isDraft"], "head": str(node.get("headRefOid") or ""), "entry": entry}
+
+
+def enqueue(number: int, node_id: str, head: str) -> dict:
+    """Put a ready pull request into the merge queue at `head` (`enqueuePullRequest`, expected head given, so a
+    push in between is refused rather than queued), as the worker identity, and read the entry back. A refused
+    call whose read-back shows the entry anyway (GitHub's auto-merge got there first) is a success; anything else
+    raises. Returns {state, position}."""
     token = _worker_token()
-    if pr_state(token, node_id)["draft"]:
-        raise OpenPrError(f"#{number} is a draft — a draft is never armed")
-    queue = queue_method(token, base)
-    arm_auto_merge(token, node_id, queue)
-    state = pr_state(token, node_id)
-    if not state["armed"] or state["draft"]:
-        raise OpenPrError(f"#{number} should be ready and armed but GitHub reads it as "
-                          f"{'a draft' if state['draft'] else 'ready'}, auto-merge {'on' if state['armed'] else 'off'}")
-    return {"auto_merge": "armed", "queue_method": queue, "merge_method": state["merge_method"]}
+    before = queue_entry(token, node_id)
+    if before["draft"]:
+        raise OpenPrError(f"#{number} is a draft — a draft is never enqueued")
+    if before["head"] != head:
+        raise OpenPrError(f"#{number}'s head is {before['head'][:8]}, not {head[:8]} — not enqueued")
+    refused = ""
+    if before["entry"] is None:
+        try:
+            _graphql(token, ENQUEUE, {"id": node_id, "head": head}, "enqueue")
+        except OpenPrError as exc:
+            refused = f" (the enqueue was refused: {exc})"
+    after = queue_entry(token, node_id)
+    if after["entry"] is None or after["head"] != head:
+        raise OpenPrError(f"#{number} is not in the merge queue at {head[:8]} after enqueueing{refused}")
+    return {"state": str(after["entry"].get("state") or ""), "position": after["entry"].get("position")}
 
 
 def return_to_draft(branch: str, expected: int) -> None:

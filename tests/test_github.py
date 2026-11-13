@@ -1,5 +1,6 @@
 """Reading GitHub's state: incomplete reads raise, checks are judged on the required ones only. No network."""
 
+import json
 import pathlib
 import sys
 import unittest
@@ -295,50 +296,88 @@ class NewestCheckTests(unittest.TestCase):
 
 
 class QueueAndDisarmTests(unittest.TestCase):
-    """Review of #17: only a queue removal of the current head counts; a person disarming is not a rework."""
+    """Review of #17: only a queue removal of the current head counts; a person disarming is not a rework.
 
-    def read(self, removal_oid=None, disarm=None):
-        over = {}
-        if removal_oid is not None:
-            over["queueRemoval"] = {"nodes": [{"reason": "FAILED_CHECKS", "beforeCommit": {"oid": removal_oid}}]}
+    The removal's `beforeCommit` is the merge group's commit, never the head (#824: 94545e80 is the queue's squash
+    of f6343b65), so a removal counts for the head when it came after the head's commit."""
+
+    HEAD = {"commit": {"oid": "abc", "committedDate": "2026-11-13T09:31:26Z", "checkSuites": page([]),
+                       "statusCheckRollup": {"contexts": page([
+                           {"__typename": "CheckRun", "name": "ci-ok", "status": "COMPLETED", "conclusion": "SUCCESS"}])}}}
+
+    def read(self, removed_at=None, disarm=None, actor=None, in_queue=False, mergeable="MERGEABLE"):
+        over = {"commits": {"nodes": [self.HEAD]}, "isInMergeQueue": in_queue, "mergeable": mergeable}
+        if removed_at is not None:
+            over["queueRemoval"] = {"nodes": [{"createdAt": removed_at, "reason": "failed_checks",
+                                               "actor": actor or {"__typename": "Bot", "login": "github-merge-queue"}}]}
         if disarm is not None:
             over["autoMergeEvents"] = {"nodes": [{"__typename": "AutoMergeDisabledEvent", "actor": disarm}]}
-        with mock.patch.object(common, "graphql", return_value=PullTests().node(**over)):
-            return github.pull(CFG, 5)
+        ejection = github.Ejection("infra", "failed_checks", str(removed_at), "x")
+        with mock.patch.object(common, "graphql", return_value=PullTests().node(**over)), \
+                mock.patch.object(github, "queue_ejection", return_value=ejection) as classify:
+            p = github.pull(CFG, 5)
+        self.classified = classify.call_args
+        return p
 
-    def test_a_removal_of_the_current_head_counts_and_an_older_one_does_not(self) -> None:
-        self.assertEqual(self.read("abc").queue_removal, "FAILED_CHECKS")
-        self.assertEqual(self.read("older").queue_removal, "")
-        self.assertEqual(self.read().queue_removal, "")
+    def test_a_removal_after_the_heads_commit_counts_and_an_older_one_does_not(self) -> None:
+        p = self.read("2026-11-13T18:11:07Z")
+        self.assertEqual((p.queue_removal, p.queue_removed_at), ("failed_checks", "2026-11-13T18:11:07Z"))
+        self.assertEqual(p.ejection.kind, "infra")
+        self.assertEqual(self.classified.args[1:], (5, "failed_checks", "2026-11-13T18:11:07Z", "MERGEABLE"))
+        for older in ("2026-11-13T09:00:00Z", None):
+            with self.subTest(older=older):
+                p = self.read(older)
+                self.assertEqual((p.queue_removal, p.ejection), ("", None))
+                self.assertIsNone(self.classified)
+
+    def test_back_in_the_queue_is_not_an_ejection(self) -> None:
+        p = self.read("2026-11-13T18:11:07Z", in_queue=True)
+        self.assertEqual((p.queue_removal, p.ejection), ("failed_checks", None))
+        self.assertIsNone(self.classified)
+
+    def test_a_person_taking_it_out_of_the_queue_is_their_decision(self) -> None:
+        p = self.read("2026-11-13T18:11:07Z", actor={"__typename": "User", "login": "a-maintainer"})
+        self.assertEqual((p.queue_removal, p.dequeued_by, p.ejection), ("", "a-maintainer", None))
+        self.assertFalse(github.needs_enqueue(p, REQUIRED, "lunate-reviewer"))
 
     def test_a_person_disarming_is_recorded_and_an_app_or_the_lane_is_not(self) -> None:
         self.assertEqual(self.read(disarm={"__typename": "User", "login": "a-maintainer"}).disarmed_by, "a-maintainer")
         self.assertEqual(self.read(disarm={"__typename": "Bot", "login": "github-merge-queue"}).disarmed_by, "")
         self.assertEqual(self.read(disarm={"__typename": "User", "login": "lunate-worker"}).disarmed_by, "")
 
-    def test_neither_a_person_disarming_nor_an_old_removal_is_a_rework(self) -> None:
+    def test_only_a_real_queue_failure_or_a_queue_conflict_is_a_rework(self) -> None:
         approved = [helper_review("APPROVED")]
-        for p, expected in ((pull(5, 9, reviews=approved, queue_removal="FAILED_CHECKS"),
-                             "out of the merge queue after approval (failed_checks)"),
-                            (pull(5, 9, reviews=approved, queue_removal="FAILED_CHECKS", disarmed_by="a-maintainer"), None),
+        real = github.Ejection("real", "failed_checks", "t", "w", 1, "verify (macos-latest, 2/4)", 2, ("Verify (bash)",))
+        infra = github.Ejection("infra", "failed_checks", "t", "w", 1)
+        conflict = github.Ejection("conflict", "merge_conflict", "t", "w")
+        for p, expected in ((pull(5, 9, reviews=approved, queue_removal="failed_checks", ejection=real),
+                             "queue failure: verify (macos-latest, 2/4)"),
+                            (pull(5, 9, reviews=approved, queue_removal="failed_checks", ejection=infra), None),
+                            (pull(5, 9, reviews=approved, queue_removal="merge_conflict", ejection=conflict,
+                                  mergeable="CONFLICTING"), "queue conflict"),
+                            (pull(5, 9, reviews=approved, mergeable="CONFLICTING"), "conflicts with the base branch"),
+                            (pull(5, 9, reviews=approved, queue_removal="failed_checks", ejection=real,
+                                  disarmed_by="a-maintainer"), None),
                             (pull(5, 9, reviews=approved, disarmed_by="a-maintainer"), None),
                             (pull(5, 9, reviews=approved), None)):
-            with self.subTest(p=(p.queue_removal, p.disarmed_by)):
+            with self.subTest(p=(p.ejection, p.mergeable, p.disarmed_by)):
                 self.assertEqual(github.stuck_reason(p, frozenset({"ci-ok"}), "lunate-reviewer"), expected)
 
 
-class RearmTests(unittest.TestCase):
-    def test_only_a_ready_approved_green_unarmed_unqueued_pull_request_is_rearmed(self) -> None:
+class EnqueueTests(unittest.TestCase):
+    def test_only_a_ready_approved_green_mergeable_unqueued_pull_request_is_enqueued(self) -> None:
         ok = dict(reviews=[helper_review("APPROVED")])
-        cases = ((pull(5, 9, **ok), True), (pull(5, 9, **ok, auto_merge=True), False),
+        infra = github.Ejection("infra", "failed_checks", "t", "w", 1)
+        cases = ((pull(5, 9, **ok), True), (pull(5, 9, **ok, auto_merge=True), True),
                  (pull(5, 9, **ok, in_queue=True), False), (pull(5, 9, **ok, draft=True), False),
-                 (pull(5, 9, **ok, disarmed_by="a-maintainer"), False),
-                 (pull(5, 9, **ok, mergeable="CONFLICTING"), False), (pull(5, 9, **ok, queue_removal="X"), False),
+                 (pull(5, 9, **ok, disarmed_by="a-maintainer"), False), (pull(5, 9, **ok, dequeued_by="a-maintainer"), False),
+                 (pull(5, 9, **ok, mergeable="CONFLICTING"), False), (pull(5, 9, **ok, mergeable="UNKNOWN"), False),
+                 (pull(5, 9, **ok, queue_removal="failed_checks", ejection=infra), False),
                  (pull(5, 9, **ok, checks=[("ci-ok", "IN_PROGRESS", "")]), False), (pull(5, 9), False),
                  (pull(5, 9, reviews=[helper_review("APPROVED", commit="old")]), False))
         for p, expected in cases:
             with self.subTest(p=p):
-                self.assertIs(github.needs_rearm(p, frozenset({"ci-ok"}), "lunate-reviewer"), expected)
+                self.assertIs(github.needs_enqueue(p, frozenset({"ci-ok"}), "lunate-reviewer"), expected)
 
 
 class FailureKindTests(unittest.TestCase):
@@ -587,14 +626,14 @@ class PersonOutranksTests(unittest.TestCase):
     SHAPE = dict(head="5809330d1", reviews=[helper_review("DISMISSED", commit="5809330d1"),
                                             helper_review("APPROVED", commit="5809330d1", author="a-maintainer")])
 
-    def test_813s_shape_is_re_armed_when_ready_and_green(self) -> None:
-        self.assertTrue(github.needs_rearm(pull(813, 794, **self.SHAPE), REQUIRED, "lunate-reviewer"))
+    def test_813s_shape_is_enqueued_when_ready_and_green(self) -> None:
+        self.assertTrue(github.needs_enqueue(pull(813, 794, **self.SHAPE), REQUIRED, "lunate-reviewer"))
         self.assertEqual(github.person_approved(pull(813, 794, **self.SHAPE), "lunate-reviewer"), "a-maintainer")
 
-    def test_not_re_armed_as_a_draft_or_red_or_already_armed(self) -> None:
-        for over in (dict(draft=True), dict(checks=(("ci-ok", "COMPLETED", "FAILURE"),)), dict(auto_merge=True)):
+    def test_not_enqueued_as_a_draft_or_red_or_already_queued(self) -> None:
+        for over in (dict(draft=True), dict(checks=(("ci-ok", "COMPLETED", "FAILURE"),)), dict(in_queue=True)):
             with self.subTest(over=over):
-                self.assertFalse(github.needs_rearm(pull(813, 794, **self.SHAPE, **over), REQUIRED, "lunate-reviewer"))
+                self.assertFalse(github.needs_enqueue(pull(813, 794, **self.SHAPE, **over), REQUIRED, "lunate-reviewer"))
 
     def test_the_bots_own_approval_alone_is_not_a_person(self) -> None:
         p = pull(813, 794, reviews=[helper_review("APPROVED")])
@@ -677,10 +716,10 @@ class WaitsOnTests(unittest.TestCase):
             github._waits_on({"headRefName": "wt/issue-751"},
                              [{"number": 751, "blockedBy": page([], more=True)}], 820)
 
-    def test_a_waiting_pull_request_is_never_re_armed_nor_waiting_for_your_approval(self) -> None:
+    def test_a_waiting_pull_request_is_never_enqueued_nor_waiting_for_your_approval(self) -> None:
         p = pull(820, 751, reviews=[review("APPROVED")], waits_on=(749,), review_decision="REVIEW_REQUIRED")
-        self.assertTrue(github.needs_rearm(pull(820, 751, reviews=[review("APPROVED")]), REQUIRED, "lunate-reviewer"))
-        self.assertFalse(github.needs_rearm(p, REQUIRED, "lunate-reviewer"))
+        self.assertTrue(github.needs_enqueue(pull(820, 751, reviews=[review("APPROVED")]), REQUIRED, "lunate-reviewer"))
+        self.assertFalse(github.needs_enqueue(p, REQUIRED, "lunate-reviewer"))
         self.assertFalse(github.waits_for_approval(p, REQUIRED, "lunate-reviewer"))
 
     def test_open_blockers_of_a_card(self) -> None:
@@ -738,3 +777,93 @@ class RunDraftTests(unittest.TestCase):
     def test_a_failed_job_listing_raises(self) -> None:
         with mock.patch.object(common, "gh_json", side_effect=GhError("HTTP 502")), self.assertRaises(GhError):
             github.run_draft(self.cfg, 1)
+
+
+FIXTURES = pathlib.Path(__file__).resolve().parent / "fixtures"
+
+
+class QueueEjectionTests(unittest.TestCase):
+    """What took a pull request out of the merge queue, from its entry's last merge_group run — today's shapes
+    (2026-11-13), read from lunate-agent/lunate and kept in tests/fixtures."""
+
+    def gh(self, jobs_run=None, jobs=None, runs=None):
+        listing = json.loads((FIXTURES / "merge-group-runs-2026-11-13.json").read_text())
+        rows = runs if runs is not None else listing["workflow_runs"]
+        total = listing["total_count"] if runs is None else len(rows)
+        tsv = f"T\t{total}\n" + "".join(f"{r['id']}\t{r['name']}\t{r['head_branch']}\t{r['created_at']}\n" for r in rows)
+        if jobs is None and jobs_run is not None:
+            jobs = json.loads((FIXTURES / f"merge-group-{jobs_run}-jobs.json").read_text())
+        self.calls = []
+
+        def gh(*args, **kwargs):
+            self.calls.append(args)
+            return tsv
+
+        def gh_json(*args, **kwargs):
+            self.calls.append(args)
+            return jobs
+
+        return mock.patch.multiple(common, gh=gh, gh_json=gh_json)
+
+    def test_824_a_macos_shard_not_acquired_with_0_steps_is_infra(self) -> None:
+        with self.gh(43474820240):
+            e = github.queue_ejection(CFG, 824, "failed_checks", "2026-11-13T18:11:07Z", "MERGEABLE")
+        self.assertEqual((e.kind, e.run_id), ("infra", 43474820240))
+        self.assertEqual(e.why, "verify (macos-latest, 3/4) cancelled with 0 step(s) in merge_group run 43474820240")
+        self.assertIn("event=merge_group", self.calls[0][2])
+        self.assertIn("created=2026-11-12T18:11:07Z..2026-11-13T18:11:07Z", self.calls[0][2])
+        self.assertEqual(self.calls[1][1], f"repos/{CFG.slug}/actions/runs/43474820240/jobs?filter=latest&per_page=100")
+
+    def test_829_removed_with_no_failing_job_is_infra(self) -> None:
+        """#829's run: the macOS shard 4/4 never started; ci-ok failed only at its aggregating step. With that shard
+        left out, no job failed at all — infra either way."""
+        with self.gh(43470709108):
+            e = github.queue_ejection(CFG, 829, "failed_checks", "2026-11-13T17:38:36Z", "MERGEABLE")
+        self.assertEqual((e.kind, e.run_id), ("infra", 43470709108))
+        self.assertIn("verify (macos-latest, 4/4) cancelled with 0 step(s)", e.why)
+        jobs = json.loads((FIXTURES / "merge-group-43470709108-jobs.json").read_text())
+        jobs["jobs"] = [j for j in jobs["jobs"] if j["name"] != "verify (macos-latest, 4/4)"]
+        jobs["total_count"] = len(jobs["jobs"])
+        with self.gh(jobs=jobs):
+            e = github.queue_ejection(CFG, 829, "failed_checks", "2026-11-13T17:38:36Z", "MERGEABLE")
+        self.assertEqual((e.kind, e.why), ("infra", "no job failed in merge_group run 43470709108"))
+
+    def test_827_unmergeable_is_a_conflict_and_mergeable_again_is_requeued(self) -> None:
+        with self.gh():
+            conflict = github.queue_ejection(CFG, 827, "merge_conflict", "2026-11-13T17:38:36Z", "CONFLICTING")
+            cleared = github.queue_ejection(CFG, 827, "merge_conflict", "2026-11-13T17:38:36Z", "MERGEABLE")
+            pending = github.queue_ejection(CFG, 827, "merge_conflict", "2026-11-13T17:38:36Z", "UNKNOWN")
+        self.assertEqual((conflict.kind, cleared.kind, pending.kind), ("conflict", "infra", "pending"))
+        self.assertEqual(self.calls, [], "a conflict is GitHub's mergeability, not a run")
+
+    def test_815_a_failing_step_is_real_with_the_job(self) -> None:
+        runs = [{"id": 43474822487, "name": "CI", "created_at": "2026-11-13T17:38:41Z",
+                 "head_branch": "gh-readonly-queue/main/pr-815-94545e80821e0f45cf7fa096975dcdbcf6876ff1"}]
+        with self.gh(43474822487, runs=runs):
+            e = github.queue_ejection(CFG, 815, "failed_checks", "2026-11-13T18:20:00Z", "MERGEABLE")
+        self.assertEqual((e.kind, e.job, e.job_id, e.steps, e.run_id),
+                         ("real", "verify (macos-latest, 2/4)", 132055913825, ("Verify (bash)",), 43474822487))
+
+    def test_ci_ok_failing_at_another_step_is_real(self) -> None:
+        jobs = {"total_count": 1, "jobs": [{"id": 9, "name": "ci-ok", "conclusion": "failure",
+                                            "steps": [{"name": "Set up job", "conclusion": "failure"}]}]}
+        with self.gh(jobs=jobs):
+            e = github.queue_ejection(CFG, 824, "failed_checks", "2026-11-13T18:11:07Z", "MERGEABLE")
+        self.assertEqual((e.kind, e.job), ("real", "ci-ok"))
+
+    def test_no_run_for_the_entry_is_infra_and_another_prs_run_is_not_its(self) -> None:
+        with self.gh(jobs={}):
+            e = github.queue_ejection(CFG, 830, "failed_checks", "2026-11-13T18:11:07Z", "MERGEABLE")
+        self.assertEqual((e.kind, e.why), ("infra", "no merge_group run of its entry was found"))
+        with self.gh(43474820240):  # pr-82 is a prefix of pr-824's branch, not its own
+            self.assertEqual(github.queue_run(CFG, 82, "2026-11-13T18:11:07Z"), None)
+
+    def test_an_incomplete_listing_is_refused(self) -> None:
+        listing = json.loads((FIXTURES / "merge-group-runs-2026-11-13.json").read_text())
+        with mock.patch.object(common, "gh", return_value=f"T\t{listing['total_count'] + 1}\n"), \
+                self.assertRaises(GhError):
+            github.queue_run(CFG, 824, "2026-11-13T18:11:07Z")
+        jobs = json.loads((FIXTURES / "merge-group-43474820240-jobs.json").read_text())
+        jobs["total_count"] += 1
+        with self.gh(jobs=jobs), self.assertRaises(GhError):
+            github.queue_ejection(CFG, 824, "failed_checks", "2026-11-13T18:11:07Z", "MERGEABLE")

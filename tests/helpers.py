@@ -44,7 +44,7 @@ def pull(number: int, card_number: int | None = None, *, author: str = "lunate-w
     branch = f"wt/issue-{card_number}" if card_number is not None else f"feature/{number}"
     values = dict(number=number, author=author, branch=branch, head=head, reviews=tuple(reviews),
                   labels=frozenset(labels), checks=tuple(checks), title=f"pr {number}",
-                  created="2026-11-12T00:00:00Z", files=())
+                  created="2026-11-12T00:00:00Z", files=(), mergeable="MERGEABLE")
     values.update(over)
     return github.Pull(**values)
 

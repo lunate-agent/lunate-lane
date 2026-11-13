@@ -47,12 +47,20 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    - **rework first**: a worker pull request whose reviewer requested changes *on its current head* goes back to
      a worker — unless a person outranks the bot: a dismissed `lunate-reviewer` review counts for nothing, and a
      person's approval on the head after the bot's last request for changes there means no rework (the reviewer
-     does not review that head again, and a ready, green, unarmed pull request is re-armed). It goes back to
+     does not review that head again, and a ready, green pull request not in the queue is enqueued). It goes back to
      a worker on the same branch, with the review's findings in the brief. So does a **stuck** one — ready (not a
-     draft) and red on a required check, `CONFLICTING` with main, or approved but removed from the merge queue
-     (neither queued nor armed, and the queue's latest removal was of the current head — one from before the last
-     push does not count; when a person turned auto-merge off last, that is their decision and not a rework) — with the failing check names and the tail
-     of each failing job's log, the conflicting files, or the queue's reason in the brief. A failure that is the
+     draft) and red on a required check, `CONFLICTING` with main, or approved and removed from the merge queue at
+     its head for a real failure — with the failing check names and the tail of each failing job's log, or the
+     conflicting files, in the brief. **Merge-queue ejections** are classified from the last merge_group run of
+     the entry (`gh-readonly-queue/main/pr-<n>-*`), and only a removal after the head's commit counts (the
+     event's `beforeCommit` is the queue's merge-group commit, never the head; one from before the last push is
+     history; a removal by a person, like a person turning auto-merge off, is their decision): `CONFLICTING` is a
+     rework as **queue conflict** (merge origin/main, resolve, no rebase or force-push); a job with a failing step
+     is a rework as **queue failure: <job>**, with that job's link and log tail in the brief; anything else — jobs
+     cancelled or timed out with no failing step (a macOS shard "not acquired by Runner", 0 steps), no failed job,
+     no run, or a `merge_conflict` removal of a pull request GitHub reads MERGEABLE again (the conflict was with
+     an entry ahead of it that left) — is **infra**: the feeder enqueues it again, at most twice per head
+     (`<state>/requeues/<pr>.json`), then leaves it and the digest says "stuck in queue". A failure that is the
      runner's fault is not a rework. `ci-ok` (`checks.aggregate` in `lane.json`) is judged by the jobs it rolls
      up: when its only failing step is the aggregate check (`checks.aggregate_step`) and every job beside it that
      did not succeed was cancelled, timed out or failed to start with no failing step, it is infra; any aggregated
@@ -82,9 +90,9 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      pull request (any author) already carries or closes. An issue labelled **`kind/decision`** (`labels.decision`)
      is a question for a maintainer, not work: it is never started, and the digest lists it under "Waiting on you".
      A pull request whose card has an open blocked-by issue (a slice started before its predecessor — S3 #820 and
-     S4 #825 before S1 #818) is **not reviewed, not armed and not re-armed**: the worker leaves it unarmed at its
+     S4 #825 before S1 #818) is **not reviewed, not armed and not enqueued**: the worker leaves it unarmed at its
      finish, the feeder turns auto-merge off on one already armed, and the digest shows it as "waits on #n". Once the
-     blockers close it is reviewed, and re-armed when approved.
+     blockers close it is reviewed, and enqueued when approved.
      A maintainer answers it in a comment that starts with **`Decision:`** and closes it; the worker and reviewer
      briefs of every card it blocked then carry that comment verbatim, in case the card text was not updated.
    - **limits**: total WIP ≤ `wip_limit`, where WIP is the cards in flight — each open worker pull request plus
@@ -118,10 +126,11 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      park lifted any other way (its attempts record edited or removed by hand) is named in `feed.log` at the
      next tick. A card parked by hand shows in the digest as "parked by hand" with
      its reason.
-   - **re-arming**: a worker pull request that is ready, approved at its head, green, not conflicting, neither
-     queued nor armed — the state a clean finish leaves when arming fails after it was marked ready, or a person's
-     approval after the bot's request for changes — is armed
-     again with the queue's method and read back. Not when a person turned auto-merge off last.
+   - **enqueuing**: a worker pull request that is ready, approved at its head, green, MERGEABLE and not in the
+     merge queue — armed or not: arming alone does not put it in the queue, and a removal turns auto-merge off —
+     is enqueued (`enqueuePullRequest` with its head as the expected head) and its queue entry read back. Not when
+     a person turned auto-merge off last or took it out of the queue, not while its card waits on an open issue,
+     and not when the queue removed this head (an ejection, above).
    - **tidying, after the launches** (`scripts/cleanup.py`): a card whose lane pull request (`wt/issue-N`) is merged
      or closed, with none open and no worker running, loses its worktree, its local branch and its scratch
      directory (a merged one first has its merge commit's parent count logged — 1 is the squash the queue should
@@ -203,9 +212,11 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    and green but still need a maintainer's or code owner's approval (the bot approved the head, or it carries no
    card), and a card still open after the pull request closing it merged. Then: open issues in the milestone; WIP against its limit, with what is in flight (as the feeder counts it); every open
    pull request with its state; what is stuck and why (a worker pull request that is red, conflicting or out of
-   the merge queue, any pull request open for more than a day, and a card whose last worker run failed by name
-   before its session could end — "worker died: <reason>", also in `lane.py status`); the parked cards and why; and what merged
-   since yesterday, with titles.
+   the merge queue for a real failure, "stuck in queue" after two infra re-enqueues at one head, any pull request
+   open for more than a day, and a card whose last worker run failed by name before its session could end —
+   "worker died: <reason>", also in `lane.py status`); the parked cards and why; **Merge queue since yesterday**
+   ("re-enqueued #n (infra)", "rework #n (queue conflict)", "rework #n (queue failure: <job>)", from
+   `<state>/queue/events.jsonl`); and what merged since yesterday, with titles.
 
 ## Files
 

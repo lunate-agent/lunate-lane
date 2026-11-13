@@ -90,7 +90,7 @@ def in_flight(cfg: common.Config, pulls: list, running: dict, parked=frozenset()
 
 
 def stuck(cfg: common.Config, pulls: list, required: frozenset, now: datetime.datetime,
-          running=frozenset(), parked=frozenset()) -> list[tuple]:
+          running=frozenset(), parked=frozenset(), requeued: dict | None = None) -> list[tuple]:
     """(number, why) for every open pull request that is stuck: a worker PR that is red, conflicting or out of
     the queue, or an orphaned draft (the feeder sends those back), and any pull request open for more than a
     day, with its state."""
@@ -99,6 +99,8 @@ def stuck(cfg: common.Config, pulls: list, required: frozenset, now: datetime.da
         why = github.stuck_reason(p, required, cfg.reviewer_app) if p.author == cfg.worker_app else None
         if why is None and p.author == cfg.worker_app and github.orphaned_draft(p, running, parked):
             why = "orphaned draft — no worker on it; the feeder relaunches it"
+        if why is None and p.author == cfg.worker_app:
+            why = queue_stuck(p, (requeued or {}).get(p.number, ()))
         age = age_days(p.created, now)
         if why or age > 1:
             parts = [why] if why else [pull_state(p, required, cfg.reviewer_app)]
@@ -106,6 +108,20 @@ def stuck(cfg: common.Config, pulls: list, required: frozenset, now: datetime.da
                 parts.append(f"open {age:.0f}d")
             found.append((p.number, " — ".join(parts)))
     return found
+
+
+def queue_stuck(p: github.Pull, removals: tuple) -> str | None:
+    """'stuck in queue' for a pull request the queue removed at its head for an infra reason again after the feeder
+    re-enqueued it REQUEUE_LIMIT times, or whose re-enqueue did not take (`removals`: the removals of this head the
+    feeder acted on — the latest among them, and still out of the queue)."""
+    e = p.ejection
+    if e is None or e.kind != "infra" or p.in_queue or e.at not in removals:
+        return None
+    if len(removals) <= github.REQUEUE_LIMIT:
+        return (f"stuck in queue — the re-enqueue after removal {len(removals)} at {p.head[:8]} did not take "
+                f"(see feed.log); last: {e.reason}")
+    return (f"stuck in queue — removed {len(removals)} times at {p.head[:8]}, re-enqueued {github.REQUEUE_LIMIT}; "
+            f"last: {e.reason} ({_short(e.why, WAIT_REASON + 40)})")
 
 
 WAIT_TITLE = 32
@@ -147,7 +163,8 @@ def waiting_on_you(cfg: common.Config, decisions: list, pulls: list, required: f
 
 def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required: frozenset,
             now: datetime.datetime, parked: dict | None = None, running: dict | None = None,
-            kept: dict | None = None, decisions: list | None = None, died: dict | None = None) -> str:
+            kept: dict | None = None, decisions: list | None = None, died: dict | None = None,
+            requeued: dict | None = None, queue_events: list | None = None) -> str:
     running = running or {}
     parked = parked or {}
     flight = in_flight(cfg, pulls, running, frozenset(parked))
@@ -158,7 +175,7 @@ def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required
     lines.append(f"Open PRs ({len(pulls)}):" if pulls else "Open PRs: none")
     for p in sorted(pulls, key=lambda p: p.number):
         lines.append(f"  #{p.number} {p.title[:60]} — {pull_state(p, required, cfg.reviewer_app)}")
-    held = stuck(cfg, pulls, required, now, running, frozenset(parked))
+    held = stuck(cfg, pulls, required, now, running, frozenset(parked), requeued)
     # a worker run that failed by name — its setup, its push — before its session could end: the reason, by card
     dead = [(card, why) for card, why in sorted((died or {}).items()) if card not in running]
     lines.append(f"Stuck ({len(held) + len(dead)}):" if held or dead else "Stuck: none")
@@ -168,6 +185,9 @@ def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required
                  else "Parked cards: none")
     for number in sorted(parked):
         lines.append(f"  #{number} — {parked_line(parked[number])}")
+    events = queue_events or []
+    lines.append(f"Merge queue since yesterday ({len(events)}):" if events else "Merge queue since yesterday: nothing")
+    lines += [f"  {line}" for line in events]
     kept = kept or {}
     lines.append(f"Kept by cleanup ({len(kept)}) — its PR is closed, but removing it would lose work:" if kept
                  else "Kept by cleanup: none")
@@ -186,7 +206,9 @@ def tick() -> None:
     merged = merged_since(cfg, now - datetime.timedelta(days=1))
     decisions = github.decision_issues(cfg)
     message = compose(cfg, cards, pulls, merged, required, now, harness.parked_info(), harness.running_workers(),
-                      cleanup.read_held(), decisions, harness.died_info())
+                      cleanup.read_held(), decisions, harness.died_info(),
+                      {p.number: harness.requeues(p.number, p.head) for p in pulls if p.ejection is not None},
+                      harness.queue_events((now - datetime.timedelta(days=1)).timestamp()))
     latest = common.state_dir("digest") / "latest.md"
     try:
         latest.write_text(message + "\n", encoding="utf-8")

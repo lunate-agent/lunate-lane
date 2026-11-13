@@ -40,7 +40,8 @@ class ComposeTests(unittest.TestCase):
         old = pull(5, 9, created="2026-11-10T08:00:00Z", reviews=[review("CHANGES_REQUESTED")])
         fresh = pull(6, 10, created="2026-11-12T08:00:00Z", auto_merge=True)
         red = pull(7, 11, checks=[("ci-ok", "COMPLETED", "FAILURE")])
-        dropped = pull(8, 12, reviews=[review("APPROVED")], queue_removal="FAILED_CHECKS")
+        real = github.Ejection("real", "failed_checks", "t", "w", 1, "verify (macos-latest, 2/4)", 2, ("Verify (bash)",))
+        dropped = pull(8, 12, reviews=[review("APPROVED")], queue_removal="failed_checks", ejection=real)
         foreign = pull(9, None, author="someone", mergeable="CONFLICTING")
         text = digest.compose(CFG, [card(1), card(2)], [old, fresh, red, dropped, foreign],
                               [{"number": 801, "title": "Fix the loop"}], REQUIRED, NOW)
@@ -49,7 +50,7 @@ class ComposeTests(unittest.TestCase):
         self.assertIn("Stuck (3):", text)
         self.assertIn("  #5 — changes requested — open 2d", text)
         self.assertIn("  #7 — required checks failing", text)
-        self.assertIn("  #8 — out of the merge queue after approval (failed_checks)", text)
+        self.assertIn("  #8 — queue failure: verify (macos-latest, 2/4)", text)
         self.assertNotIn("  #6 —", text)
         self.assertNotIn("  #9 —", text, "another author's fresh conflict is not the lane's to call stuck")
         self.assertIn("Merged since yesterday (1):\n  #801 Fix the loop", text)
@@ -173,3 +174,36 @@ class WaitsOnDigestTests(unittest.TestCase):
         self.assertEqual(state(pull(825, 752, draft=True, waits_on=(749,))), "waits on #749")
         self.assertEqual(state(pull(820, 751, auto_merge=True, waits_on=(749, 750))),
                          "waits on #749, #750 (auto-merge still armed)")
+
+
+class QueueDigestTests(unittest.TestCase):
+    def test_the_queue_events_since_yesterday_and_a_pull_request_stuck_in_the_queue(self) -> None:
+        infra = github.Ejection("infra", "failed_checks", "2026-11-13T20:00:00Z",
+                                "verify (macos-latest, 3/4) cancelled with 0 step(s) in merge_group run 1", 1)
+        stuck = pull(824, 3, reviews=[review("APPROVED")], queue_removal="failed_checks", ejection=infra)
+        once = pull(829, 4, reviews=[review("APPROVED")], queue_removal="failed_checks",
+                    ejection=dataclasses.replace(infra, at="2026-11-13T18:11:07Z"))
+        events = ["re-enqueued #829 (infra)", "rework #827 (queue conflict)",
+                  "rework #815 (queue failure: verify (macos-latest, 2/4))"]
+        removals = ("2026-11-13T18:11:07Z", "2026-11-13T19:00:00Z", "2026-11-13T20:00:00Z")
+        text = digest.compose(CFG, [], [stuck, once], [], REQUIRED, NOW, requeued={824: removals, 829: removals[:1]},
+                              queue_events=events)
+        self.assertIn("Merge queue since yesterday (3):\n  re-enqueued #829 (infra)\n  rework #827 (queue conflict)\n"
+                      "  rework #815 (queue failure: verify (macos-latest, 2/4))", text)
+        self.assertIn("  #824 — stuck in queue — removed 3 times at h1, re-enqueued 2; last: failed_checks "
+                      "(verify (macos-latest, 3/4) cancelled with 0 step(s) in merge_group run 1)", text)
+        self.assertIn("  #829 — stuck in queue — the re-enqueue after removal 1 at h1 did not take (see feed.log); "
+                      "last: failed_checks", text)
+        acted = digest.compose(CFG, [], [once], [], REQUIRED, NOW, requeued={829: ("2026-11-13T17:00:00Z",)})
+        self.assertNotIn("  #829 —", acted, "a newer removal not yet acted on is the feeder's, not stuck")
+        self.assertIn("Merge queue since yesterday: nothing", digest.compose(CFG, [], [], [], REQUIRED, NOW))
+
+    def test_the_tick_reads_the_events_of_the_last_day(self) -> None:
+        state = TempState()
+        try:
+            from scripts import harness
+            harness.note_queue_event("re-enqueued #829 (infra)")
+            self.assertEqual(harness.queue_events(0), ["re-enqueued #829 (infra)"])
+            self.assertEqual(harness.queue_events(datetime.datetime.now().timestamp() + 60), [])
+        finally:
+            state.close()

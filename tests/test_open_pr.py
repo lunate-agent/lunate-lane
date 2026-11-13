@@ -574,13 +574,49 @@ class FailurePathTests(OpenPrCase):
         self.assertIn("nothing was pushed", str(caught.exception))
         self.assertNotIn(("push", "lane/x"), self.events)
 
-    def test_rearm_arms_a_ready_pull_request_and_reads_it_back_but_never_a_draft(self) -> None:
-        self.drafts["N7"], self.drafts["N8"] = False, True
-        self.assertEqual(open_pr.rearm(7, "N7", "main")["auto_merge"], "armed")
-        self.assertTrue(self.armed["N7"])
-        with self.assertRaises(open_pr.OpenPrError):
-            open_pr.rearm(8, "N8", "main")
-        self.assertFalse(self.armed.get("N8"))
+    def queue(self, entries: dict, heads: dict, refuse: str = "", sticks: bool = True):
+        """A GitHub whose queue holds `entries` (node -> entry), for open_pr.enqueue."""
+        calls = []
+
+        def fake(token, query, variables, what):
+            node = variables["id"]
+            if "enqueuePullRequest" in query:
+                calls.append((node, variables["head"]))
+                if refuse:
+                    raise open_pr.OpenPrError(refuse)
+                if sticks:
+                    entries[node] = {"state": "QUEUED", "position": 2, "enqueuedAt": "t"}
+                return {"enqueuePullRequest": {"mergeQueueEntry": entries.get(node)}}
+            return {"node": {"isDraft": self.drafts.get(node, False), "headRefOid": heads[node],
+                             "isInMergeQueue": node in entries, "mergeQueueEntry": entries.get(node)}}
+
+        open_pr._graphql = fake
+        return calls
+
+    def test_enqueue_puts_a_ready_pull_request_in_the_queue_and_reads_the_entry_back(self) -> None:
+        self.drafts["N7"] = False
+        calls = self.queue({}, {"N7": "abc"})
+        self.assertEqual(open_pr.enqueue(7, "N7", "abc"), {"state": "QUEUED", "position": 2})
+        self.assertEqual(calls, [("N7", "abc")], "with the expected head, so a push in between is refused")
+
+    def test_enqueue_never_queues_a_draft_or_another_head_and_a_silent_no_op_is_a_failure(self) -> None:
+        self.drafts["N8"], self.drafts["N9"], self.drafts["N10"] = True, False, False
+        calls = self.queue({}, {"N8": "abc", "N9": "new", "N10": "abc"}, sticks=False)
+        for number, node, head in ((8, "N8", "abc"), (9, "N9", "abc"), (10, "N10", "abc")):
+            with self.subTest(node=node), self.assertRaises(open_pr.OpenPrError):
+                open_pr.enqueue(number, node, head)
+        self.assertEqual(calls, [("N10", "abc")])
+
+    def test_a_refused_enqueue_is_a_success_only_when_the_entry_is_there(self) -> None:
+        self.drafts["N7"] = False
+        entries = {}
+        self.queue(entries, {"N7": "abc"}, refuse="enqueue was refused: not mergeable")
+        with self.assertRaises(open_pr.OpenPrError) as caught:
+            open_pr.enqueue(7, "N7", "abc")
+        self.assertIn("not in the merge queue at abc", str(caught.exception))
+        self.assertIn("not mergeable", str(caught.exception))
+        entries["N7"] = {"state": "AWAITING_CHECKS", "position": 1}  # GitHub's auto-merge queued it first
+        self.assertEqual(open_pr.enqueue(7, "N7", "abc"), {"state": "AWAITING_CHECKS", "position": 1})
 
     def test_return_to_draft_refuses_another_pull_request(self) -> None:
         self.reuse(42)

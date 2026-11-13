@@ -139,24 +139,29 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(feed.main(), 1)
         self.assertEqual(harness.rework_rounds(9, 50), 1)
 
-    def test_an_approved_clean_pull_request_that_is_not_armed_is_rearmed(self) -> None:
-        """Review of #17: arming failed after mark_ready, and nobody re-armed it."""
+    def test_an_approved_green_pull_request_that_is_not_queued_is_enqueued_armed_or_not(self) -> None:
+        """Review of #17: arming failed after mark_ready, and nobody re-armed it; and arming alone does not put it in
+        the queue. The feeder enqueues it itself and reads the entry back."""
         from scripts import open_pr
 
         github.pull.return_value = pull(50, 9, reviews=[review("APPROVED")], node_id="N50")
-        with mock.patch.object(open_pr, "rearm", return_value={"auto_merge": "armed", "queue_method": "SQUASH",
-                                                               "merge_method": "MERGE"}) as rearm:
+        with mock.patch.object(open_pr, "enqueue", return_value={"state": "QUEUED", "position": 1}) as enqueue:
             with mock.patch.object(sys, "argv", ["feed.py", "--dry-run"]):
                 feed.main()
-            rearm.assert_not_called()
+            enqueue.assert_not_called()
             feed.main()
-            rearm.assert_called_once_with(50, "N50", "main")
+            enqueue.assert_called_once_with(50, "N50", "h1")
+            github.pull.return_value = pull(50, 9, reviews=[review("APPROVED")], node_id="N50", auto_merge=True)
+            feed.main()
+            self.assertEqual(enqueue.call_count, 2, "armed but not queued is enqueued too")
             github.pull.return_value = pull(50, 9, reviews=[review("APPROVED")], disarmed_by="a-maintainer")
             feed.main()
-            self.assertEqual(rearm.call_count, 1, "a person's disarm stands")
+            github.pull.return_value = pull(50, 9, reviews=[review("APPROVED")], in_queue=True)
+            feed.main()
+            self.assertEqual(enqueue.call_count, 2, "a person's disarm stands, and a queued one is left alone")
         log = (self.state.cfg.state / "logs" / "feed.log").read_text()
-        self.assertIn("would re-arm #50", log)
-        self.assertIn("re-armed #50: approved at h1 but not armed — auto-merge armed", log)
+        self.assertIn("would enqueue #50", log)
+        self.assertIn("enqueued #50: ready, approved at h1, green, not in the merge queue — entry QUEUED, position 1", log)
 
     def test_a_tick_sweeps_stale_token_files_first(self) -> None:
         from scripts import open_pr
@@ -491,19 +496,18 @@ class NeedsPersonFeedTests(unittest.TestCase):
 class PersonOutranksFeedTests(unittest.TestCase):
     setUp, tearDown = FeedTests.setUp, FeedTests.tearDown
 
-    def test_813s_shape_is_not_reworked_and_is_re_armed(self) -> None:
+    def test_813s_shape_is_not_reworked_and_is_enqueued(self) -> None:
         from scripts import open_pr
 
         github.milestone_cards.return_value = []
         github.open_pulls.return_value = [pull(813, 794)]
         github.pull.return_value = pull(813, 794, head="5809330d1", node_id="PR_813", reviews=[
             review("DISMISSED", commit="5809330d1"), review("APPROVED", commit="5809330d1", author="a-maintainer")])
-        with mock.patch.object(open_pr, "rearm", return_value={"auto_merge": "armed", "queue_method": "SQUASH",
-                                                               "merge_method": "MERGE"}) as rearm:
+        with mock.patch.object(open_pr, "enqueue", return_value={"state": "QUEUED", "position": 1}) as enqueue:
             self.assertEqual(feed.main(), 0)
         self.assertEqual(self.started, [])
-        rearm.assert_called_once_with(813, "PR_813", "main")
-        self.assertIn("re-armed #813", (self.state.cfg.state / "logs" / "feed.log").read_text())
+        enqueue.assert_called_once_with(813, "PR_813", "5809330d1")
+        self.assertIn("enqueued #813", (self.state.cfg.state / "logs" / "feed.log").read_text())
 
 
 class WaitsOnFeedTests(unittest.TestCase):
@@ -518,7 +522,8 @@ class WaitsOnFeedTests(unittest.TestCase):
         github.milestone_cards.return_value = []
         github.open_pulls.return_value = [pull(820, 751)]
         github.pull.return_value = pull(820, 751, node_id="PR_820", auto_merge=True, waits_on=(749, 750))
-        with mock.patch.object(open_pr, "disarm") as disarm, mock.patch.object(open_pr, "rearm") as rearm:
+        with mock.patch.object(open_pr, "disarm") as disarm, \
+                mock.patch.object(open_pr, "enqueue", return_value={"state": "QUEUED", "position": 1}) as rearm:
             with mock.patch.object(sys, "argv", ["feed.py", "--dry-run"]):
                 self.assertEqual(feed.main(), 0)
             disarm.assert_not_called()
@@ -530,7 +535,117 @@ class WaitsOnFeedTests(unittest.TestCase):
             rearm.assert_not_called()
             github.pull.return_value = pull(820, 751, node_id="PR_820", reviews=[review("APPROVED")])
             self.assertEqual(feed.main(), 0)
-            rearm.assert_called_once_with(820, "PR_820", "main")
+            rearm.assert_called_once_with(820, "PR_820", "h1")
         log = (self.state.cfg.state / "logs" / "feed.log").read_text()
         self.assertIn("would turn auto-merge off on #820: card #751 waits on #749, #750", log)
         self.assertIn("turned auto-merge off on #820: card #751 waits on #749, #750", log)
+
+
+class QueueEjectionFeedTests(unittest.TestCase):
+    """The merge queue removed an approved worker pull request at its head (2026-11-13's shapes): infra is
+    re-enqueued at most twice per head, then 'stuck in queue'; a conflict or a real failure is a rework."""
+
+    setUp, tearDown = FeedTests.setUp, FeedTests.tearDown
+
+    def ejected(self, number, kind, at, head="h1", **over):
+        jobs = {"real": ("verify (macos-latest, 2/4)", 132055913825, ("Verify (bash)",))}.get(kind, ("", 0, ()))
+        reason = "merge_conflict" if kind == "conflict" or over.pop("conflict", False) else "failed_checks"
+        e = github.Ejection(kind, reason, at, "w", 43474820240, *jobs)
+        github.milestone_cards.return_value = []
+        github.open_pulls.return_value = [pull(number, 3, head=head)]
+        github.pull.return_value = pull(number, 3, head=head, node_id=f"PR_{number}", reviews=[review("APPROVED", commit=head)],
+                                        queue_removal=reason, queue_removed_at=at, ejection=e, **over)
+
+    def tick(self, dry_run=False):
+        argv = ["feed.py", "--dry-run"] if dry_run else ["feed.py"]
+        with mock.patch.object(sys, "argv", argv):
+            self.assertEqual(feed.main(), 0)
+
+    def log(self):
+        return (self.state.cfg.state / "logs" / "feed.log").read_text()
+
+    def test_824_infra_is_re_enqueued_twice_per_head_then_stuck_in_queue(self) -> None:
+        from scripts import open_pr
+
+        with mock.patch.object(open_pr, "enqueue", return_value={"state": "QUEUED", "position": 1}) as enqueue:
+            self.ejected(824, "infra", "2026-11-13T18:11:07Z")
+            self.tick(dry_run=True)
+            enqueue.assert_not_called()
+            self.tick()
+            self.tick()  # the same removal again (the read raced the enqueue): acted on once
+            enqueue.assert_called_once_with(824, "PR_824", "h1")
+            self.ejected(824, "infra", "2026-11-13T19:00:00Z")
+            self.tick()
+            self.assertEqual(enqueue.call_count, 2)
+            self.ejected(824, "infra", "2026-11-13T20:00:00Z")
+            self.tick()
+            self.tick()
+            self.assertEqual(enqueue.call_count, 2, "a third removal at the same head is left for a person")
+            self.ejected(824, "infra", "2026-11-13T21:00:00Z", head="h2")
+            self.tick()
+            self.assertEqual(enqueue.call_count, 3, "a new head starts over")
+        self.assertEqual(self.started, [], "infra is never a rework")
+        self.assertEqual(harness.queue_events(0), ["re-enqueued #824 (infra)", "re-enqueued #824 (infra)",
+                                                   "stuck in queue #824 (infra, 2 re-enqueues at h1)",
+                                                   "re-enqueued #824 (infra)"])
+        log = self.log()
+        self.assertIn("would re-enqueue #824 was removed from the merge queue at h1 (failed_checks: w)", log)
+        self.assertIn("re-enqueued #824 was removed from the merge queue at h1 (failed_checks: w) — 1 of 2 on this head", log)
+        self.assertIn("stuck in queue: re-enqueued 2 times on this head already, left for a person", log)
+
+    def test_829_and_827_mergeable_again_are_re_enqueued_saying_which(self) -> None:
+        from scripts import open_pr
+
+        with mock.patch.object(open_pr, "enqueue", return_value={"state": "QUEUED", "position": 1}) as enqueue:
+            self.ejected(829, "infra", "2026-11-13T17:38:36Z")
+            self.tick()
+            self.ejected(827, "infra", "2026-11-13T17:38:36Z", conflict=True)
+            self.tick()
+        self.assertEqual([c.args[0] for c in enqueue.call_args_list], [829, 827])
+        self.assertEqual(harness.queue_events(0), ["re-enqueued #829 (infra)",
+                                                   "re-enqueued #827 (queue conflict, mergeable now)"])
+
+    def test_827_unmergeable_is_a_rework_saying_queue_conflict(self) -> None:
+        from scripts import open_pr
+
+        with mock.patch.object(open_pr, "enqueue") as enqueue:
+            self.ejected(827, "conflict", "2026-11-13T17:38:36Z", mergeable="CONFLICTING")
+            self.tick()
+        enqueue.assert_not_called()
+        self.assertEqual([(l.card, l.rework_pr, l.reason) for l in self.started], [(3, 827, "queue conflict")])
+        self.assertEqual(harness.queue_events(0), ["rework #827 (queue conflict)"])
+
+    def test_a_real_queue_failure_is_a_rework_naming_the_job(self) -> None:
+        self.ejected(815, "real", "2026-11-13T18:20:00Z")
+        self.tick()
+        self.assertEqual([(l.rework_pr, l.reason) for l in self.started],
+                         [(815, "queue failure: verify (macos-latest, 2/4)")])
+        self.assertEqual(harness.queue_events(0), ["rework #815 (queue failure: verify (macos-latest, 2/4))"])
+
+    def test_not_re_enqueued_while_its_card_runs_or_is_parked_or_a_person_took_it_out_or_still_pending(self) -> None:
+        from scripts import open_pr
+
+        with mock.patch.object(open_pr, "enqueue") as enqueue:
+            for over, running in ((dict(), {3: frozenset()}), (dict(dequeued_by="a-maintainer"), {}),
+                                  (dict(disarmed_by="a-maintainer"), {}), (dict(waits_on=(749,)), {})):
+                with self.subTest(over=over):
+                    harness.running_workers.return_value = running
+                    self.ejected(824, "infra", "2026-11-13T18:11:07Z", **over)
+                    self.tick()
+            harness.running_workers.return_value = {}
+            self.ejected(827, "pending", "2026-11-13T17:38:36Z", conflict=True, mergeable="UNKNOWN")
+            self.tick()
+            harness.park(3, "manual", "test")
+            self.ejected(824, "infra", "2026-11-13T18:11:07Z")
+            self.tick()
+        enqueue.assert_not_called()
+        self.assertEqual(self.started, [])
+
+    def test_a_failed_enqueue_fails_the_tick_by_name_and_the_removal_still_counts(self) -> None:
+        from scripts import open_pr
+
+        with mock.patch.object(open_pr, "enqueue", side_effect=open_pr.OpenPrError("#824 is not in the merge queue")):
+            self.ejected(824, "infra", "2026-11-13T18:11:07Z")
+            self.assertEqual(feed.main(), 1)
+        self.assertEqual(harness.requeues(824, "h1"), ("2026-11-13T18:11:07Z",))
+        self.assertIn("#824 is not in the merge queue", self.log())

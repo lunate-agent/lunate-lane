@@ -223,9 +223,18 @@ def rework_brief(cfg: common.Config, pr: int, worktree: pathlib.Path | None = No
                             "way again: look for what makes them hang or run out of time (a test that never ends, "
                             "a step that waits on input), not only for a failing assertion.")
         sections.append("### Checks are failing\n\n" + "\n\n".join(parts))
-    elif stuck == "conflicts with the base branch":
+    elif stuck and stuck.startswith(github.QUEUE_FAILURE) and p.ejection is not None:
+        e = p.ejection
+        sections.append(
+            f"### The merge queue removed it: `{e.job}` failed\n\nThe merge queue tested this branch together with "
+            f"`{cfg.base}` and what was queued ahead of it (merge_group run {e.run_id}), and `{e.job}` failed at "
+            + ", ".join(f"`{step}`" for step in e.steps) + f". The pull request's own checks were green: merge "
+            f"`origin/{cfg.base}`, find what breaks in combination, and fix it.\n\n#### `{e.job}`\n{e.job_url}\n\n"
+            f"```\n{log_tail(cfg, e.job_id)}\n```")
+    elif stuck in (github.CONFLICT, github.QUEUE_CONFLICT):
         files = conflicts(cfg, worktree) if worktree is not None else []
         sections.append(f"### The branch conflicts with `{cfg.base}`\n\n"
+                        + ("The merge queue removed it for this conflict. " if stuck == github.QUEUE_CONFLICT else "")
                         + ("Conflicting files when `origin/" + cfg.base + "` is merged in:\n"
                            + "\n".join(f"- `{f}`" for f in files) if files else
                            "GitHub reports a conflict; merge `origin/" + cfg.base + "` to see it."))
@@ -386,7 +395,7 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
         return 1
     not_ready = ""
     # a slice started before its predecessor: pushed and marked ready like any clean finish, but never armed while
-    # its card waits on an open issue — the feeder re-arms it once it is approved after they close
+    # its card waits on an open issue — the feeder enqueues it once it is approved after they close
     blockers = github.open_blockers(cfg, number)
     if blockers:
         common.log(job, f"card #{number} {github.waits_line(blockers)} — the pull request is left unarmed")
