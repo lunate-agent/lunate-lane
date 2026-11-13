@@ -176,8 +176,8 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    decisions** (the grill-me questions it answered itself). It requests changes **only for a blocking finding**: an
    acceptance check not met, a behaviour or spec defect, a red or missing required gate, a missing changelog
    fragment or archive, an OpenSpec lifecycle violation, a scope violation (a change outside the card's
-   `area/*`, or to a file another open pull request also changes — the brief lists both; a small cleanup in the
-   card's own area is not one), and a test the acceptance asks for that would pass with the change reverted (any
+   `area/*`, which the brief names; a small cleanup in the card's own area is not one — and overlap with another
+   open pull request never is: a merge conflict is a rework already), and a test the acceptance asks for that would pass with the change reverted (any
    other such test is non-blocking). Everything else — wording, style, the pull request's
    description, suggestions — goes under **Non-blocking** in an approval. Test evidence is CI's: the reviewer
    never asks the worker which tests it ran. A **`NEEDS-PERSON:`** line counts only at the start of a line, in a

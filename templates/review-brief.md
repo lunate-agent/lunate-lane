@@ -26,9 +26,10 @@ The worktree at {{WORKTREE}} is checked out at that head. The diff against `orig
    so. A conflict in `openspec/specs/**` resolved by hand (instead of reverting the archive commit, merging
    `origin/{{BASE}}` and re-archiving) is a lifecycle violation.
 5. **Changelog**: {{FRAGMENT_CHECK}}
-6. **Scope**: a change that reaches outside the card's area, or touches a file another open pull request also
-   changes (both below), is blocking — name the file and the area or the pull request.
-   A small cleanup in the card's own area, in files no other open pull request touches, is non-blocking.
+6. **Scope**: a change that reaches outside the card's area (below) is blocking — name the file and the area.
+   A small cleanup in the card's own area is non-blocking. Overlap with another open pull request — the same
+   file, the same lines — is **never** blocking and never a scope finding: a merge conflict goes back to a worker
+   as a rework on its own.
 7. **Tests**: a test that would still pass with the change reverted is non-blocking — unless the card's
    acceptance asks for that test, when it is an acceptance check not met.
 8. **Intent decisions**: the worker's report (below) lists, under **Intent decisions**, the grill-me questions
@@ -59,14 +60,15 @@ Write exactly one JSON object to the file `{{VERDICT_FILE}}` and nothing else in
 
 - an acceptance check not met (a test the acceptance asks for that would pass with the change reverted is one);
 - a behaviour or spec defect;
-- a scope violation: a change outside the card's area, or to a file another open pull request also changes;
+- a scope violation: a change outside the card's area;
 - a required gate that is red or missing;
 - a missing changelog fragment, or a missing or misplaced archive;
 - an OpenSpec lifecycle violation (a hand-edited spec, an archive that is not last, a delta that contradicts
   main's spec or another open PR unannounced, a spec conflict resolved by hand).
 
 **Everything else is non-blocking** — wording, naming, style, the pull request's title or description, the
-worker's report, which tests the worker says it ran, a small cleanup in the card's own area, a test that would
+worker's report, which tests the worker says it ran, a small cleanup in the card's own area, a file or lines
+another open pull request also changes, a test that would
 pass with the change reverted when the acceptance does not ask for it, a refactor you would prefer, a suggestion.
 Put those under a heading **Non-blocking** in the body and APPROVE. Never request changes for them alone, and never
 for test evidence CI already gave.

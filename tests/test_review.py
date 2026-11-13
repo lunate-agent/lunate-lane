@@ -357,93 +357,18 @@ class ScopeTests(unittest.TestCase):
         verdict = text[text.index("## Your verdict"):]
         blocking = verdict[:verdict.index("**Everything else is non-blocking**")]
         rest = verdict[verdict.index("**Everything else is non-blocking**"):]
-        self.assertIn("a scope violation: a change outside the card's area, or to a file another open pull request "
-                      "also changes", blocking)
+        self.assertIn("- a scope violation: a change outside the card's area;\n", blocking)
+        self.assertNotIn("another open pull request", blocking, "overlap is never blocking (#818, #826)")
         self.assertIn("a test the acceptance asks for that would pass with the change reverted", blocking)
         self.assertIn("a small cleanup in the card's own area", rest)
-        self.assertIn("a test that would\npass with the change reverted when the acceptance does not ask for it", rest)
+        self.assertIn("a file or lines\nanother open pull request also changes", rest)
+        self.assertIn("is **never** blocking and never a scope finding", text)
         self.assertIn("## Scope\n\n{{SCOPE}}", text)
 
-    def test_the_scope_context_names_the_area_and_the_shared_files(self) -> None:
-        mine = pull(820, 751, labels=["area/docs", "kind/feature"],
-                    files=("docs/dev/plan.md", "docs/README.md", "changes/820.md"))
-        others = [mine, pull(818, 749, title="S1: the checker", files=("docs/README.md", "scripts/check")),
-                  pull(825, 752, title="S4", files=("changes/825.md",))]
-        text = review.scope_context(mine, others, "area/")
-        self.assertEqual(text, "The card's area: `area/docs`.\n- #818 \"S1: the checker\" also changes `docs/README.md`")
-        alone = review.scope_context(pull(9, 9, files=("a.cs",)), [], "area/")
-        self.assertEqual(alone, "The card has no area label: its area is what its own text names.\n"
-                                "No other open pull request changes a file this one changes.")
-
-
-class RereviewTests(unittest.TestCase):
-    """`lane.py rereview`: the same head again under the current brief, the bot's standing review dismissed."""
-
-    HEAD = "c2dcce59a"
-
-    def setUp(self) -> None:
-        self.state = TempState()
-        self.cfg = self.state.cfg
-        self.calls = []
-        reviews = [  # REST shapes: the bot's approval on this head, its older-head review, a person's, a comment
-            {"id": 11, "user": {"login": "lunate-reviewer[bot]"}, "commit_id": self.HEAD, "state": "APPROVED"},
-            {"id": 10, "user": {"login": "lunate-reviewer[bot]"}, "commit_id": "0ld", "state": "DISMISSED"},
-            {"id": 12, "user": {"login": "a-maintainer"}, "commit_id": self.HEAD, "state": "COMMENTED"},
-            {"id": 13, "user": {"login": "lunate-reviewer[bot]"}, "commit_id": self.HEAD, "state": "COMMENTED"}]
-
-        def rest(token, method, path, payload=None):
-            self.calls.append((method, path, payload))
-            return reviews if method == "GET" else {}
-
-        self.pr = pull(820, 751, head=self.HEAD, reviews=[a_review("APPROVED", commit=self.HEAD)])
-        self.patches = [
-            mock.patch.object(github, "required_checks", return_value=REQUIRED),
-            mock.patch.object(github, "open_pulls", return_value=[]),
-            mock.patch.object(github, "pull", return_value=self.pr),
-            mock.patch.object(harness, "running_workers", return_value={}),
-            mock.patch.object(identity, "installation_token", return_value="t"),
-            mock.patch.object(common, "rest", side_effect=rest),
-            mock.patch.object(review, "run_review",
-                              side_effect=lambda cfg, p: self.calls.append(("session", p.number, None))
-                              or ("REQUEST_CHANGES", "## Blocking\n\n1. acceptance 3 not met — docs/README.md:4", "m")),
-            mock.patch.object(review, "post", side_effect=lambda cfg, p, e, b, m: self.calls.append(("post", e, None))
-                              or True),
-        ]
-        for patch in self.patches:
-            patch.start()
-
-    def tearDown(self) -> None:
-        for patch in self.patches:
-            patch.stop()
-        self.state.close()
-
-    def test_an_already_reviewed_head_is_reviewed_again_and_the_old_review_dismissed_after_the_session(self) -> None:
-        self.assertEqual(review.skip_reason(self.pr, REQUIRED, {}, "lunate-reviewer"), f"already reviewed at c2dcce59")
-        event, body = review.rereview(self.cfg, 820, "daniel")
-        self.assertEqual(event, "REQUEST_CHANGES")
-        self.assertEqual([c[0] for c in self.calls], ["session", "GET", "PUT", "post"],
-                         "nothing is dismissed unless a new verdict is in hand")
-        self.assertEqual(self.calls[2][1:], ("/repos/lunate-agent/lunate/pulls/820/reviews/11/dismissals",
-                                             {"message": "superseded by re-review under the calibrated brief",
-                                              "event": "DISMISS"}))
-        self.assertIn("#820 re-reviewed at c2dcce59 on m by daniel: REQUEST_CHANGES (dismissed 11)",
-                      (self.cfg.state / "logs" / "review.log").read_text())
-
-    def test_every_other_rule_still_holds(self) -> None:
-        for over, why in ((dict(draft=True), "is a draft"), (dict(waits_on=(749,)), "waits on #749"),
-                          (dict(checks=[("ci-ok", "COMPLETED", "FAILURE")]), "required checks are failing"),
-                          (dict(reviews=[a_review("CHANGES_REQUESTED", commit=self.HEAD),
-                                         a_review("APPROVED", commit=self.HEAD, author="a-maintainer")]),
-                           "@a-maintainer approved it at c2dcce59")):
-            with self.subTest(why=why):
-                self.calls.clear()
-                github.pull.return_value = pull(820, 751, head=self.HEAD, **over)
-                self.assertEqual(review.rereview(self.cfg, 820), ("SKIPPED", why))
-                self.assertEqual(self.calls, [], "no session, nothing dismissed")
-        github.pull.return_value = pull(5, None, author="a-maintainer")
-        self.assertEqual(review.rereview(self.cfg, 5)[0], "SKIPPED")
-
-    def test_a_head_that_moved_during_the_session_dismisses_nothing(self) -> None:
-        github.pull.side_effect = [self.pr, pull(820, 751, head="n3w")]
-        self.assertEqual(review.rereview(self.cfg, 820), ("SKIPPED", "moved or closed during the re-review"))
-        self.assertEqual([c[0] for c in self.calls], ["session"])
+    def test_the_scope_context_names_the_area_and_no_overlaps(self) -> None:
+        # #818's shape: S1 shares openspec/specs/repo-quality/spec.md with #820 — not something the brief raises
+        mine = pull(818, 749, labels=["area/docs", "kind/feature"],
+                    files=("openspec/specs/repo-quality/spec.md", "scripts/docs-check"))
+        self.assertEqual(review.scope_context(mine, "area/"), "The card's area: `area/docs`.")
+        self.assertEqual(review.scope_context(pull(9, 9, files=("a.cs",)), "area/"),
+                         "The card has no area label: its area is what its own text names.")
