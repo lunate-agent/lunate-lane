@@ -99,10 +99,17 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
          .venv/bin/python scripts/lane.py status 794                  # worker, idle runs, rework rounds, parked and why
          .venv/bin/python scripts/lane.py park 794 --reason "waits on the API decision"
          .venv/bin/python scripts/lane.py unpark 794 --reason "decided in #820"   # unparked, both counts cleared
+         .venv/bin/python scripts/lane.py rereview 820                # review again at its head, today's brief
+         .venv/bin/python scripts/lane.py rereview --all-open         # every open worker pull request, in turn
 
      Park and unpark take the feeder's lock (refused while a tick runs — try again in a minute); unpark is
      refused while a worker runs the card. Both need a `--reason` and write a line to `<state>/logs/lane.log`
      with the time, who ran it (login, `$LANE_ACTOR` if set, parent process, terminal or not) and the reason. A
+     `rereview` takes the review job's lock and reviews a ready, green worker pull request again at its current
+     head even if the bot reviewed it there (every other review rule holds: not a draft, not waiting on an open
+     issue, no worker running, a person's approval stands); only once the new verdict is in does it dismiss the
+     bot's standing review on that head ("superseded by re-review under the calibrated brief") and post the new
+     one. It prints each verdict, and a request for changes' blocking findings one line each. A
      park lifted any other way (its attempts record edited or removed by hand) is named in `feed.log` at the
      next tick. A card parked by hand shows in the digest as "parked by hand" with
      its reason.

@@ -32,9 +32,11 @@ class ReviewError(LaneError):
     """The review could not be run, or produced no usable verdict."""
 
 
-def skip_reason(p: github.Pull, required: frozenset, running: dict, reviewer: str, others=()) -> str | None:
+def skip_reason(p: github.Pull, required: frozenset, running: dict, reviewer: str, others=(),
+                rereview: bool = False) -> str | None:
     """Why this pull request is not reviewed now, or None if it is due. `others` are the open pull requests (any
-    author, with their files): one that is older and touches the same OpenSpec capability holds this one back."""
+    author, with their files): one that is older and touches the same OpenSpec capability holds this one back.
+    A `rereview` (`lane.py rereview`) reviews a head the bot already reviewed; every other rule holds."""
     if p.state != "OPEN":
         return f"is {p.state.lower()}"
     if p.draft:
@@ -50,7 +52,7 @@ def skip_reason(p: github.Pull, required: frozenset, running: dict, reviewer: st
     checks = github.check_state(p, required)
     if checks != "green":
         return f"required checks are {checks}"
-    if github.reviewer_verdict(p, reviewer) is not None:
+    if not rereview and github.reviewer_verdict(p, reviewer) is not None:
         return f"already reviewed at {p.head[:8]}"
     person = github.person_approved(p, reviewer)
     if person:  # the bot's review was dismissed and a person approved: reviewing again would overrule them
@@ -134,6 +136,57 @@ def post(cfg: common.Config, p: github.Pull, event: str, body: str, model: str) 
                           f"not {cfg.reviewer_app} — check app.json; a submitted review cannot be deleted, "
                           "dismiss it by hand")
     return True
+
+
+SUPERSEDED = "superseded by re-review under the calibrated brief"
+
+
+def dismiss_standing(cfg: common.Config, number: int, head: str, token: str) -> list[int]:
+    """Dismiss the reviewer identity's approvals and requests for changes on `head`, as that identity. Returns the
+    dismissed review ids. A listing that may be cut off is refused."""
+    reviews = common.rest(token, "GET", f"/repos/{cfg.slug}/pulls/{int(number)}/reviews?per_page=100")
+    if not isinstance(reviews, list):
+        raise ReviewError(f"#{number}'s reviews came back as something other than a list")
+    if len(reviews) >= 100:
+        raise ReviewError(f"#{number} has 100 or more reviews — refusing to dismiss on part of them")
+    standing = [r["id"] for r in reviews if github.login(r.get("user")) == cfg.reviewer_app
+                and r.get("commit_id") == head and r.get("state") in ("APPROVED", "CHANGES_REQUESTED")]
+    for review_id in standing:
+        common.rest(token, "PUT", f"/repos/{cfg.slug}/pulls/{int(number)}/reviews/{review_id}/dismissals",
+                    {"message": SUPERSEDED, "event": "DISMISS"})
+    return standing
+
+
+def rereview(cfg: common.Config, number: int, actor: str = "") -> tuple[str, str]:
+    """Review a ready, green worker pull request again at its current head under the current brief, even if the bot
+    reviewed that head already: run the session, then dismiss the bot's standing review on the head ("superseded
+    by re-review under the calibrated brief") and post the new one. Returns (event, body), or ('SKIPPED', why).
+    The caller holds the review job's lock."""
+    required = github.required_checks(cfg)
+    others = github.open_pulls(cfg)
+    p = github.pull(cfg, number)
+    if p.author != cfg.worker_app:
+        return "SKIPPED", f"is not a {cfg.worker_app} pull request"
+    reason = skip_reason(p, required, harness.running_workers(), cfg.reviewer_app, others, rereview=True)
+    if reason:
+        common.log(JOB, f"#{p.number} not re-reviewed — {reason}")
+        return "SKIPPED", reason
+    event, body, model = run_review(cfg, p)
+    now = github.pull(cfg, p.number)
+    if now.state != "OPEN" or now.head != p.head:
+        common.log(JOB, f"#{p.number} moved or closed during the re-review — nothing dismissed or posted")
+        return "SKIPPED", "moved or closed during the re-review"
+    try:
+        token = identity.installation_token("reviewer")
+    except identity.IdentityError as exc:
+        raise ReviewError(f"the reviewer identity could not mint a token: {exc}") from exc
+    dismissed = dismiss_standing(cfg, p.number, p.head, token)
+    if not post(cfg, p, event, body, model):
+        return "SKIPPED", "not posted"
+    by = f" by {actor}" if actor else ""
+    common.log(JOB, f"#{p.number} re-reviewed at {p.head[:8]} on {model}{by}: {event}"
+                    + (f" (dismissed {', '.join(map(str, dismissed))})" if dismissed else ""))
+    return event, body
 
 
 def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str, str]:
