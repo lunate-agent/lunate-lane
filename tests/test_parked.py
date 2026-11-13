@@ -244,3 +244,27 @@ class MergeFirstTests(unittest.TestCase):
                                ("", None)):
             with self.subTest(text=text):
                 self.assertEqual(github.merge_first(text), expected)
+
+
+class SeamTests(unittest.TestCase):
+    """The seams a test replaces must themselves reach GitHub's helpers (the first live backfill found `_call`
+    calling itself: every test had replaced it)."""
+
+    def test_each_seam_calls_through_to_its_helper(self) -> None:
+        from scripts import common
+        with mock.patch.object(open_pr, "_api", return_value={"ok": 1}) as api, \
+                mock.patch.object(open_pr, "_worker_token", return_value="t") as token, \
+                mock.patch.object(common, "gh_json", return_value={"state": "open"}) as gh_json, \
+                mock.patch.object(github, "open_pulls", return_value=[pull(826, 807), pull(9, 3)]), \
+                mock.patch.object(github, "open_blockers", return_value=(755,)), \
+                mock.patch.object(github, "pull", return_value=pull(827, 755)):
+            self.assertEqual(parked._call("t", "POST", "/x", {"a": 1}), {"ok": 1})
+            api.assert_called_once_with("t", "POST", "/x", {"a": 1})
+            self.assertEqual(parked._token(), "t")
+            token.assert_called_once_with()
+            self.assertEqual(parked._get("repos/o/r/issues/1"), {"state": "open"})
+            gh_json.assert_called_once_with("api", "repos/o/r/issues/1")
+            cfg = common.load_config()
+            self.assertEqual(parked._card_pulls(cfg, 807), {826})
+            self.assertEqual(parked._blockers(cfg, 807), (755,))
+            self.assertEqual(parked._pr_card(cfg, 827), 755)

@@ -27,7 +27,7 @@ def _token() -> str:
 
 
 def _call(token: str, method: str, path: str, payload: dict | None = None) -> dict:
-    return _call(token, method, path, payload)
+    return open_pr._api(token, method, path, payload)
 
 
 def _get(path: str) -> dict:
@@ -39,7 +39,7 @@ def _card_pulls(cfg: common.Config, card: int) -> set:
 
 
 def _blockers(cfg: common.Config, card: int) -> tuple:
-    return _blockers(cfg, card)
+    return github.open_blockers(cfg, card)
 
 
 def _pr_card(cfg: common.Config, number: int) -> int | None:
