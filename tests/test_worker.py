@@ -729,3 +729,27 @@ class ReadyRunDriveTests(DriveCase):
         self.assertIn("done: 1. met", report[1])
         self.assertEqual(parking[0], 77)
         self.assertIn("convert it to a draft and mark it ready again", parking[1])
+
+
+class NeedsPersonDriveTests(DriveCase):
+    def test_a_worker_that_says_needs_person_is_pushed_unarmed_and_parked_at_once(self) -> None:
+        with self.fake_session(text="1. met. 2. not met.\\nNEEDS-PERSON: check 2 needs a maintainer decision on the API"):
+            self.assertEqual(worker.drive(self.cfg, 3, None), 1)
+        self.assertEqual(self.dispatched, [False, False], "never armed")
+        self.assertEqual(harness.parked_info(), {3: ("person", "check 2 needs a maintainer decision on the API")})
+        report, parking = self.comments
+        self.assertIn("the worker says it needs a person: check 2 needs a maintainer decision", report[1])
+        self.assertEqual(parking[0], 77)
+        self.assertIn("card #3 is parked", parking[1])
+
+    def test_with_no_commits_the_issue_gets_the_reason(self) -> None:
+        with self.fake_session(commit=False, text="NEEDS-PERSON: the failure is in src/Other.cs, which the card does not touch"):
+            worker.drive(self.cfg, 3, None)
+        self.assertEqual([c[0] for c in self.comments], [3])
+        self.assertIn("the failure is in src/Other.cs", self.comments[0][1])
+        self.assertEqual(harness.parked_cards(), frozenset({3}))
+
+    def test_the_brief_tells_the_worker_how_to_stop(self) -> None:
+        text = worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), None, "", True)
+        self.assertIn("NEEDS-PERSON: <what has to be decided or supplied", text)
+        self.assertIn("evidence\ncan only come from a real release", text)

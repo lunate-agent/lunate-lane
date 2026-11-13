@@ -549,3 +549,20 @@ class CiRunsTests(unittest.TestCase):
             with self.subTest(data=data), mock.patch.object(common, "graphql", return_value=data):
                 with self.assertRaises(GhError):
                     github.ci_runs(common.config(), "a" * 40)
+
+
+class NeedsPersonTests(unittest.TestCase):
+    """C: the NEEDS-PERSON line, in the forms a model writes it."""
+
+    def test_the_reason_is_read_from_the_first_line_that_says_it(self) -> None:
+        for text, reason in (
+                ("done.\nNEEDS-PERSON: a maintainer must pick the default locale\nmore", "a maintainer must pick the default locale"),
+                ("**NEEDS-PERSON:** check 4 needs a real release", "check 4 needs a real release"),
+                ("`NEEDS-PERSON` — the failure is in src/Other.cs, untouched", "the failure is in src/Other.cs, untouched"),
+                ("NEEDS-PERSON", "(no reason given)")):
+            with self.subTest(text=text):
+                self.assertEqual(github.needs_person(text), reason)
+
+    def test_no_line_is_none(self) -> None:
+        for text in ("", "all checks met", "needs a person? no"):
+            self.assertIsNone(github.needs_person(text))

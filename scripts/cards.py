@@ -9,6 +9,7 @@ be tested without a network.
     rework: a worker PR whose reviewer requested changes on its current head goes back to a worker on its own
             branch, before any new card, and does not add to WIP — its card is already in flight; so does a
             stuck one, and an orphaned draft (a draft with no worker running and the card not parked)
+    person: a request for changes whose body says NEEDS-PERSON parks the card instead of a rework
 """
 
 from __future__ import annotations
@@ -18,9 +19,10 @@ import json
 import pathlib
 
 from scripts.common import ConfigError
-from scripts.github import Card, Pull, reviewer_verdict, stuck_reason
+from scripts.github import Card, Pull, needs_person, reviewer_verdict, stuck_reason
 
 ORPHANED = "orphaned draft"
+PERSON = "needs a person: "
 
 
 @dataclasses.dataclass(frozen=True)
@@ -29,6 +31,11 @@ class Launch:
     rework_pr: int | None
     areas: frozenset
     reason: str = ""  # why a rework: changes requested, why the pull request is stuck, or an orphaned draft
+
+    @property
+    def person(self) -> str | None:
+        """The reviewer's NEEDS-PERSON reason: this launch parks the card instead of starting a worker."""
+        return self.reason[len(PERSON):] if self.reason.startswith(PERSON) else None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -69,9 +76,13 @@ def rework_reason(p: Pull, reviewer_app: str, required: frozenset = frozenset(),
                   reran: frozenset = frozenset()) -> str | None:
     """Why this pull request goes back to a worker: the reviewer's request for changes on the current head (a
     push since then clears it), a stuck pull request — red, conflicting, or out of the queue (#8) — or a draft
-    nobody is working on (the caller leaves out running and parked cards)."""
+    nobody is working on (the caller leaves out running and parked cards). A request for changes that says
+    NEEDS-PERSON is `needs a person: <reason>`: the feeder parks the card instead."""
     if reviewer_verdict(p, reviewer_app) == "CHANGES_REQUESTED":
-        return "changes requested"
+        bodies = [r.body for r in p.reviews if r.author == reviewer_app and r.commit == p.head
+                  and r.state == "CHANGES_REQUESTED"]
+        person = needs_person(bodies[-1]) if bodies else None
+        return PERSON + person if person else "changes requested"
     stuck = stuck_reason(p, required, reviewer_app, reran)
     if stuck:
         return stuck

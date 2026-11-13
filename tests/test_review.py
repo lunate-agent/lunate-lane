@@ -283,3 +283,16 @@ class ErrorTypeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class NeedsPersonVerdictTests(unittest.TestCase):
+    setUp, tearDown = VerdictTests.setUp, VerdictTests.tearDown
+
+    def test_an_approval_with_needs_person_is_posted_as_a_request_for_changes(self) -> None:
+        body = "1. met.\n4. cannot tell.\nNEEDS-PERSON: check 4 needs a real release"
+        self.path.write_text(json.dumps({"event": "APPROVE", "body": body}))
+        self.assertEqual(review.read_verdict(self.path), ("REQUEST_CHANGES", body))
+
+    def test_the_review_brief_offers_needs_person_for_what_no_pull_request_can_evidence(self) -> None:
+        text = (review.common.ROOT / "templates" / "review-brief.md").read_text()
+        self.assertIn("NEEDS-PERSON: <the check, by number, and why no pull request can evidence it>", text)

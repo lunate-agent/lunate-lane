@@ -98,6 +98,17 @@ def tick(dry_run: bool = False) -> None:
     for launch in launches:
         what = (f"rework of #{launch.rework_pr} for card #{launch.card} ({launch.reason})" if launch.rework_pr
                 else f"card #{launch.card}")
+        if launch.person is not None:  # the reviewer said a person must decide: parked at once, never reworked
+            if dry_run:
+                common.log(JOB, f"would park card #{launch.card} — the review of #{launch.rework_pr} says NEEDS-PERSON: "
+                                f"{launch.person}")
+                continue
+            if harness.park(launch.card, "person", launch.person):
+                worker.park(cfg, launch.card, launch.rework_pr, "person",
+                            detail=f"the review of #{launch.rework_pr} says it needs a person: {launch.person}")
+            common.log(JOB, f"parked card #{launch.card} — the review of #{launch.rework_pr} says NEEDS-PERSON: "
+                            f"{launch.person}")
+            continue
         rounds = harness.rework_rounds(launch.card, launch.rework_pr) if launch.rework_pr else 0
         if rounds >= harness.REWORK_LIMIT:  # the cap holds whatever the cause (#9)
             if dry_run:

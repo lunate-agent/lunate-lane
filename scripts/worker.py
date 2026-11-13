@@ -298,16 +298,35 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
     return finish(cfg, number, worktree, outcome, start_head, session_log, resume)
 
 
+def person_reason(cfg: common.Config, report: str) -> str | None:
+    """The worker's `NEEDS-PERSON: <reason>`, if its final message has one — the reason withheld when it holds
+    something secret-shaped, as the report itself would be."""
+    reason = github.needs_person(report)
+    if reason is None:
+        return None
+    kind = harness.secret_kind(reason, (harness.read_credential(cfg),))
+    return f"(the reason is withheld: it holds something shaped like a {kind})" if kind else reason
+
+
 def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: harness.Outcome, start_head: str,
            session_log: pathlib.Path, resume: bool = False) -> int:
     job = f"worker-{number}"
     found = problems(cfg, outcome, worktree, start_head, resume)
+    try:  # read before the push, for its NEEDS-PERSON; an unreadable log never holds the commits back
+        report = harness.last_text(session_log).strip() or "(the session left no final message)"
+    except harness.HarnessError as exc:
+        report = f"(the session's final message could not be read: {exc})"
+    person = person_reason(cfg, report)
+    if person is not None:  # the worker stopped for a person: never armed, and the card parks at once
+        found.append(f"the worker says it needs a person: {person}")
     idle, parked_now = harness.note_run(number, common.wt_git(cfg, worktree, "rev-parse", "HEAD") != start_head)
     if idle:
         common.log(job, f"no new commit — idle run {idle} of {harness.IDLE_RUN_LIMIT}")
     if dispatch_card._count(cfg.checkout, f"wt/issue-{number}") == 0:
         common.log(job, "the session ended with no commits — no pull request. " + "; ".join(found))
-        if parked_now:
+        if person is not None:
+            park_for_person(cfg, number, number, person)
+        elif parked_now:
             park(cfg, number, number, "idle", idle)
         return 1
     not_ready = ""
@@ -334,7 +353,6 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
     elif found:
         lines.append(f"**Incomplete — the pull request stays a draft and auto-merge is {result['auto_merge']}:** "
                      + "; ".join(found) + ".")
-    report = harness.last_text(session_log).strip() or "(the session left no final message)"
     kind = harness.secret_kind(report, (harness.read_credential(cfg),))
     if kind:
         common.log(job, f"the session's final message holds something shaped like a {kind} — not posted; "
@@ -346,12 +364,20 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
               if result.get("queue_method") else "")
     common.log(job, f"#{result['number']} pushed at {head}, auto-merge {result['auto_merge']}{method}"
                + (f" — {'; '.join(found)}" if found else ""))
-    if not_ready:
+    if person is not None:
+        park_for_person(cfg, number, result["number"], person)
+    elif not_ready:
         if harness.park(number, "ready", not_ready):
             park(cfg, number, result["number"], "ready", detail=not_ready)
     elif parked_now:
         park(cfg, number, result["number"], "idle", idle)
     return 1 if found else 0
+
+
+def park_for_person(cfg: common.Config, card: int, target: int, reason: str) -> None:
+    """The worker wrote NEEDS-PERSON: park the card now, with its reason, whatever the counters say."""
+    if harness.park(card, "person", reason):
+        park(cfg, card, target, "person", detail=f"the worker says it needs a person: {reason}")
 
 
 PARK_WHY = {
@@ -362,6 +388,7 @@ PARK_WHY = {
 
 PARK_ADVICE = {
     "default": "split or clarify the card, or push a fix",
+    "person": "make the decision or supply what the reason names, on the card or the pull request",
     "ready": "the pull request is ready with auto-merge off; convert it to a draft and mark it ready again, and "
              "check that CI starts a run that sees it as ready",
 }

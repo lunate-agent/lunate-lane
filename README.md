@@ -65,7 +65,9 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      branch's work is already complete the run may end with no new commit and the pull request is marked ready.
      It counts an idle run and a rework round at launch like any rework, so it is parked, with a comment, at
      either cap. The running workers are read before the pull requests, so a worker finishing between the reads
-     never makes its own pull request look orphaned.;
+     never makes its own pull request look orphaned. A request for changes whose body says **`NEEDS-PERSON:
+     <reason>`** is not reworked: the card is parked at once with that reason, and the comment and the digest
+     say it;
    - **then new cards**, in order: the pins file (if any), then `kind/bug`, then cards that other open issues
      depend on (native GitHub dependency edges), then oldest first. A card waiting on an open issue is skipped;
      so is a card any open pull request (any author) already carries or closes.
@@ -101,7 +103,10 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    written); when the session ends with commits the branch is pushed again, the session's final report is posted
    on the pull request, and — only if the run was clean (exit 0, not stalled, nothing uncommitted, a new commit, a
    real final message) — the pull request is marked ready and then auto-merge is armed. Otherwise it stays a draft
-   with auto-merge off, with a comment naming why, and the next feeder tick relaunches it as an orphaned draft. Marking ready waits first for GitHub to show the pushed
+   with auto-merge off, with a comment naming why, and the next feeder tick relaunches it as an orphaned draft. A
+   final report with a **`NEEDS-PERSON: <reason>`** line (a finding nobody can meet inside the card: a
+   maintainer's decision, a failure in code the diff does not touch, evidence only a real release gives) is never
+   armed: the card is parked at once with that reason. Marking ready waits first for GitHub to show the pushed
    head, then for the push's own (draft) CI run to exist — marked ready earlier, the late draft run cancelled the
    ready run through CI's concurrency group on #816. After marking ready the lane waits for a CI run that saw the
    pull request as ready (its `checks.ready_job`, `plan`, ran instead of being skipped) and is not cancelled on two
@@ -168,8 +173,8 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
 | `scripts/dispatch_card.py` | A card becomes (or reuses) its pull request: reads the issue, checks the branch, writes the body. |
 | `scripts/open_pr.py` | Pushes and opens a pull request as `lunate-worker`, optionally arms auto-merge, comments as the worker. |
 | `scripts/identity.py` | Mints installation tokens for either App. |
-| `templates/worker-brief.md` | The worker's fixed brief: OpenSpec lifecycle, archive last, the changelog fragment, run only the named tests. |
-| `templates/review-brief.md` | The reviewer's brief and the verdict file format. |
+| `templates/worker-brief.md` | The worker's fixed brief: OpenSpec lifecycle, archive last, the changelog fragment, run only the named tests, and `NEEDS-PERSON` to stop for a person. |
+| `templates/review-brief.md` | The reviewer's brief and the verdict file format. A check no pull request can evidence gets `NEEDS-PERSON` (an approval carrying it is posted as a request for changes). |
 
 ## Configuration
 

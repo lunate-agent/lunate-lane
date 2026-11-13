@@ -485,6 +485,21 @@ def orphaned_draft(p: Pull, running, parked) -> bool:
     return p.state == "OPEN" and p.draft and p.card is not None and p.card not in running and p.card not in parked
 
 
+NEEDS_PERSON = re.compile(r"NEEDS-PERSON\b[*_`]*\s*[:—–-]?\s*(.*)")
+REASON_LIMIT = 300
+
+
+def needs_person(text: str) -> str | None:
+    """The reason after the first `NEEDS-PERSON:` in a worker's report or a review body, or None when there is no
+    such line. A finding nobody can meet inside the card — a maintainer's decision, a failure in code the diff
+    does not touch, evidence only a real release gives — stops the card for a person instead of another round."""
+    match = NEEDS_PERSON.search(text or "")
+    if not match:
+        return None
+    reason = match.group(1).strip().strip("*_` ").strip()
+    return reason[:REASON_LIMIT] or "(no reason given)"
+
+
 class CiRun(typing.NamedTuple):
     """One run of the pull-request CI workflow on a head. `ready_job` is the status or conclusion of the job that
     only runs on a ready pull request ('SKIPPED' on a draft), '' while it does not exist yet."""

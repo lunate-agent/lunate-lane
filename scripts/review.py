@@ -98,6 +98,8 @@ def read_verdict(path: pathlib.Path) -> tuple[str, str]:
     body = data.get("body")
     if not isinstance(body, str) or not body.strip():
         raise ReviewError("the verdict has no body")
+    if data["event"] == "APPROVE" and github.needs_person(body) is not None:
+        return "REQUEST_CHANGES", body.strip()  # a check nobody can evidence is not an approval
     return data["event"], body.strip()
 
 

@@ -258,3 +258,13 @@ class OrphanTests(unittest.TestCase):
         for p in (pull(816, 780), pull(816, 780, draft=True, state="CLOSED")):
             with self.subTest(p=p):
                 self.assertIsNone(cards.rework_reason(p, "lunate-reviewer", REQUIRED))
+
+
+class NeedsPersonPlanTests(unittest.TestCase):
+    def test_a_request_for_changes_that_says_needs_person_is_a_park_not_a_rework(self) -> None:
+        body = "1. not met.\n\nNEEDS-PERSON: check 3 can only be evidenced by a real release"
+        p = pull(813, 794, reviews=[review("CHANGES_REQUESTED", body=body)])
+        launch = plan([], worker_pulls=[p])[0][0]
+        self.assertEqual(launch.reason, "needs a person: check 3 can only be evidenced by a real release")
+        self.assertEqual(launch.person, "check 3 can only be evidenced by a real release")
+        self.assertIsNone(plan([], worker_pulls=[pull(813, 794, reviews=[review("CHANGES_REQUESTED")])])[0][0].person)
