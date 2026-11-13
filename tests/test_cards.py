@@ -174,8 +174,9 @@ class StuckTests(unittest.TestCase):
             (1, 101, "required checks failing"), (2, 102, "conflicts with the base branch"),
             (3, 103, "out of the merge queue after approval (merge_conflict)")])
 
-    def test_a_draft_a_running_card_or_a_parked_card_is_not_sent_back(self) -> None:
-        self.assertEqual(started(plan([], worker_pulls=[pull(101, 1, checks=RED, draft=True)])[0]), [])
+    def test_a_running_card_or_a_parked_card_is_not_sent_back(self) -> None:
+        self.assertEqual(started(plan([], worker_pulls=[pull(101, 1, checks=RED, draft=True)],
+                                      running={1: frozenset()})[0]), [])
         self.assertEqual(started(plan([], worker_pulls=[pull(101, 1, checks=RED)], running={1: frozenset()})[0]), [])
         launches, notes = plan([], worker_pulls=[pull(101, 1, mergeable="CONFLICTING")], parked={1})
         self.assertEqual(started(launches), [])
@@ -226,3 +227,34 @@ class ParkedTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OrphanTests(unittest.TestCase):
+    """A: a worker draft with no worker on it and its card not parked goes back to a worker (#816)."""
+
+    # #816 the morning after: its rework session ended with no new commit, so the finish left it a draft; its
+    # head carries ci-ok's deliberate draft failure, and nothing would ever touch it again
+    P816 = pull(816, 780, head="3d35f9855", draft=True, checks=RED)
+
+    def test_816s_shape_is_relaunched_as_an_orphaned_draft(self) -> None:
+        launches, _ = plan([], worker_pulls=[self.P816])
+        self.assertEqual([(l.card, l.rework_pr, l.reason) for l in launches], [(780, 816, "orphaned draft")])
+
+    def test_an_orphan_goes_back_before_new_cards_and_adds_nothing_to_wip(self) -> None:
+        launches, _ = plan([card(5)], worker_pulls=[self.P816], rules=cards.Rules(2, *list(vars(RULES).values())[1:]))
+        self.assertEqual(started(launches), [(780, 816), (5, None)])
+
+    def test_a_running_worker_is_not_an_orphan_and_a_parked_card_is_said_every_tick(self) -> None:
+        self.assertEqual(started(plan([], worker_pulls=[self.P816], running={780: frozenset()})[0]), [])
+        launches, notes = plan([], worker_pulls=[self.P816], parked={780})
+        self.assertEqual(started(launches), [])
+        self.assertIn("#816 needs rework (orphaned draft) but card #780 is parked — left for a person", notes)
+
+    def test_a_request_for_changes_on_a_draft_keeps_its_own_reason(self) -> None:
+        p = pull(816, 780, head="h1", draft=True, reviews=[review("CHANGES_REQUESTED")])
+        self.assertEqual(plan([], worker_pulls=[p])[0][0].reason, "changes requested")
+
+    def test_a_ready_or_closed_pull_request_is_never_an_orphan(self) -> None:
+        for p in (pull(816, 780), pull(816, 780, draft=True, state="CLOSED")):
+            with self.subTest(p=p):
+                self.assertIsNone(cards.rework_reason(p, "lunate-reviewer", REQUIRED))

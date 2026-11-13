@@ -59,7 +59,13 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      second such failure on the same head, or any real failing step, goes back to a worker. Conflicts are resolved
      by merging `origin/main` into the branch, never by rebasing; the lane never force-pushes (a rewritten branch
      is refused). Then the named tests, the push, and a new review (the ruleset dismisses the stale approval). A
-     rework does not add to WIP — its card is already in flight;
+     rework does not add to WIP — its card is already in flight. An **orphaned draft** goes back too: a worker
+     pull request that is a draft, with no worker running its card and the card not parked — what an unclean
+     finish leaves, which nothing else would ever touch (#816). Its brief quotes the last run's reason; if the
+     branch's work is already complete the run may end with no new commit and the pull request is marked ready.
+     It counts an idle run and a rework round at launch like any rework, so it is parked, with a comment, at
+     either cap. The running workers are read before the pull requests, so a worker finishing between the reads
+     never makes its own pull request look orphaned.;
    - **then new cards**, in order: the pins file (if any), then `kind/bug`, then cards that other open issues
      depend on (native GitHub dependency edges), then oldest first. A card waiting on an open issue is skipped;
      so is a card any open pull request (any author) already carries or closes.
@@ -95,7 +101,7 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    written); when the session ends with commits the branch is pushed again, the session's final report is posted
    on the pull request, and — only if the run was clean (exit 0, not stalled, nothing uncommitted, a new commit, a
    real final message) — the pull request is marked ready and then auto-merge is armed. Otherwise it stays a draft
-   with auto-merge off, with a comment naming why, and the orchestrator takes over. A rework returns its pull
+   with auto-merge off, with a comment naming why, and the next feeder tick relaunches it as an orphaned draft. A rework returns its pull
    request to draft, with auto-merge off, before its session starts, and is made ready again only at its own clean
    finish. The draft and auto-merge state in the comment and the log are read back from
    GitHub, never assumed. Auto-merge is armed with the merge queue's own method, read from the base branch's

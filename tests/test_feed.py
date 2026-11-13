@@ -375,3 +375,45 @@ class UnreadableStateTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OrphanFeedTests(unittest.TestCase):
+    """A, through the tick: #816's shape — a draft nobody works on — is relaunched with its idle runs counted, and
+    parked with one comment at the cap; never left silent."""
+
+    tearDown = FeedTests.tearDown
+
+    def setUp(self) -> None:
+        FeedTests.setUp(self)
+        github.milestone_cards.return_value = []
+        github.open_pulls.return_value = [pull(816, 780, draft=True)]
+        github.pull.return_value = pull(816, 780, head="3d35f9855", draft=True,
+                                        checks=(("ci-ok", "COMPLETED", "FAILURE"),))
+
+    def test_an_orphaned_draft_is_relaunched_counting_idle_runs_then_parked_with_one_comment(self) -> None:
+        from scripts import open_pr
+
+        harness.note_attempt(780)  # #816's card ran once already with no new commit (its record this morning)
+        comments = []
+        with mock.patch.object(open_pr, "comment", side_effect=lambda n, body: comments.append((n, body))):
+            for _ in range(4):
+                self.assertEqual(feed.main(), 0)
+        self.assertEqual([(l.card, l.rework_pr, l.reason) for l in self.started], [(780, 816, "orphaned draft")] * 2)
+        self.assertEqual(harness.idle_runs(780), 3)
+        self.assertEqual(harness.parked_details(), {780: "idle"})
+        self.assertEqual(len(comments), 1)
+        self.assertEqual(comments[0][0], 816)
+        self.assertIn("3 worker runs in a row ended with no new commit", comments[0][1])
+        log = (self.state.cfg.state / "logs" / "feed.log").read_text()
+        self.assertIn("started rework of #816 for card #780 (orphaned draft)", log)
+        self.assertIn("parked card #780 after 3 runs with no new commit", log)
+        self.assertIn("#816 needs rework (orphaned draft) but card #780 is parked — left for a person", log)
+
+    def test_running_workers_are_read_before_the_pull_requests(self) -> None:
+        """A worker that finishes between the reads leaves its pull request ready; read the other way round, its
+        stale draft would look orphaned."""
+        order = []
+        harness.running_workers.side_effect = lambda: order.append("running") or {}
+        github.open_pulls.side_effect = lambda cfg: order.append("pulls") or [pull(816, 780, draft=True)]
+        feed.decide_all(self.state.cfg)
+        self.assertEqual(order[:2], ["running", "pulls"])

@@ -79,12 +79,16 @@ def in_flight(cfg: common.Config, pulls: list, running: dict) -> list[str]:
     return items
 
 
-def stuck(cfg: common.Config, pulls: list, required: frozenset, now: datetime.datetime) -> list[tuple]:
+def stuck(cfg: common.Config, pulls: list, required: frozenset, now: datetime.datetime,
+          running=frozenset(), parked=frozenset()) -> list[tuple]:
     """(number, why) for every open pull request that is stuck: a worker PR that is red, conflicting or out of
-    the queue (the feeder sends those back), and any pull request open for more than a day, with its state."""
+    the queue, or an orphaned draft (the feeder sends those back), and any pull request open for more than a
+    day, with its state."""
     found = []
     for p in sorted(pulls, key=lambda p: p.number):
         why = github.stuck_reason(p, required, cfg.reviewer_app) if p.author == cfg.worker_app else None
+        if why is None and p.author == cfg.worker_app and github.orphaned_draft(p, running, parked):
+            why = "orphaned draft — no worker on it; the feeder relaunches it"
         age = age_days(p.created, now)
         if why or age > 1:
             parts = [why] if why else [pull_state(p, required, cfg.reviewer_app)]
@@ -104,10 +108,10 @@ def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required
     lines.append(f"Open PRs ({len(pulls)}):" if pulls else "Open PRs: none")
     for p in sorted(pulls, key=lambda p: p.number):
         lines.append(f"  #{p.number} {p.title[:60]} — {pull_state(p, required, cfg.reviewer_app)}")
-    held = stuck(cfg, pulls, required, now)
+    parked = parked or {}
+    held = stuck(cfg, pulls, required, now, running, frozenset(parked))
     lines.append(f"Stuck ({len(held)}):" if held else "Stuck: none")
     lines += [f"  #{number} — {why}" for number, why in held]
-    parked = parked or {}
     lines.append(f"Parked cards ({len(parked)}) — delete <state>/attempts/<card>.json to unpark:" if parked
                  else "Parked cards: none")
     for number in sorted(parked):

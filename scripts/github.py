@@ -476,3 +476,10 @@ def stuck_reason(p: Pull, required: frozenset, reviewer: str, reran: frozenset =
     if reviewer_verdict(p, reviewer) == "APPROVED" and not p.in_queue and not p.auto_merge and p.queue_removal:
         return f"out of the merge queue after approval ({p.queue_removal.lower()})"
     return None
+
+
+def orphaned_draft(p: Pull, running, parked) -> bool:
+    """A worker pull request left a draft with nobody on it: no worker running its card, and the card not parked.
+    A run that does not finish cleanly leaves its pull request a draft; nothing else moves a draft, so it would
+    sit unseen (#816). The feeder relaunches it, with idle runs counted, and parks it at the cap."""
+    return p.state == "OPEN" and p.draft and p.card is not None and p.card not in running and p.card not in parked

@@ -358,8 +358,8 @@ class BriefTests(unittest.TestCase):
                 worker.rework_findings(self.cfg, 12)
 
 
-class DriveTests(RepoCase):
-    """A whole run: the session commits, the PR opens unarmed at the first commit, then is armed at the end."""
+class DriveCase(RepoCase):
+    """The fixture of a whole run: the session, the dispatch and the comments replaced."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -406,6 +406,11 @@ class DriveTests(RepoCase):
             return harness.Outcome(rc, stalled, 60, False)
 
         return mock.patch.object(harness, "run_session", side_effect=run)
+
+
+
+class DriveTests(DriveCase):
+    """A whole run: the session commits, the PR opens unarmed at the first commit, then is armed at the end."""
 
     def test_a_clean_run_opens_early_unarmed_then_arms_and_reports(self) -> None:
         with self.fake_session():
@@ -649,3 +654,57 @@ class DriveTests(RepoCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class OrphanBriefTests(unittest.TestCase):
+    """A: the brief of an orphaned draft says what its last run reported, and lets a complete branch finish
+    without a new commit."""
+
+    setUp, tearDown = BriefTests.setUp, BriefTests.tearDown
+
+    REPORT = ("**Worker session** on `m` at `3d35f9855`, 24 min.\n**Incomplete — the pull request stays a draft and "
+              "auto-merge is not armed:** the session made no new commit.\n\nAll checks met.")
+
+    def test_816s_brief_names_the_last_runs_reason_and_resumes(self) -> None:
+        p = pull(816, 780, head="3d35f9855", draft=True, checks=RED)
+        with mock.patch.object(github, "pull", return_value=p), \
+                mock.patch.object(github, "worker_report", return_value=self.REPORT):
+            text, resume = worker.rework_brief(self.cfg, 816)
+        self.assertTrue(resume)
+        self.assertIn("### The last run did not finish", text)
+        self.assertIn("> **Incomplete — the pull request stays a draft and auto-merge is not armed:** the session "
+                      "made no new commit.", text)
+        self.assertIn("no new commit is needed then", text)
+        self.assertNotIn("Checks are failing", text, "a draft's deliberate ci-ok failure is not a finding")
+
+    def test_a_draft_with_a_request_for_changes_is_not_a_resume(self) -> None:
+        p = pull(816, 780, draft=True, reviews=[review("CHANGES_REQUESTED", body="fix x.cs:3")])
+        with mock.patch.object(github, "pull", return_value=p), \
+                mock.patch.object(github, "worker_report", return_value=""):
+            text, resume = worker.rework_brief(self.cfg, 816)
+        self.assertFalse(resume)
+        self.assertIn("fix x.cs:3", text)
+        self.assertIn("(no reason on record", text)
+
+
+class OrphanDriveTests(DriveCase):
+    def test_a_resume_that_finds_the_work_complete_is_marked_ready_without_a_commit(self) -> None:
+        sha = self.push_branch("wt/issue-3", "first.cs")
+        with mock.patch.object(github, "pull", return_value=pull(77, 3, head=sha, draft=True)), \
+                mock.patch.object(github, "worker_report", return_value=""):
+            harness.note_attempt(3)
+            with self.fake_session(commit=False, text="verified: 1. met — a.cs:1"):
+                self.assertEqual(worker.drive(self.cfg, 3, 77), 0)
+        self.assertEqual(self.dispatched, [True], "clean with no new commit: pushed, marked ready and armed")
+        self.assertNotIn("Incomplete", self.comments[0][1])
+        self.assertEqual(harness.idle_runs(3), 1, "it still counts as an idle run toward the cap")
+
+    def test_a_rework_with_changes_requested_still_needs_a_commit(self) -> None:
+        sha = self.push_branch("wt/issue-3", "first.cs")
+        with mock.patch.object(github, "pull", return_value=pull(77, 3, head=sha, draft=True,
+                                                                 reviews=[review("CHANGES_REQUESTED", commit=sha)])), \
+                mock.patch.object(github, "worker_report", return_value=""):
+            with self.fake_session(commit=False):
+                self.assertEqual(worker.drive(self.cfg, 3, 77), 1)
+        self.assertEqual(self.dispatched, [False])
+        self.assertIn("the session made no new commit", self.comments[0][1])

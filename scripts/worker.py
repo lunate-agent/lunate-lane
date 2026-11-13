@@ -139,9 +139,16 @@ def conflicts(cfg: common.Config, worktree: pathlib.Path) -> list[str]:
 
 
 def rework_findings(cfg: common.Config, pr: int, worktree: pathlib.Path | None = None) -> str:
+    return rework_brief(cfg, pr, worktree)[0]
+
+
+def rework_brief(cfg: common.Config, pr: int, worktree: pathlib.Path | None = None) -> tuple[str, bool]:
     """Everything that sends this pull request back, read now: the reviewer's request for changes on the head,
-    the failing checks with their log tails, the conflicting files, the merge queue's removal (#8). None of them
-    is a refusal to rework."""
+    the failing checks with their log tails, the conflicting files, the merge queue's removal (#8), and for an
+    orphaned draft what its last run reported. None of them is a refusal to rework.
+
+    Returns (findings, resume): `resume` is True when the only reason is an orphaned draft — the run may then end
+    with no new commit if the work is already complete (it still counts as an idle run)."""
     p = github.pull(cfg, pr)
     if p.state != "OPEN":
         raise LaneError(f"#{pr} is {p.state.lower()} — nothing to rework")
@@ -175,10 +182,22 @@ def rework_findings(cfg: common.Config, pr: int, worktree: pathlib.Path | None =
     elif stuck:
         sections.append(f"### It is {stuck}\n\nThe merge queue tests the branch together with what lands before "
                         f"it. Merge `origin/{cfg.base}`, find what breaks in combination, and fix it.")
+    resume = False
+    if p.draft:
+        resume = not sections
+        report = github.worker_report(cfg, pr)
+        incomplete = [line.strip() for line in report.splitlines() if line.strip().startswith("**Incomplete")]
+        sections.append(
+            "### The last run did not finish\n\nThis pull request was left a draft by a worker run that did not "
+            "finish cleanly, and nobody has worked on it since. That run reported:\n\n> "
+            + (incomplete[-1] if incomplete else "(no reason on record — read the branch and the card)")
+            + "\n\nPick the card up where it stopped. If the work on the branch is already complete, verify it — "
+            "the named tests, `openspec validate --all --strict`, the acceptance checks — and end with your report: "
+            "no new commit is needed then, and the lane marks the pull request ready.")
     if not sections:
-        raise LaneError(f"#{pr} has no request for changes on its head {p.head[:8]} and is not stuck — nothing "
-                        "to rework")
-    return "\n\n".join(sections)
+        raise LaneError(f"#{pr} has no request for changes on its head {p.head[:8]}, is not stuck and is not a "
+                        "draft — nothing to rework")
+    return "\n\n".join(sections), resume
 
 
 def brief(cfg: common.Config, issue: dict, worktree: pathlib.Path, pr: int | None, findings: str,
@@ -211,8 +230,10 @@ def brief(cfg: common.Config, issue: dict, worktree: pathlib.Path, pr: int | Non
                          FRAGMENT_RULE=fragment, REWORK=rework, BODY=(issue.get("body") or "").strip())
 
 
-def problems(cfg: common.Config, outcome: harness.Outcome, worktree: pathlib.Path, start_head: str) -> list[str]:
-    """Why a finished session is not clean. rc=0 only says the process exited."""
+def problems(cfg: common.Config, outcome: harness.Outcome, worktree: pathlib.Path, start_head: str,
+             resume: bool = False) -> list[str]:
+    """Why a finished session is not clean. rc=0 only says the process exited. A `resume` of an orphaned draft
+    may end with no new commit: its work can be complete already."""
     found = []
     if outcome.stalled:
         found.append(f"the session stalled or passed its time cap and was stopped after {outcome.elapsed}s")
@@ -222,7 +243,7 @@ def problems(cfg: common.Config, outcome: harness.Outcome, worktree: pathlib.Pat
         found.append("the session's last message is tool-call markup, not a report")
     if common.wt_git(cfg, worktree, "status", "--porcelain"):
         found.append("the session left uncommitted changes in the worktree")
-    if common.wt_git(cfg, worktree, "rev-parse", "HEAD") == start_head:
+    if not resume and common.wt_git(cfg, worktree, "rev-parse", "HEAD") == start_head:
         found.append("the session made no new commit")
     return found
 
@@ -231,7 +252,7 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
     job = f"worker-{number}"
     worktree = prepare_worktree(cfg, number)
     issue = dispatch_card.card(cfg.checkout, number)
-    findings = rework_findings(cfg, rework_pr, worktree) if rework_pr else ""
+    findings, resume = rework_brief(cfg, rework_pr, worktree) if rework_pr else ("", False)
     if rework_pr:
         # back to draft before the session: CI's heavy legs and the reviewer wait for the clean finish (#5)
         open_pr.return_to_draft(f"wt/issue-{number}", rework_pr)
@@ -274,13 +295,13 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
                                   log_path=session_log, extra_env={"LANE_PR_FILE": str(pr_file)}, on_tick=open_early,
                                   branch=f"wt/issue-{number}",
                                   on_start=lambda pgid, sid: harness.note_session(number, driver, pgid, sid))
-    return finish(cfg, number, worktree, outcome, start_head, session_log)
+    return finish(cfg, number, worktree, outcome, start_head, session_log, resume)
 
 
 def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: harness.Outcome, start_head: str,
-           session_log: pathlib.Path) -> int:
+           session_log: pathlib.Path, resume: bool = False) -> int:
     job = f"worker-{number}"
-    found = problems(cfg, outcome, worktree, start_head)
+    found = problems(cfg, outcome, worktree, start_head, resume)
     idle, parked_now = harness.note_run(number, common.wt_git(cfg, worktree, "rev-parse", "HEAD") != start_head)
     if idle:
         common.log(job, f"no new commit — idle run {idle} of {harness.IDLE_RUN_LIMIT}")

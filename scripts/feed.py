@@ -36,10 +36,12 @@ def decide(cfg: common.Config) -> tuple[list[cards.Launch], list[str]]:
 def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[github.Pull], list[github.Pull]]:
     """The launches and notes, and the worker pull requests whose required checks failed for infra reasons and
     have not been rerun on their head yet: those are rerun once, not reworked."""
+    # the running workers first: a worker that finishes between the two reads leaves its pull request ready, and
+    # a draft read before that would look orphaned
+    running = harness.running_workers()
     milestone = github.milestone_cards(cfg)
     pulls = github.open_pulls(cfg)
     worker_pulls = [github.pull(cfg, p.number) for p in pulls if p.author == cfg.worker_app]
-    running = harness.running_workers()
     pins = cards.load_pins(cfg.pins)
     required = github.required_checks(cfg)
     reran, parked = harness.reran(), harness.parked_cards()

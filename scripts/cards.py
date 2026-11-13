@@ -7,7 +7,8 @@ be tested without a network.
     room:   total WIP (cards with an open worker PR or a running worker) below the limit, and no other card of
             the same area in flight
     rework: a worker PR whose reviewer requested changes on its current head goes back to a worker on its own
-            branch, before any new card, and does not add to WIP — its card is already in flight
+            branch, before any new card, and does not add to WIP — its card is already in flight; so does a
+            stuck one, and an orphaned draft (a draft with no worker running and the card not parked)
 """
 
 from __future__ import annotations
@@ -19,13 +20,15 @@ import pathlib
 from scripts.common import ConfigError
 from scripts.github import Card, Pull, reviewer_verdict, stuck_reason
 
+ORPHANED = "orphaned draft"
+
 
 @dataclasses.dataclass(frozen=True)
 class Launch:
     card: int
     rework_pr: int | None
     areas: frozenset
-    reason: str = ""  # why a rework: changes requested, or why the pull request is stuck
+    reason: str = ""  # why a rework: changes requested, why the pull request is stuck, or an orphaned draft
 
 
 @dataclasses.dataclass(frozen=True)
@@ -65,10 +68,16 @@ def order(cards: list[Card], pins: tuple, bug_label: str) -> list[Card]:
 def rework_reason(p: Pull, reviewer_app: str, required: frozenset = frozenset(),
                   reran: frozenset = frozenset()) -> str | None:
     """Why this pull request goes back to a worker: the reviewer's request for changes on the current head (a
-    push since then clears it), or a stuck pull request — red, conflicting, or out of the queue (#8)."""
+    push since then clears it), a stuck pull request — red, conflicting, or out of the queue (#8) — or a draft
+    nobody is working on (the caller leaves out running and parked cards)."""
     if reviewer_verdict(p, reviewer_app) == "CHANGES_REQUESTED":
         return "changes requested"
-    return stuck_reason(p, required, reviewer_app, reran)
+    stuck = stuck_reason(p, required, reviewer_app, reran)
+    if stuck:
+        return stuck
+    if p.state == "OPEN" and p.draft:
+        return ORPHANED
+    return None
 
 
 def needs_rework(p: Pull, reviewer_app: str, required: frozenset = frozenset()) -> bool:
