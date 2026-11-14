@@ -27,6 +27,8 @@ class FakeIssues:
         self.pr_card: dict = {}  # pull request -> its card
         self.blocked: dict = {}  # card -> {blocker numbers}
         self.fail: set = set()
+        self.pulls: dict = {}  # pull request -> {"state", "auto_merge"} as GitHub's REST pulls endpoint has them
+        self.disarmed: list = []
         self.drop_assignee = False
         self.calls: list = []
         self.comments: list = []  # (number, body): what `open_pr.comment` would have posted
@@ -65,6 +67,10 @@ class FakeIssues:
                 raise open_pr.OpenPrError(f"GitHub refused POST {path} (422): already_exists")
             self.labels_made.append(payload["name"])
             return {}
+        if rest[0] == "pulls" and method == "GET":
+            n = int(rest[1])
+            self.pulls.setdefault(n, {"state": "open", "auto_merge": None})  # an open pull request, not armed
+            return {"number": n, "node_id": f"PR_{n}", **self.pulls[n]}
         n, tail = int(rest[1]), rest[2:]
         i = self.issue(n)
         if method == "GET" and not tail:
@@ -88,6 +94,13 @@ class FakeIssues:
             raise AssertionError(f"FakeIssues: unexpected {method} {path}")
         return {}
 
+    def _disarm(self, number, node_id):
+        if any(f in f"/pulls/{number}/auto-merge" for f in self.fail):
+            from scripts import open_pr
+            raise open_pr.OpenPrError(f"#{number}'s auto-merge still reads as on after turning it off")
+        self.disarmed.append((number, node_id))
+        self.pulls[int(number)]["auto_merge"] = None
+
     def get(self, path):
         return self.call("", "GET", "/" + path)
 
@@ -100,6 +113,7 @@ class FakeIssues:
                 mock.patch.object(parked, "_blockers", lambda cfg, card: tuple(sorted(
                     b for b in self.blocked.get(card, ()) if self.issue(b)["state"] == "open"))),
                 mock.patch.object(parked, "_pr_card", lambda cfg, n: self.pr_card.get(n)),
+                mock.patch.object(parked, "_disarm", self._disarm),
                 # a park's comment: recorded, never posted (until 2026-11-14 every suite run posted two on #1 and #2)
                 mock.patch.object(open_pr, "comment", lambda number, body: self.comments.append((number, body)))]
 

@@ -1,5 +1,7 @@
 """Parks a person cannot miss: the parked card and its open pull request carry the label `parked.label` and are
-assigned to `parked.assignee` (lane.json), as the worker identity, read back.
+assigned to `parked.assignee` (lane.json), as the worker identity, read back. The pull request's auto-merge is
+turned off too (read back): a parked card's work never merges on its own. Unparking does not re-arm it — the
+normal path does, once it is ready, approved and green.
 
 Every park sets them (`flag`), every unpark takes them off (`unflag`): the label always, the assignment only where
 the lane added it (one the person had before stays). A label or assignment that fails, or does not read back, is
@@ -44,6 +46,10 @@ def _blockers(cfg: common.Config, card: int) -> tuple:
 
 def _pr_card(cfg: common.Config, number: int) -> int | None:
     return github.pull(cfg, number).card
+
+
+def _disarm(number: int, node_id: str) -> None:
+    open_pr.disarm(number, node_id)  # off, and read back; nothing when it is not armed
 
 
 def _path():
@@ -108,7 +114,7 @@ def flag(cfg: common.Config, card: int, pr: int | None = None, job: str = "lane"
     logged and recorded for the digest); never raises for a GitHub refusal."""
     records = _read()
     rec = records.get(card) or {"targets": [], "assigned": [], "error": ""}
-    label, who, failed = cfg.parked_label, cfg.parked_assignee, []
+    label, who, failed, disarmed = cfg.parked_label, cfg.parked_assignee, [], []
     try:
         targets = sorted(set(rec["targets"]) | set(_targets(cfg, card, pr)))
         token = _token()
@@ -128,6 +134,11 @@ def flag(cfg: common.Config, card: int, pr: int | None = None, job: str = "lane"
                 missing = [f"label {label}"] * (label not in labels) + [f"assignee @{who}"] * (who not in assignees)
                 if missing:
                     failed.append(f"#{number} reads back without {' and '.join(missing)}")
+                if number != card:  # a parked card's pull request never merges on its own (#856, armed since 15:05)
+                    pr = _call(token, "GET", f"/repos/{cfg.slug}/pulls/{number}")
+                    if pr.get("state") == "open" and pr.get("auto_merge"):
+                        _disarm(number, str(pr["node_id"]))
+                        disarmed.append(number)
             except LaneError as exc:
                 failed.append(f"#{number}: {exc}")
     rec.update(targets=targets, error="; ".join(failed)[:400] if failed else "")
@@ -137,7 +148,9 @@ def flag(cfg: common.Config, card: int, pr: int | None = None, job: str = "lane"
     if failed:
         common.log(job, f"parked card #{card}: FAILED to label {label} / assign @{who} — {rec['error']}")
     else:
-        common.log(job, f"parked card #{card}: labelled {label} and assigned @{who} on {where} (read back)")
+        common.log(job, f"parked card #{card}: labelled {label} and assigned @{who} on {where} (read back)"
+                        + (f"; auto-merge turned off on " + ", ".join(f"#{n}" for n in disarmed) + " (read back)"
+                           if disarmed else ""))
     return failed
 
 
