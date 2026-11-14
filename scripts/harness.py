@@ -196,6 +196,10 @@ def _rx(path: str, tail: str = "") -> str:
 
 
 MSBUILD_SOCKETS = '(regex #"^/private/tmp/MSBuild[0-9]+$")'
+# `dotnet test`'s IPC pipe: a socket named by a GUID, ^/private/tmp/[0-9a-f]{32}$ — spelled out, because the
+# sandbox's regex dialect has no {n} counts (with one, nothing matched). It matches paths case-insensitively
+# here (APFS), so A-F match too: still only hex names.
+DOTNET_TEST_PIPE = '(regex #"^/private/tmp/' + "[0-9a-f]" * 32 + '$")'
 
 
 def sandbox_profile(cfg: common.Config, real_home: pathlib.Path | None = None, *, scratch: pathlib.Path,
@@ -207,7 +211,8 @@ def sandbox_profile(cfg: common.Config, real_home: pathlib.Path | None = None, *
         worker its own branch ref and that ref's log (not other refs: cleanup trusts `refs/remotes/origin`);
         the NuGet package cache the lane points sessions at; /dev/null and /dev/tty;
         MSBuild's node sockets, `/private/tmp/MSBuild<pid>` and nothing else in /tmp (MSBuild puts them in /tmp,
-        not TMPDIR, on macOS; denied, every build waited 5 minutes for nodes that could not connect — #856).
+        not TMPDIR, on macOS; denied, every build waited 5 minutes for nodes that could not connect — #856), and
+        `dotnet test`'s IPC pipe, `/private/tmp/<32 lowercase hex>` (denied, it crashed with SocketException 13).
 
     Inside those, the worktree's `.git` pointer and the admin directory's `gitdir`, `commondir` and
     `config.worktree` stay denied. Reads of the lane's and the user's secrets are denied; process-info only on
@@ -224,7 +229,7 @@ def sandbox_profile(cfg: common.Config, real_home: pathlib.Path | None = None, *
     packages = real_home / ".nuget" / "packages"
     if packages.is_dir():
         allowed += [f"(subpath {_sbpl(p)})" for p in _forms([packages])]
-    allowed += ['(literal "/dev/null")', '(literal "/dev/tty")', MSBUILD_SOCKETS]
+    allowed += ['(literal "/dev/null")', '(literal "/dev/tty")', MSBUILD_SOCKETS, DOTNET_TEST_PIPE]
     pinned = [_rx(form, r"(\.lock)?") for form in _forms([worktree / ".git", admin / "gitdir", admin / "commondir",
                                                             admin / "config.worktree"])]
     deny = " ".join(f"(subpath {_sbpl(p)})" for p in denied_paths(cfg, real_home))

@@ -101,7 +101,8 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    - **limits**: total WIP ≤ `wip_limit`, where WIP is the cards in flight — each open worker pull request plus
      each running worker, a worker and its own pull request counted once, leaving out parked cards with no worker
      running (they wait on a person, not on the lane) — and at most one card in flight per `area/*` label, where a
-     parked card's open pull request still holds its areas. A card without an area label has no area limit.
+     parked card's open pull request still holds its areas. A card without an area label has no area limit. A
+     `kind/bug` card skips the area limit; it still counts toward WIP and still waits on its blocked-by.
    - **parked cards**: a card is parked when its worker runs ended with no new commit three times in a row (new
      card or rework), or when one pull request has gone back to a worker three times, whatever the causes — the
      feeder parks it instead of starting a fourth rework. The feeder no longer starts or reworks a parked card, its
@@ -214,8 +215,9 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    is non-blocking (#848's ADR renumber, Decision of 2026-11-14 on #809).
    The session sandbox allows MSBuild's node sockets, `/private/tmp/MSBuild<pid>` (regex, nothing else in /tmp):
    MSBuild puts them in /tmp, not TMPDIR, and with them denied every build waited 5 minutes for nodes that
-   could not connect. `dotnet test`'s own IPC pipe (`/private/tmp/<32 hex>`) is still denied, and crashes it.
-   **Before every push the branch is built** (when `harness.build_gate` is on; it is off). Every project holding a file the branch changes — the nearest
+   could not connect. `dotnet test`'s IPC pipe, `/private/tmp/<32 hex>`, is allowed the same way (denied, it
+   crashed). Nothing else in /tmp is writable.
+   **Before every push the branch is built** (`harness.build_gate`, on). Every project holding a file the branch changes — the nearest
    `.csproj` above it, test projects under `tests/` included — is built with `dotnet build -c Release`, in the
    session's sandbox and environment without the model key. Compile errors (`file(line,col): error CS0103: …`)
    are never pushed: they go back into the same Pi session (`--session-id`) to fix, up to 2 rounds; a run that

@@ -104,6 +104,21 @@ class AreaTests(unittest.TestCase):
         launches, _ = plan([card(1, "area/tui"), card(2, "area/tui"), card(3, "area/core")])
         self.assertEqual(started(launches), [(1, None), (3, None)])
 
+    def test_a_bug_card_skips_the_area_rule_but_not_wip_or_blocked_by(self) -> None:
+        held = [pull(101, 1, labels=("area/tui",))]  # area/tui in flight
+        launches, notes = plan([card(2, "area/tui", "kind/bug"), card(3, "area/tui")], worker_pulls=held)
+        self.assertEqual(started(launches), [(2, None)], "the bug starts; the ordinary card in its area still waits")
+        self.assertTrue(any("#3 skipped — area/tui already in flight" in note for note in notes))
+        launches, notes = plan([card(2, "area/tui", "kind/bug", blocked_by=(9,))], worker_pulls=held)
+        self.assertEqual(started(launches), [])
+        self.assertIn("#2 waits on #9", notes)
+        full = [pull(100 + n, n, labels=("area/core",)) for n in range(10, 15)]  # WIP 5 of 5
+        launches, notes = plan([card(2, "area/tui", "kind/bug")], worker_pulls=full)
+        self.assertEqual(started(launches), [])
+        self.assertIn("WIP 5 of 5 — no new card", notes)
+        launches, _ = plan([card(2, "area/tui", "kind/bug"), card(4, "area/tui", "kind/bug")], worker_pulls=held)
+        self.assertEqual(started(launches), [(2, None), (4, None)], "two bugs in one area both start")
+
     def test_an_area_held_by_an_open_worker_pr_is_skipped(self) -> None:
         launches, notes = plan([card(2, "area/tui"), card(3)], worker_pulls=[pull(101, 1, labels=("area/tui",))])
         self.assertEqual(started(launches), [(3, None)])

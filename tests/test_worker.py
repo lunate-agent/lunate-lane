@@ -1232,8 +1232,8 @@ class StartAtHeadTests(RepoCase):
 
 class BuildGateSwitchTests(DriveCase):
     def test_with_the_gate_off_nothing_is_built(self) -> None:
-        self.assertFalse(self.cfg.harness.get("build_gate", False), "lane.json ships it off")
-        with mock.patch.object(worker, "_run_build", side_effect=AssertionError("no build with the gate off")):
+        with mock.patch.dict(self.cfg.harness, {"build_gate": False}), \
+                mock.patch.object(worker, "_run_build", side_effect=AssertionError("no build with the gate off")):
             path = worker.prepare_worktree(self.cfg, 3)
             self.assertEqual(worker.build_errors(self.cfg, path, self.cfg.state / "scratch" / "issue-3"), [])
 
