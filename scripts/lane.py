@@ -68,7 +68,13 @@ def status(card: int) -> str:
     if data["parked"]:
         lines.append(f"  parked: yes — {data['reason'] or 'idle'}" + (f": {data['detail']}" if data["detail"] else ""))
     else:
-        lines.append("  parked: no")
+        at_cap = [pr for pr, n in sorted(data["reworks"].items()) if n >= harness.REWORK_LIMIT]
+        if at_cap:  # the cap counts a round when it starts: the last one runs, the next one due parks instead
+            lines.append(f"  parked: no — #{at_cap[0]} is at the cap: its last rework round "
+                         + ("is running" if live else "has run")
+                         + "; the next tick that finds it due for another parks the card instead")
+        else:
+            lines.append("  parked: no")
     if data["died"]:
         lines.append(f"  last run: worker died: {data['died']}")
     return "\n".join(lines)

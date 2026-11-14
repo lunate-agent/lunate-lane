@@ -194,12 +194,21 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    actually lands is checked on the merged commit's parent count. The final report is scanned before posting: anything token- or key-shaped (GitHub
    tokens, `sk-` keys, private-key blocks, AWS keys, JWTs, `key=…`/`token=…` assignments, long opaque strings, or
    the model credential itself) has each matched span replaced by `[redacted: <kind>]` and the rest is posted; the
-   worker log names each kind, and the full message stays in the local session log.
+   worker log names each kind, and the full message stays in the local session log. That log and Pi's own
+   session files never hold the model key either: the session's environment carries it (Pi needs it), so a tool
+   call that prints the environment would otherwise write it there (five worker sessions did, 2026-11-13/14).
+   Every line of Pi's output is redacted before it is written — the key whole and any 12-character run of it, and
+   the strict secret shapes — and Pi's session files are scrubbed when it stops. A worktree is cut after
+   `git fetch --prune`, so a branch deleted on GitHub is not continued from a stale `origin/` ref (#798). The
+   review brief puts the card's dated `## Decisions` entries in its verdict rules: a finding that contradicts one
+   is non-blocking (#848's ADR renumber, Decision of 2026-11-14 on #809).
    **Before every push** the diff's added lines (against `origin/main`), the pull request's title and its body
    are scanned for the shapes that are secrets by construction (private keys, GitHub tokens, `sk-`/`oc_` keys,
    AWS keys, JWTs) and the model credential. A match pushes nothing, parks the card, comments once naming the kind
    and where it was found — for the diff the file and line in the branch (`docs/setup.md:3`) — and logs the same,
-   never the value. Cleanup keeps the worktree, branch and scratch of a card parked for a secret until it is
+   never the value. Only a value that is not already on `origin/main` blocks: one main already has (a test
+   fixture) is logged as "already on origin/main — not new" and passes, since a branch cut from a squash-merged
+   one shows main's own content as added lines (#798); the configured credential always blocks. Cleanup keeps the worktree, branch and scratch of a card parked for a secret until it is
    unparked (digest: "Kept by cleanup"), so a person can judge the match (#798 lost both 8 minutes after its park). (The looser assignment and opaque-string rules
    apply to the report only: on a diff they would fire on ordinary code such as `cancellationToken = …`.)
    Stopping a worker with `kill <pid>` (SIGTERM, also SIGHUP or SIGINT) kills its Pi session's process group on

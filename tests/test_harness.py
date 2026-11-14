@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from scripts import harness  # noqa: E402
+from scripts import harness, secret_scan  # noqa: E402
 from scripts.common import StateError  # noqa: E402
 from tests.helpers import TempState  # noqa: E402
 
@@ -639,3 +639,45 @@ class RedactTests(unittest.TestCase):
 
         text = "merged 3d35f9855" + "a" * 31 + " into main; 14 passed"
         self.assertEqual(secret_scan.redact(text), (text, ()))
+
+
+class TranscriptRedactionTests(HarnessCase):
+    """2026-11-14: five worker sessions ran `env` (or listed processes) and the model key in the session's own
+    environment went into the bash tool's output, then into the lane's transcript and Pi's session files. Now every
+    line is redacted before it is written, and Pi's own files are scrubbed when it stops."""
+
+    OLD = "oc_" + "Ab1" * 16  # a 51-character OpenCode-shaped key that is not the configured one (a previous key)
+
+    def test_the_key_never_reaches_the_transcript_or_pis_files_and_the_lines_stay_json(self) -> None:
+        tool = json.dumps({"type": "tool_execution_end", "toolName": "bash",
+                           "result": {"content": [{"type": "text", "text": "LANE_PR_FILE=/x\nOPENCODE_API_KEY=KEYHERE\n"
+                                                   f"OLD={self.OLD}\nPATH=/usr/bin"}]}}).replace("KEYHERE", "'\"$OPENCODE_API_KEY\"'")
+        half = len(SECRET) // 2
+        split = [json.dumps({"type": "message_update", "delta": "key is " + SECRET[:half]}),
+                 json.dumps({"type": "message_update", "delta": SECRET[half:] + " done"})]
+        self.fake_pi(f"printf '%s\\n' '{tool}'\n"  # printf: sh's echo would expand the JSON's \\n
+                     f"printf '%s\\n' '{split[0]}' '{split[1]}'\n"
+                     f"printf '%s\\n' '{event('all done')}'\n"
+                     'mkdir -p "$TMPDIR/sessions" && env > "$TMPDIR/sessions/pi-own.jsonl"\n')
+        outcome = harness.run_session(self.cfg, model="opencode-go/m", worktree=self.worktree, prompt="brief",
+                                      scratch=self.state.root / "scratch", log_path=self.state.root / "s.jsonl",
+                                      tick=0.2)
+        self.assertEqual(outcome.rc, 0)
+        log = (self.state.root / "s.jsonl").read_text()
+        own = (self.state.root / "scratch" / "sessions" / "pi-own.jsonl").read_text()
+        for text in (log, own):
+            self.assertNotIn(SECRET, text)
+            self.assertNotIn(self.OLD, text)
+            for start in range(len(SECRET) - secret_scan.FRAGMENT + 1):
+                self.assertNotIn(SECRET[start:start + secret_scan.FRAGMENT], text)
+            self.assertIn("[redacted: configured credential]", text)
+        self.assertIn("OPENCODE_API_KEY=[redacted: configured credential]", log)
+        self.assertIn("OLD=[redacted: OpenCode key]", log)
+        for line in log.splitlines():
+            json.loads(line)  # still JSON, line by line
+        self.assertEqual(harness.last_text(self.state.root / "s.jsonl"), "all done")
+
+    def test_record_redaction_leaves_ordinary_text_alone(self) -> None:
+        for text in ('{"type":"message_end","text":"var cancellationToken = token; sha 3f9a2c1d4e5b6a7980f1"}',
+                     '"contentHash": "Zx3k9Qm2Lp7Wv5Rt8Yb1Nc4Hd6Jf0Gs2Ae9Kq3Uw7Xo5Ti=="'):
+            self.assertEqual(secret_scan.redact_record(text, (SECRET,)), text)

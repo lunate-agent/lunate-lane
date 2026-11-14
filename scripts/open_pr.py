@@ -65,6 +65,35 @@ class SecretFound(OpenPrError):
         return f"{self.where} at `{self.path}:{self.line}`" if self.path else self.where
 
 
+def _secret_values(text: str, known: tuple):
+    """(kind, value) for each known value and each strict secret shape in one line. Values stay in memory only."""
+    for value in known:
+        if value and value in text:
+            yield "configured credential", value
+    for kind, pattern in secret_scan.SECRET_SHAPES:
+        if kind not in secret_scan.LOOSE:
+            for match in pattern.finditer(text):
+                yield kind, match.group(0)
+
+
+def on_base(repo: pathlib.Path, base: str, value: str) -> bool:
+    """Whether `value` is already in origin/<base>'s tree. The value goes to git on stdin, never in an argv another
+    process could read; a lookup that fails is an error (the scan then blocks), never 'not there'."""
+    done = subprocess.run(["git", "-C", str(repo), "grep", "-q", "-I", "-F", "-f", "-", f"origin/{base}", "--"],
+                          input=value + "\n", capture_output=True, text=True, timeout=120)
+    if done.returncode not in (0, 1):
+        raise OpenPrError(f"origin/{base} could not be searched for the secret scan ({done.returncode})")
+    return done.returncode == 0
+
+
+def _report_existing(branch: str, base: str, existing: list) -> None:
+    """Log each secret-shaped value the diff adds that is already on the base — never the value."""
+    job = branch.replace("wt/issue-", "worker-") if branch.startswith("wt/issue-") else "open_pr"
+    for kind, path, n in dict.fromkeys(existing):
+        common.log(job, f"secret scan: something shaped like a {kind} at `{path}:{n}` is already on "
+                        f"origin/{base} — not new, so it does not block the push (reported only)")
+
+
 HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
 
 
@@ -86,19 +115,29 @@ def added_lines(diff: str):
 def scan(repo: pathlib.Path, branch: str, base: str, title: str, body: str, known: tuple = ()) -> None:
     """Before every push (#12): the diff's added lines against the base, the title and the body. A match raises
     SecretFound naming the kind and, for the diff, the first matching file and line; an unreadable diff is a
-    failure, never a clean scan."""
+    failure, never a clean scan. Only a value that is not already on origin/<base> blocks: one the base already
+    has (a test fixture on main) is logged and passes — a squash-merged branch shows all of main's content again
+    (#798). The configured credential always blocks."""
     try:
         diff = common.git(repo, "diff", "--no-color", "--no-textconv", "--no-ext-diff", "--unified=0",
                           f"origin/{base}...refs/heads/{branch}")
     except common.GitError as exc:
         raise OpenPrError(f"the diff of {branch} could not be read for the secret scan: {exc}") from exc
     lines = list(added_lines(diff))
+    existing = []
+    for path, n, text in lines:
+        for kind, value in _secret_values(text, known):
+            if kind != "configured credential" and on_base(repo, base, value):
+                existing.append((kind, path, n))  # already public on the base: reported, never a park (#798)
+                continue
+            _report_existing(branch, base, existing)
+            raise SecretFound(kind, "diff's added lines", path, n)
+    _report_existing(branch, base, existing)
     added = "\n".join(text for _, _, text in lines)
-    kind = secret_scan.secret_kind(added, known, strict=True)
-    if kind:  # the whole first (a shape could span lines), then the first line that holds it, for where
-        at = next(((path, n) for path, n, text in lines if secret_scan.secret_kind(text, known, strict=True)),
-                  ("", 0))
-        raise SecretFound(kind, "diff's added lines", *at)
+    if not existing:  # a shape no single line holds (split across lines): still a block, without a line
+        kind = secret_scan.secret_kind(added, known, strict=True)
+        if kind:
+            raise SecretFound(kind, "diff's added lines")
     for where, text in (("title", title), ("body", body)):
         kind = secret_scan.secret_kind(text, known, strict=True)
         if kind:

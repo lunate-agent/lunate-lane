@@ -66,6 +66,36 @@ class FeedTests(unittest.TestCase):
         feed.main()
         self.assertIn(50, [l.rework_pr for l in self.started])
 
+    def test_809s_three_rounds_run_and_the_fourth_due_parks_while_status_says_so_in_between(self) -> None:
+        """Card #809 on #848, 2026-11-14: rounds at 08:40 (changes requested), 08:50 (checks red), 09:10 (changes
+        requested); its status read "#848: 3 of 3, parked: no" while round 3 ran; at 09:20 its head was red again and
+        the card was parked instead of a fourth round. The cap counts a round when it starts, so round 3 runs."""
+        from scripts import lane
+
+        github.milestone_cards.return_value = []
+        github.open_pulls.return_value = [pull(848, 809)]
+        red = (("ci-ok", "COMPLETED", "FAILURE"),)
+        shapes = [pull(848, 809, head="1e3745a0", reviews=[review("CHANGES_REQUESTED", commit="1e3745a0")]),
+                  pull(848, 809, head="b4f8c482", checks=red),
+                  pull(848, 809, head="3a0b97ab", reviews=[review("CHANGES_REQUESTED", commit="3a0b97ab")])]
+        for n, shape in enumerate(shapes, 1):
+            github.pull.return_value = shape
+            self.assertEqual(feed.main(), 0)
+            self.assertEqual((len(self.started), harness.rework_rounds(809, 848)), (n, n))
+            self.assertEqual(harness.parked_details(), {})
+        with mock.patch.object(harness, "live_pid", return_value=2304):  # round 3 running
+            text = lane.status(809)
+        self.assertIn("rework rounds: #848: 3 of 3", text)
+        self.assertIn("parked: no — #848 is at the cap: its last rework round is running; the next tick that finds "
+                      "it due for another parks the card instead", text)
+        github.pull.return_value = pull(848, 809, head="88d76f93", checks=red)  # round 3 pushed; red again
+        self.assertEqual(feed.main(), 0)
+        self.assertEqual(len(self.started), 3, "no fourth round")
+        self.assertEqual(harness.parked_details(), {809: "reworks"})
+        self.assertIn("parked: yes — reworks", lane.status(809))
+        self.assertIn("parked card #809 after 3 rework rounds on #848",
+                      (self.state.cfg.state / "logs" / "feed.log").read_text())
+
     def test_a_dry_run_only_says_it_would_park(self) -> None:
         for _ in range(3):
             harness.note_rework(9, 50)

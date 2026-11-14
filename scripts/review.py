@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import re
 import shlex
 import shutil
 import sys
@@ -202,6 +203,27 @@ def rereview(cfg: common.Config, number: int, actor: str = "") -> tuple[str, str
 VERDICT_PYTHON = "/usr/bin/python3"
 
 
+DECISION_ENTRY = re.compile(r"^\s*[-*]\s*\**\d{4}-\d{2}-\d{2}\b")
+
+
+def card_decisions(body: str) -> str:
+    """The card's own `## Decisions` entries (dated list items), verbatim, for the verdict section of the brief —
+    where a finding is weighed against them — or '' when the card has none. #809's 2026-11-14 entry kept #848's ADR
+    renumbering in scope; the review had flagged it as a scope violation."""
+    lines, inside, entries = (body or "").splitlines(), False, []
+    for line in lines:
+        if line.startswith("## "):
+            inside = line.strip().lower() == "## decisions"
+            continue
+        if inside and line.strip():
+            if DECISION_ENTRY.match(line) or (entries and line.startswith((" ", "\t"))):
+                entries.append(line.rstrip())
+    if not entries:
+        return ""
+    return ("The card's dated Decisions, verbatim — binding over any finding that contradicts them:\n\n"
+            + "\n".join(entries) + "\n")
+
+
 def verdict_command(verdict_file: pathlib.Path, body_file: pathlib.Path) -> str:
     """The command the reviewer runs once to hand in its verdict (it adds `--event`): the system python and
     `scripts/verdict.py`, which only reads the body and writes inside the reviewer's scratch directory."""
@@ -264,6 +286,7 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str, str]:
                                SPEC_NEIGHBOURS=spec_neighbours(p, others), WORKER_REPORT=report,
                                SCOPE=scope_context(p, cfg.area_prefix),
                                DECISIONS=github.decisions_section(github.decisions_for(cfg, p.card)),
+                               CARD_DECISIONS=card_decisions(issue.get("body") or ""),
                                BODY=(issue.get("body") or "").strip())
         log_path = common.state_dir("sessions") / f"review-{p.number}-{p.head[:8]}.jsonl"
         outcome = harness.run_session(cfg, model=model, worktree=worktree, prompt=prompt,
