@@ -315,3 +315,61 @@ class DeathParksTests(Case):
                               digest.datetime.datetime.now(digest.datetime.timezone.utc), harness.parked_info(),
                               died=harness.died_info(), flag_errors=parked.errors())
         self.assertIn("  parked #817: runs with no new commit https://github.com/lunate-agent/lunate/issues/817", text)
+
+
+class SweepClosedTests(Case):
+    """#780 on 2026-11-14: closed at 21:34 (UTC 20:34) on the 13th, then labelled lane/parked and assigned by the
+    worker identity during the backfill at 22:22, with no flag record — so reconcile never saw it."""
+
+    def shape_780(self):
+        self.gh.issue(780, state="closed", labels={"kind/bug", "lane/parked"}, assignees={"wdaniel1993"},
+                      events=[{"event": "assigned", "actor": {"login": "lunate-worker[bot]"},
+                               "assignee": {"login": "wdaniel1993"}}])
+
+    def test_780_loses_the_label_and_the_lanes_assignment(self) -> None:
+        self.shape_780()
+        self.assertEqual(parked.sweep_closed(self.cfg, frozenset(), "feed"), [780])
+        self.assertEqual(self.has(780), (False, False))
+        self.assertIn("kind/bug", self.gh.issue(780)["labels"], "only the lane's label goes")
+        self.assertIn("closed #780: lane/parked removed, @wdaniel1993 unassigned (read back)", self.log("feed"))
+        self.assertEqual(parked.sweep_closed(self.cfg, frozenset(), "feed"), [], "nothing left the next tick")
+
+    def test_an_assignment_a_person_made_stays(self) -> None:
+        self.gh.issue(781, state="closed", labels={"lane/parked"}, assignees={"wdaniel1993"},
+                      events=[{"event": "assigned", "actor": {"login": "wdaniel1993"}, "assignee": {"login": "wdaniel1993"}}])
+        self.assertEqual(parked.sweep_closed(self.cfg, frozenset(), "feed"), [781])
+        self.assertEqual(self.has(781), (False, True))
+
+    def test_a_closed_pull_request_of_a_parked_card_is_cleared_and_the_open_card_kept(self) -> None:
+        self.gh.pulls_of[798] = {850}
+        parked.flag(self.cfg, 798, 850)
+        self.gh.issue(850, state="closed")
+        self.assertEqual(parked.sweep_closed(self.cfg, frozenset({798}), "feed"), [850])
+        self.assertEqual((self.has(798), self.has(850)), ((True, True), (False, False)))
+        self.assertEqual(parked._read()[798]["targets"], [798])
+        self.gh.issue(799, state="closed", labels={"lane/parked"})  # a parked card itself is clear_closed's job
+        self.assertEqual(parked.sweep_closed(self.cfg, frozenset({798, 799}), "feed"), [])
+
+    def test_a_refusal_is_logged_and_never_stops_the_tick(self) -> None:
+        self.shape_780()
+        self.gh.fail.add("/issues/780/labels")
+        self.assertEqual(parked.sweep_closed(self.cfg, frozenset(), "feed"), [])
+        self.assertIn("FAILED to clear closed #780 of lane/parked", self.log("feed"))
+        with mock.patch.object(parked, "_get", side_effect=parked.common.GhError("gh api failed (1): HTTP 502")):
+            self.assertEqual(parked.sweep_closed(self.cfg, frozenset(), "feed"), [])
+        self.assertIn("FAILED to list the closed issues still labelled lane/parked", self.log("feed"))
+
+    def test_the_feeder_sweeps_each_tick_and_a_dry_run_only_says_so(self) -> None:
+        self.shape_780()
+        with mock.patch.object(github, "milestone_cards", return_value=[]), \
+                mock.patch.object(github, "open_pulls", return_value=[]), \
+                mock.patch.object(harness, "running_workers", return_value={}), \
+                mock.patch.object(github, "required_checks", return_value=REQUIRED), \
+                mock.patch.object(feed.cleanup, "tidy"):
+            with mock.patch.object(sys, "argv", ["feed.py", "--dry-run"]):
+                self.assertEqual(feed.main(), 0)
+            self.assertEqual(self.has(780), (True, True))
+            self.assertIn("would remove lane/parked from closed #780", self.log("feed"))
+            with mock.patch.object(sys, "argv", ["feed.py"]):
+                self.assertEqual(feed.main(), 0)
+        self.assertEqual(self.has(780), (False, False))

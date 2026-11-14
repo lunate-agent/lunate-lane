@@ -29,6 +29,7 @@ class FakeIssues:
         self.fail: set = set()
         self.drop_assignee = False
         self.calls: list = []
+        self.comments: list = []  # (number, body): what `open_pr.comment` would have posted
 
     def issue(self, number: int, **over) -> dict:
         n = int(number)
@@ -52,6 +53,13 @@ class FakeIssues:
             raise open_pr.OpenPrError(f"GitHub refused {method} {path} (403): forbidden")
         parts = path.strip("/").split("/")  # repos/o/r/...
         rest = parts[3:]
+        if method == "GET" and rest and rest[0].startswith("issues?"):  # the listing, by state and label
+            import urllib.parse
+            query = urllib.parse.parse_qs(rest[0].split("?", 1)[1])
+            return [self._shape(n) for n, i in sorted(self.issues.items())
+                    if i["state"] == query["state"][0] and query["labels"][0] in i["labels"]]
+        if method == "GET" and len(rest) == 3 and rest[2].startswith("timeline"):
+            return list(self.issue(int(rest[1])).get("events", []))
         if rest == ["labels"]:
             if payload["name"] in self.labels_made:
                 raise open_pr.OpenPrError(f"GitHub refused POST {path} (422): already_exists")
@@ -69,6 +77,8 @@ class FakeIssues:
         elif tail == ["assignees"] and method == "POST":
             if not self.drop_assignee:
                 i["assignees"] |= set(payload["assignees"])
+                i.setdefault("events", []).extend({"event": "assigned", "actor": {"login": "lunate-worker[bot]"},
+                                                   "assignee": {"login": x}} for x in payload["assignees"])
         elif tail == ["assignees"] and method == "DELETE":
             i["assignees"] -= set(payload["assignees"])
         elif tail == ["dependencies", "blocked_by"] and method == "POST":
@@ -83,13 +93,15 @@ class FakeIssues:
 
     def install(self) -> list:
         from unittest import mock
-        from scripts import parked
+        from scripts import open_pr, parked
         return [mock.patch.object(parked, "_token", return_value="t"), mock.patch.object(parked, "_call", self.call),
                 mock.patch.object(parked, "_get", self.get),
                 mock.patch.object(parked, "_card_pulls", lambda cfg, card: set(self.pulls_of.get(card, ()))),
                 mock.patch.object(parked, "_blockers", lambda cfg, card: tuple(sorted(
                     b for b in self.blocked.get(card, ()) if self.issue(b)["state"] == "open"))),
-                mock.patch.object(parked, "_pr_card", lambda cfg, n: self.pr_card.get(n))]
+                mock.patch.object(parked, "_pr_card", lambda cfg, n: self.pr_card.get(n)),
+                # a park's comment: recorded, never posted (until 2026-11-14 every suite run posted two on #1 and #2)
+                mock.patch.object(open_pr, "comment", lambda number, body: self.comments.append((number, body)))]
 
 
 class TempState:

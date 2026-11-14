@@ -131,6 +131,7 @@ class DigestAndWorkerTests(Case):
                 mock.patch.object(github, "milestone_cards", return_value=[]), \
                 mock.patch.object(github, "open_pulls", return_value=[]), \
                 mock.patch.object(github, "decision_issues", return_value=[]), \
+                mock.patch.object(github, "codeowners", return_value=()), \
                 mock.patch.object(digest, "merged_since", return_value=[]):
             self.assertEqual(digest.main(), 1)
         self.assertIn("FAILED — the digest", self.stdout.getvalue())

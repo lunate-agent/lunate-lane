@@ -6,13 +6,14 @@ import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from scripts import identity  # noqa: E402
+from tests import live_github  # noqa: E402
 
 
 class IdentityTests(unittest.TestCase):
     @unittest.skipUnless(identity.CONFIG.exists(), "live test: no App config on this machine")
     def test_both_identities_mint_and_read(self) -> None:
         for name in ("worker", "reviewer"):
-            with self.subTest(name=name):
+            with self.subTest(name=name), live_github():  # deliberately live: a token mint and one read
                 result = identity.check(name)
                 self.assertTrue(result.startswith(f"{name}: OK"), result)
                 self.assertNotIn("ghs_", result)

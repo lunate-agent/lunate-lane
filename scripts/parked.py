@@ -248,6 +248,70 @@ def defer(cfg: common.Config, card: int, reason: str, job: str, dry_run: bool = 
     return WAIT
 
 
+# --- a closed issue or pull request carries no park ---
+
+def _lane_assigned(cfg: common.Config, number: int, who: str) -> bool:
+    """Whether the lane (the worker identity) made the last assignment of `who` on this issue or pull request. Read
+    from the timeline: the events listing names the assignee as the actor of an App's assignment."""
+    events = _get(f"repos/{cfg.slug}/issues/{int(number)}/timeline?per_page=100")
+    mine = {cfg.worker_app, f"{cfg.worker_app}[bot]"}
+    last = [e for e in events if e.get("event") in ("assigned", "unassigned")
+            and str((e.get("assignee") or {}).get("login")) == who]
+    return bool(last) and last[-1].get("event") == "assigned" and str((last[-1].get("actor") or {}).get("login")) in mine
+
+
+def sweep_closed(cfg: common.Config, parked, job: str, dry_run: bool = False) -> list[int]:
+    """Take the park label off every closed issue and pull request that still carries it, and the assignment where
+    the lane made it (its flag record says so, or the worker identity made the last assignment) — a closed card,
+    or a closed pull request of a card. `reconcile` only knows what its records name; this also catches a label
+    whose record was lost (#780: labelled after it closed, during the backfill of 2026-11-13, with no record).
+    A card still parked keeps its own label. Read back; a failure is logged and never stops the tick, and the
+    next tick tries again. Returns the numbers cleared."""
+    label, who = cfg.parked_label, cfg.parked_assignee
+    try:
+        found = _get(f"repos/{cfg.slug}/issues?state=closed&labels={urllib.parse.quote(label, safe='')}&per_page=100")
+    except LaneError as exc:
+        common.log(job, f"FAILED to list the closed issues still labelled {label} — {exc}")
+        return []
+    stale = sorted(int(i["number"]) for i in found or [] if int(i["number"]) not in set(parked))
+    if not stale:
+        return []
+    if dry_run:
+        for number in stale:
+            common.log(job, f"would remove {label} from closed #{number}")
+        return []
+    records = _read()
+    by_record = {n for rec in records.values() for n in rec["assigned"]}
+    cleared, token = [], None
+    for number in stale:
+        try:
+            token = token or _token()
+            labels, assignees = _issue(token, cfg, number)
+            unassign = who in assignees and (number in by_record or _lane_assigned(cfg, number, who))  # theirs stays
+            if label in labels:
+                _call(token, "DELETE", f"/repos/{cfg.slug}/issues/{number}/labels/{urllib.parse.quote(label, safe='')}")
+            if unassign:
+                _call(token, "DELETE", f"/repos/{cfg.slug}/issues/{number}/assignees", {"assignees": [who]})
+            labels, assignees = _issue(token, cfg, number)
+            left = [f"label {label}"] * (label in labels) + [f"assignee @{who}"] * (unassign and who in assignees)
+            if left:
+                raise LaneError(f"#{number} still reads with {' and '.join(left)}")
+        except LaneError as exc:
+            common.log(job, f"FAILED to clear closed #{number} of {label} — {exc}")
+            continue
+        for card, rec in list(records.items()):  # a record naming it no longer has to
+            if number in rec["targets"] or number in rec["assigned"]:
+                rec["targets"] = [n for n in rec["targets"] if n != number]
+                rec["assigned"] = [n for n in rec["assigned"] if n != number]
+                if card not in set(parked) and not rec["targets"]:
+                    records.pop(card)
+        common.log(job, f"closed #{number}: {label} removed" + (f", @{who} unassigned" if unassign else "")
+                        + " (read back) — a closed issue or pull request carries no park")
+        cleared.append(number)
+    _write(records)
+    return cleared
+
+
 # --- a parked card that is closed waits on nobody ---
 
 def clear_closed(cfg: common.Config, cards, job: str, dry_run: bool = False) -> list[int]:

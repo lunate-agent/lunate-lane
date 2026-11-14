@@ -21,7 +21,7 @@ try:  # imported as scripts.identity by the tests, or run as a script
 except ImportError:  # pragma: no cover - the script path
     import common
 
-CONFIG = common.config().app_config
+CONFIG = common.config().app_config  # the live one, at import; `installation_token` reads the current config
 API = "https://api.github.com"
 REPO = common.config().slug
 
@@ -58,9 +58,10 @@ def app_jwt(app_id: int, key_path: pathlib.Path) -> str:
 def installation_token(name: str) -> str:
     """Mint an installation token. The token is returned, never printed."""
     try:
-        config = json.loads(CONFIG.read_text())
+        path = common.config().app_config  # at call time: a test's TempState points it at its own (empty) state
+        config = json.loads(path.read_text())
     except (OSError, json.JSONDecodeError) as exc:
-        raise IdentityError(f"the App config {CONFIG} could not be read ({exc.__class__.__name__})") from exc
+        raise IdentityError(f"the App config {path} could not be read ({exc.__class__.__name__})") from exc
     if name not in config:
         raise IdentityError(f"unknown identity {name!r}; known: {', '.join(sorted(config))}")
     app = config[name]
