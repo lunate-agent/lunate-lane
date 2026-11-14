@@ -49,6 +49,7 @@ class Review:
     state: str
     commit: str
     body: str = ""
+    id: int = 0  # GitHub's REST id (`databaseId`), to dismiss it by
 
 
 @dataclasses.dataclass(frozen=True)
@@ -314,7 +315,7 @@ autoMergeEvents:timelineItems(last:1,itemTypes:[AUTO_MERGE_ENABLED_EVENT,AUTO_ME
 ... on AutoMergeDisabledEvent{actor{__typename login}}}}
 closingIssuesReferences(first:10){pageInfo{hasNextPage} nodes{number labels(first:50){pageInfo{hasNextPage} nodes{name}}
 blockedBy(first:50){pageInfo{hasNextPage} nodes{number state}}}}
-reviews(last:100){pageInfo{hasPreviousPage} nodes{author{login} state body commit{oid}}}
+reviews(last:100){pageInfo{hasPreviousPage} nodes{databaseId author{login} state body commit{oid}}}
 files(first:100){pageInfo{hasNextPage} nodes{path}}
 commits(last:1){nodes{commit{oid committedDate checkSuites(first:50){pageInfo{hasNextPage} nodes{databaseId status createdAt
 workflowRun{databaseId runAttempt workflow{databaseId}}}} statusCheckRollup{contexts(first:100){pageInfo{hasNextPage}
@@ -354,7 +355,8 @@ def pull(cfg: common.Config, number: int) -> Pull:
         labels=frozenset(label["name"] for i in issues
                          for label in _complete(i["labels"], f"#{number}'s issue #{i['number']}'s labels")),
         reviews=tuple(Review(login(r.get("author")), str(r["state"]), str((r.get("commit") or {}).get("oid") or ""),
-                             str(r.get("body") or "")) for r in node["reviews"]["nodes"]),
+                             str(r.get("body") or ""), int(r.get("databaseId") or 0))
+                      for r in node["reviews"]["nodes"]),
         checks=checks, files=_files(cfg, int(number), node["files"]),
         in_queue=in_queue, queue_removal=removal["reason"], queue_removed_at=removal["at"],
         dequeued_by=removal["person"], ejection=ejection, disarmed_by=_disarmed_by(node, cfg.worker_app),
@@ -503,6 +505,28 @@ def person_approved(p: Pull, reviewer: str) -> str:
         return ""
     people = [r.author for r in p.reviews if r.commit == p.head and r.state == "APPROVED" and r.author != reviewer]
     return people[-1] if people else ""
+
+
+def superseded_by_person(p: Pull, reviewer: str) -> tuple[str, tuple[int, ...]]:
+    """(person, bot review ids): the reviewer bot's requests for changes on the current head that a person's later
+    approval on that head supersedes, still standing (not dismissed), with that person's login; ('', ()) when there
+    are none. Only ever the bot's reviews: a person's review is never superseded by the bot's."""
+    on_head = [r for r in p.reviews if r.commit == p.head]
+    approvals = [i for i, r in enumerate(on_head) if r.author != reviewer and r.state == "APPROVED"]
+    if not approvals:
+        return "", ()
+    last = approvals[-1]
+    ids = tuple(r.id for r in on_head[:last] if r.author == reviewer and r.state == "CHANGES_REQUESTED" and r.id)
+    return (on_head[last].author, ids) if ids else ("", ())
+
+
+WRITE_ACCESS = ("admin", "maintain", "write")
+
+
+def can_write(cfg: common.Config, login_name: str) -> bool:
+    """Whether `login_name` has write access (or more) to the repository: only their approval counts for GitHub."""
+    data = common.gh_json("api", f"repos/{cfg.slug}/collaborators/{login_name}/permission")
+    return str(data.get("role_name") or data.get("permission") or "") in WRITE_ACCESS
 
 
 def landed_parents(cfg: common.Config, number: int) -> tuple[str, int]:

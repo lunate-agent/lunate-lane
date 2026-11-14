@@ -141,6 +141,12 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      APPROVED: the bot's approval does not satisfy a code-owner review (the queue refuses it, "Waiting on code
      owner review"), so such a pull request waits — the digest lists it — and the tick after the maintainer's
      approval enqueues it. An infra ejection is re-enqueued under the same condition.
+   - **a person's approval over the bot's**: when a person with write access approves a worker pull request at
+     its current head after `lunate-reviewer` asked for changes there, the lane already acts on the approval; the
+     feeder also dismisses those bot reviews itself, as the reviewer identity, with "Superseded by the
+     maintainer's approval at the current head", reads each back and logs it, so GitHub reads it APPROVED and
+     the next tick enqueues it. Only the bot's own standing requests for changes on that head — never a person's
+     review, never one the bot posted after the approval. A refusal is logged and the tick goes on.
    - **tidying, after the launches** (`scripts/cleanup.py`): a card whose lane pull request (`wt/issue-N`) is merged
      or closed, with none open and no worker running, loses its worktree, its local branch and its scratch
      directory (a merged one first has its merge commit's parent count logged — 1 is the squash the queue should
