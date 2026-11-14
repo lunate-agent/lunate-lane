@@ -205,6 +205,7 @@ def tick(dry_run: bool = False) -> None:
     parked.clear_closed(cfg, harness.parked_cards(), JOB, dry_run)  # a closed card waits on nobody
     if not dry_run:  # a park or unpark that happened without its label and assignment, or whose flagging failed
         parked.reconcile(cfg, harness.parked_cards(), JOB)
+    parked.sweep_closed(cfg, harness.parked_cards(), JOB, dry_run)  # labels a lost record left on closed ones
     launches, notes, reruns, enqueues, disarms, ejected, superseded = decide_all(cfg)
     for p in superseded:  # first: GitHub reads it APPROVED from the next tick, which enqueues it
         dismiss_superseded(cfg, p, dry_run)

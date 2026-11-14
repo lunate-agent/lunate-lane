@@ -132,7 +132,10 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      the label `parked.label` (`lane/parked`) and are assigned to `parked.assignee` (lane.json), as the worker
      identity, read back; an unpark takes the label off and the assignment where the lane added it. A failure is
      logged and listed under "Waiting on you", and the feeder retries it each tick (it also flags a park and
-     unflags an unpark made any other way). A parked card that is closed is unparked by the feeder, logged.
+     unflags an unpark made any other way). A parked card that is closed is unparked by the feeder, logged. Each
+     tick also takes the label off any closed issue or pull request still carrying it (`parked.sweep_closed`),
+     and the assignment where the lane made it (its record, or the worker identity made the last assignment): a
+     closed one carries no park, record or not (#780 kept it after a lost record).
    - **enqueuing**: a worker pull request that is ready, approved at its head, green, MERGEABLE and not in the
      merge queue — armed or not: arming alone does not put it in the queue, and a removal turns auto-merge off —
      is enqueued (`enqueuePullRequest` with its head as the expected head) and its queue entry read back. Not when
@@ -147,6 +150,13 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      maintainer's approval at the current head", reads each back and logs it, so GitHub reads it APPROVED and
      the next tick enqueues it. Only the bot's own standing requests for changes on that head — never a person's
      review, never one the bot posted after the approval. A refusal is logged and the tick goes on.
+     If the worker armed auto-merge on it (it does when it marks a pull request ready), GitHub's auto-merge
+     usually gets there first: it enqueues the pull request the moment it reads APPROVED, and the timeline
+     attributes the `added_to_merge_queue` to the arming identity, `lunate-worker` — with no feeder log line,
+     since the lane did not call `enqueuePullRequest`. #843 and #849 on 2026-11-14: auto-merge armed by
+     `lunate-worker` at 02:06Z and 03:59Z, the bot reviews dismissed at 07:08:13Z and 07:08:22Z, added to the
+     queue by `lunate-worker` at 07:08:39Z and 07:09:17Z, before the next tick (#847 the same at 07:06:49Z, 8 s
+     after the maintainer's approval). The feeder's `enqueuePullRequest` covers a pull request nobody armed.
    - **tidying, after the launches** (`scripts/cleanup.py`): a card whose lane pull request (`wt/issue-N`) is merged
      or closed, with none open and no worker running, loses its worktree, its local branch and its scratch
      directory (a merged one first has its merge commit's parent count logged — 1 is the squash the queue should
