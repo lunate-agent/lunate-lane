@@ -423,7 +423,7 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
         if harness.park(number, "secret"):
             park(cfg, number, rework_pr_of(cfg, number) or number, "secret",
                  detail=f"the secret scan before the push found something shaped like a {exc.kind} in the "
-                        f"{exc.where}; nothing was pushed")
+                        f"{exc.location}; nothing was pushed, and the worktree is kept until the card is unparked")
         return 1
     head = common.wt_git(cfg, worktree, "rev-parse", "HEAD")[:9]
     lines = [f"**Worker session** on `{cfg.worker_model}` at `{head}`, {outcome.elapsed // 60} min."]

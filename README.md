@@ -198,7 +198,9 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    **Before every push** the diff's added lines (against `origin/main`), the pull request's title and its body
    are scanned for the shapes that are secrets by construction (private keys, GitHub tokens, `sk-`/`oc_` keys,
    AWS keys, JWTs) and the model credential. A match pushes nothing, parks the card, comments once naming the kind
-   and where it was found, and logs the same — never the value. (The looser assignment and opaque-string rules
+   and where it was found — for the diff the file and line in the branch (`docs/setup.md:3`) — and logs the same,
+   never the value. Cleanup keeps the worktree, branch and scratch of a card parked for a secret until it is
+   unparked (digest: "Kept by cleanup"), so a person can judge the match (#798 lost both 8 minutes after its park). (The looser assignment and opaque-string rules
    apply to the report only: on a diff they would fire on ordinary code such as `cancellationToken = …`.)
    Stopping a worker with `kill <pid>` (SIGTERM, also SIGHUP or SIGINT) kills its Pi session's process group on
    the way out. If the driver is SIGKILLed, its record names the session's group, and the next feeder or

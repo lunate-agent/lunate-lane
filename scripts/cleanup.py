@@ -182,9 +182,16 @@ def read_held() -> dict:
         raise StateError(f"{path} could not be read: {exc}") from exc
 
 
+SECRET_KEPT = "parked for a secret — its worktree and branch are kept until it is unparked, for a person to judge"
+
+
 def tidy(cfg: common.Config, job: str, open_pulls, running: dict, dry_run: bool = False) -> None:
     held = {}
+    parks = harness.parked_info()
     for card, pulls in finished(cfg, open_pulls, running).items():
+        if (parks.get(card) or ("",))[0] == "secret":  # #798: removed 8 minutes after its secret park
+            held[card] = SECRET_KEPT
+            continue
         with common.checkout_lock():  # the check and the removal, as one step on the shared .git
             _tidy_card(cfg, job, card, pulls, held, dry_run)
     _after_cards(cfg, job, open_pulls, held, dry_run)

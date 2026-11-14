@@ -709,9 +709,12 @@ class DriveTests(DriveCase):
         self.assertEqual(len(self.comments), 1)
         target, body = self.comments[0]
         self.assertEqual(target, 3)
-        self.assertIn("shaped like a GitHub token in the diff's added lines", body)
+        # #798's park said only "the diff's added lines": now the file and line, never the value
+        self.assertIn("shaped like a GitHub token in the diff's added lines at `Secrets.cs:1`", body)
+        self.assertIn("the worktree is kept until the card is unparked", body)
         log = (self.cfg.state / "logs" / "worker-3.log").read_text()
-        self.assertIn("secret scan: the diff's added lines holds something shaped like a GitHub token", log)
+        self.assertIn("secret scan: the diff's added lines at `Secrets.cs:1` holds something shaped like a GitHub "
+                      "token", log)
         for text in (body, log):
             self.assertNotIn(token, text)
             self.assertNotIn(token[4:], text)
