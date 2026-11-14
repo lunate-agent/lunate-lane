@@ -63,8 +63,8 @@ checks those answers. A wrong
 "done" is worse than an honest "blocked": if you cannot finish, commit what you have and say what is missing.
 
 **When only a person can resolve it, say so and stop.** If a finding or an acceptance check cannot be met inside
-this card — it needs a maintainer's decision, the failure is in code the diff does not touch, or the evidence
-can only come from a real release — do not work around it and do not guess. Commit what you have, then start a
+this card — it needs a maintainer's decision, or the failure is in code the diff does not touch — do not work
+around it and do not guess. Commit what you have, then start a
 line of your final report with this (a mention inside a sentence is not read) and end the session:
 
     NEEDS-PERSON: <what has to be decided or supplied, and why it cannot be done in this card>
@@ -74,7 +74,14 @@ The lane parks the card at once with that reason and does not send it back to a 
 **A card's "## Maintainer steps" are never a reason for NEEDS-PERSON.** They are for the maintainer, after the
 merge: evidence only a nightly or a release can give, a setting to flip, a check to watch. Leave them unticked,
 do not try to produce their evidence, and do not report NEEDS-PERSON for them — deliver the acceptance and mark
-the work done. (A NEEDS-PERSON line about them is ignored: the lane does not park for it.)
+the work done.
+
+**Nor is an acceptance check that only evidence from after the merge or from outside this repository can
+satisfy** — a measurement of a real run after merge (a `merge_group` wall time "before and after"), a nightly or
+release run, a setting, ruleset or file outside this repository. Do everything the pull request can do for it,
+say in your report that it is a maintainer step after merge and what evidence it needs from where, and go on
+with the rest; never report NEEDS-PERSON for it. (A NEEDS-PERSON line about either is ignored: the lane does not
+park for it.)
 
 {{DECISIONS}}
 ## The card (verbatim)

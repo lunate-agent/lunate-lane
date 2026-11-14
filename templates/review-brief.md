@@ -51,10 +51,14 @@ The worktree at {{WORKTREE}} is checked out at that head. The diff against `orig
 
 ## Your verdict
 
-Write exactly one JSON object to the file `{{VERDICT_FILE}}` and nothing else into it:
+Write the review, in Markdown, to the file `{{BODY_FILE}}`. Then hand it in by running exactly one of these,
+once, as your last step — do not write any JSON yourself:
 
-    {"event": "APPROVE", "body": "<the review, in Markdown>"}
-    {"event": "REQUEST_CHANGES", "body": "<the review, in Markdown>"}
+    {{VERDICT_CMD}} --event APPROVE
+    {{VERDICT_CMD}} --event REQUEST_CHANGES
+
+It writes the verdict for the lane. It refuses a second verdict: the first one you hand in is the one posted, so
+finish the review before you run it.
 
 **REQUEST_CHANGES only for a blocking finding**, and these are the only blocking findings:
 
@@ -77,8 +81,7 @@ The body lists the acceptance checks by number with evidence, then — for REQUE
 under **Blocking** as a concrete thing to change, with its `file:line` and which of the kinds above it is, then
 **Non-blocking**, if any. The lane posts this as a real review.
 
-**An acceptance check that cannot be evidenced in a pull request** — it needs a maintainer's decision, or only a
-real release can show it — is not something a worker can fix. Use REQUEST_CHANGES and start a line of the body
+**An acceptance check that needs a maintainer's decision** is not something a worker can fix. Use REQUEST_CHANGES and start a line of the body
 with it (a mention inside a sentence is not read):
 
     NEEDS-PERSON: <the check, by number, and why no pull request can evidence it>
@@ -89,8 +92,14 @@ a request for changes.
 
 **A card's "## Maintainer steps" are never a reason for REQUEST_CHANGES or NEEDS-PERSON.** They are for the
 maintainer, after the merge, and are not checked by you: do not ask the pull request to evidence them, do not
-count them among the acceptance checks, and do not hold an approval for them. (A NEEDS-PERSON line about them
-is ignored: the lane does not park for it.)
+count them among the acceptance checks, and do not hold an approval for them.
+
+**Nor is an acceptance check that only evidence from after the merge or from outside this repository can
+satisfy** — a measurement of a real run after merge (a `merge_group` wall time, a timing "before and after"), a
+nightly or release run, a setting, ruleset or file that lives outside this repository (the lane's own briefs
+are one). No pull request can show it, so it never makes a review REQUEST_CHANGES or NEEDS-PERSON: list it
+under **Non-blocking** as `check <n>: maintainer step after merge — <what evidence, from where>` and judge the
+other checks on their own. (A NEEDS-PERSON line about either is ignored: the lane does not park for it.)
 
 {{DECISIONS}}
 ## The issue (#{{CARD}})

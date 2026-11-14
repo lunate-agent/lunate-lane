@@ -899,7 +899,9 @@ class NeedsPersonDriveTests(DriveCase):
     def test_the_brief_tells_the_worker_how_to_stop(self) -> None:
         text = worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), None, "", True)
         self.assertIn("NEEDS-PERSON: <what has to be decided or supplied", text)
-        self.assertIn("evidence\ncan only come from a real release", text)
+        # evidence only a release or a run after the merge gives is a maintainer step, never a NEEDS-PERSON
+        self.assertNotIn("can only come from a real release", text)
+        self.assertIn("never report NEEDS-PERSON for it", text)
 
 
 class ReleaseBriefTests(unittest.TestCase):

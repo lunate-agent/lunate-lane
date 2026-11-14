@@ -851,25 +851,30 @@ def orphaned_draft(p: Pull, running, parked) -> bool:
 # "this is a worker-fixable omission, not a `NEEDS-PERSON` item." — is not a request for a person
 NEEDS_PERSON = re.compile(r"^[ \t>*_`-]*NEEDS-PERSON\b[*_`]*[ \t]*[:—–-]?[ \t]*(.*)", re.MULTILINE)
 REASON_LIMIT = 300
-# a card's "## Maintainer steps" are the maintainer's, after the merge: never a reason to stop for a person
-MAINTAINER_STEPS = re.compile(r"\bmaintainer[ -]steps?\b", re.IGNORECASE)
+# a card's "## Maintainer steps", and any check only evidence from after the merge or from outside this repository
+# can satisfy, are the maintainer's after the merge: never a reason to stop for a person
+AFTER_MERGE = re.compile(r"\bmaintainer[ -]steps?\b|\bpost-merge\b|\bafter (?:the |it )?merg(?:e|es|ing)\b"
+                         r"|\b(?:outside|not in) (?:this|the) repositor(?:y|ies)\b", re.IGNORECASE)
 
 
-def about_maintainer_steps(reason: str) -> bool:
-    """A NEEDS-PERSON reason whose first sentence is about the card's Maintainer steps (#817's: "the two Maintainer
-    steps require consecutive green nightly macOS full-suite runs after merge. …")."""
+def after_merge_only(reason: str) -> bool:
+    """A NEEDS-PERSON reason whose first sentence puts it after the merge or outside the repository: the card's
+    Maintainer steps (#817: "the two Maintainer steps require consecutive green nightly macOS full-suite runs after
+    merge. …"), or a check only a measurement after merge can evidence (#843's check 6: "… the first real queue
+    run for this change is only available after merge; …")."""
     first = re.split(r"(?<=[.;!?])\s", (reason or "").strip(), maxsplit=1)[0]
-    return MAINTAINER_STEPS.search(first) is not None
+    return AFTER_MERGE.search(first) is not None
 
 
 def needs_person(text: str) -> str | None:
     """The reason after the first line that starts with `NEEDS-PERSON:` in a worker's report or a review body, or
     None when there is no such line. A finding nobody can meet inside the card — a maintainer's decision, a failure in code the diff
     does not touch, evidence only a real release gives — stops the card for a person instead of another round.
-    One about the card's Maintainer steps is not one (`about_maintainer_steps`): those are the maintainer's after
-    the merge, so it is read as no NEEDS-PERSON at all."""
+    One about the card's Maintainer steps, or a check only evidence after the merge or outside this repository
+    can satisfy, is not one (`after_merge_only`): those are the maintainer's after the merge, so it is read as no
+    NEEDS-PERSON at all."""
     reason = raw_needs_person(text)
-    if reason is None or about_maintainer_steps(reason):
+    if reason is None or (after_merge_only(reason) and merge_first(reason) is None):  # a merge-first is a wait
         return None
     return reason[:REASON_LIMIT] or "(no reason given)"
 

@@ -4,7 +4,9 @@
     .venv/bin/python scripts/review.py --dry-run  # say what is due and why the rest is skipped
 
 The review runs on the reviewer model (which the config keeps different from the worker's), in a detached
-worktree at the head, with the diff and the issue in its brief. It writes a JSON verdict; the lane re-reads the
+worktree at the head, with the diff and the issue in its brief. It writes its review as Markdown and hands it in
+by running `scripts/verdict.py` once, which writes the JSON verdict atomically and refuses a second one (logged
+here); a verdict the command did not write is not used. The lane re-reads the
 pull request and, only if it is still open at the same head, posts the verdict as a real GitHub review —
 APPROVE or REQUEST_CHANGES — as the `lunate-reviewer` identity, then reads the review back and fails the run if
 GitHub does not name `lunate-reviewer` as its author. A missing or malformed verdict posts nothing.
@@ -15,17 +17,18 @@ from __future__ import annotations
 import json
 import os
 import pathlib
+import shlex
 import shutil
 import sys
 
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from scripts import common, dispatch_card, github, harness, identity  # noqa: E402
+from scripts import common, dispatch_card, github, harness, identity, verdict  # noqa: E402
 from scripts.common import LaneError  # noqa: E402
 
 JOB = "review"
-EVENTS = ("APPROVE", "REQUEST_CHANGES")
+EVENTS = verdict.EVENTS
 
 
 class ReviewError(LaneError):
@@ -100,7 +103,9 @@ def read_verdict(path: pathlib.Path) -> tuple[str, str]:
         raise ReviewError(f"the reviewer wrote no verdict to {path}") from exc
     except (OSError, ValueError) as exc:
         raise ReviewError(f"the verdict {path} could not be read as JSON: {exc}") from exc
-    if not isinstance(data, dict) or data.get("event") not in EVENTS:
+    if not isinstance(data, dict) or data.get("written_by") != verdict.WRITTEN_BY:
+        raise ReviewError(f"the verdict {path} was not written by {verdict.WRITTEN_BY} — the reviewer wrote it by hand")
+    if data.get("event") not in EVENTS:
         raise ReviewError(f"the verdict's event must be one of {', '.join(EVENTS)}")
     body = data.get("body")
     if not isinstance(body, str) or not body.strip():
@@ -189,16 +194,48 @@ def rereview(cfg: common.Config, number: int, actor: str = "") -> tuple[str, str
     return event, body
 
 
+# the system interpreter: the lane's own venv python links into a directory the reviewer's sandbox may not read
+# (`scripts/verdict.py` needs only the standard library)
+VERDICT_PYTHON = "/usr/bin/python3"
+
+
+def verdict_command(verdict_file: pathlib.Path, body_file: pathlib.Path) -> str:
+    """The command the reviewer runs once to hand in its verdict (it adds `--event`): the system python and
+    `scripts/verdict.py`, which only reads the body and writes inside the reviewer's scratch directory."""
+    script = pathlib.Path(verdict.__file__).resolve()
+    python = VERDICT_PYTHON if os.path.exists(VERDICT_PYTHON) else sys.executable
+    return " ".join(shlex.quote(part) for part in (python, "-B", str(script), "--out", str(verdict_file),
+                                                   "--body-file", str(body_file)))
+
+
+def log_refused(number: int, refused: pathlib.Path) -> None:
+    """Each second verdict the command refused during the session: an error in the log, the first verdict stands."""
+    try:
+        lines = refused.read_text(encoding="utf-8").splitlines() if refused.exists() else []
+    except OSError as exc:
+        common.log(JOB, f"#{number} FAILED — the refused-verdict record {refused} could not be read: {exc}")
+        return
+    for line in lines:
+        try:
+            attempt = json.loads(line)
+        except ValueError:
+            attempt = {"at": "?", "event": line[:40]}
+        common.log(JOB, f"#{number} ERROR — the reviewer tried to write a second verdict ({attempt.get('event')}, "
+                        f"{attempt.get('at')}): refused, the first verdict stands")
+
+
 def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str, str]:
     """Run the reviewer session at the head and return its verdict and the model it ran on."""
     model = reviewer_model(cfg, p)
     repo, worktree = cfg.checkout, common.state_dir("reviews") / f"pr-{p.number}"
     scratch = common.state_dir("scratch", f"review-{p.number}")
     verdict_file, diff_file = scratch / "verdict.json", scratch / "diff.patch"
+    body_file, refused = scratch / "review.md", verdict.refused_path(verdict_file)
     try:
-        verdict_file.unlink(missing_ok=True)
+        for old in (verdict_file, body_file, refused):
+            old.unlink(missing_ok=True)
     except OSError as exc:
-        raise ReviewError(f"the old verdict {verdict_file} could not be removed: {exc}") from exc
+        raise ReviewError(f"the old verdict in {scratch} could not be removed: {exc}") from exc
     driver = os.getpid()
     with common.checkout_lock():  # fetch and worktree add write the shared .git
         common.git(repo, "fetch", "-q", "origin", p.head)
@@ -219,7 +256,8 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str, str]:
         report = github.worker_report(cfg, p.number) or "(the worker posted no session report on this pull request)"
         prompt = common.render("review-brief.md", PR=str(p.number), REPO=cfg.slug, TITLE=p.title, HEAD=p.head[:9],
                                WORKTREE=str(worktree), BASE=cfg.base, DIFF_FILE=str(diff_file),
-                               FRAGMENT_CHECK=fragments, VERDICT_FILE=str(verdict_file), CARD=str(p.card),
+                               FRAGMENT_CHECK=fragments, BODY_FILE=str(body_file),
+                               VERDICT_CMD=verdict_command(verdict_file, body_file), CARD=str(p.card),
                                SPEC_NEIGHBOURS=spec_neighbours(p, others), WORKER_REPORT=report,
                                SCOPE=scope_context(p, cfg.area_prefix),
                                DECISIONS=github.decisions_section(github.decisions_for(cfg, p.card)),
@@ -228,6 +266,7 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str, str]:
         outcome = harness.run_session(cfg, model=model, worktree=worktree, prompt=prompt,
                                       scratch=scratch, log_path=log_path,
                                       on_start=lambda pgid, sid: harness.note_review_session(p.number, driver, pgid, sid))
+        log_refused(p.number, refused)
         if outcome.stalled or outcome.rc != 0:
             raise ReviewError(f"the review session did not finish cleanly (rc {outcome.rc}, stalled {outcome.stalled})")
         return (*read_verdict(verdict_file), model)
