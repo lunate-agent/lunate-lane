@@ -406,7 +406,8 @@ class BriefTests(unittest.TestCase):
         self.assertNotIn("line 10\n", text, "only the tail of the log")
         self.assertNotIn("2026-11-12T10:00", text, "timestamps are stripped")
         self.assertEqual(gh.call_args.args[:2], ("api", "repos/lunate-agent/lunate/actions/jobs/4242/logs"))
-        self.assertLess(text.index("build-and-test` — failure"), text.index("ci-ok` — failure"))
+        self.assertIn("build-and-test` — failure", text)
+        self.assertNotIn("ci-ok` — failure", text, "the roll-up is named, its own log is not quoted")
 
     def test_an_infra_failure_rerun_once_that_failed_again_goes_back_saying_so(self) -> None:
         runs = (github.Run("ci-ok", "CANCELLED", 1, "u", 9), github.Run("verify (macos, 2/4)", "CANCELLED", 2, "u", 9))
@@ -948,7 +949,7 @@ class DeathRecordTests(RepoCase):
 
 
 class BuildGateTests(DriveCase):
-    """#856 (card #850), 2026-11-14: the worker added tests/Lunate.Tui.Tests/ThemeFileTests.cs using a `ScratchPath`
+    """(The gate runs with `harness.build_gate` on; lane.json has it off for now.) #856 (card #850), 2026-11-14: the worker added tests/Lunate.Tui.Tests/ThemeFileTests.cs using a `ScratchPath`
     that does not exist, built only the project it changed, and pushed; CI failed with CS0103 at (30,47) and
     (39,23). Now the driver builds every touched project, test projects included, before any push."""
 
@@ -957,6 +958,9 @@ class BuildGateTests(DriveCase):
 
     def setUp(self) -> None:
         super().setUp()
+        gate = mock.patch.dict(self.cfg.harness, {"build_gate": True})
+        gate.start()
+        self.addCleanup(gate.stop)
         for path in ("src/Lunate.Tui/Lunate.Tui.csproj", "tests/Lunate.Tui.Tests/Lunate.Tui.Tests.csproj"):
             (self.clone / path).parent.mkdir(parents=True, exist_ok=True)
             (self.clone / path).write_text("<Project Sdk=\"Microsoft.NET.Sdk\" />\n")
@@ -1224,3 +1228,53 @@ class StartAtHeadTests(RepoCase):
         self.assertIn(f"not #856's head {self.head[:9]}", log)
         self.assertIn("2 uncommitted or untracked path(s) archived", log)
         self.assertIn(f"reset to {self.head[:9]}", what)
+
+
+class BuildGateSwitchTests(DriveCase):
+    def test_with_the_gate_off_nothing_is_built(self) -> None:
+        self.assertFalse(self.cfg.harness.get("build_gate", False), "lane.json ships it off")
+        with mock.patch.object(worker, "_run_build", side_effect=AssertionError("no build with the gate off")):
+            path = worker.prepare_worktree(self.cfg, 3)
+            self.assertEqual(worker.build_errors(self.cfg, path, self.cfg.state / "scratch" / "issue-3"), [])
+
+
+class CiOkDependencyTests(unittest.TestCase):
+    """#856 at cbe54a028 (run 43603026604): `verify (ubuntu-latest, 2/4)` failed two tests and `ci-ok` failed because
+    of it. The brief quotes the verify job's failures first, never ci-ok's own log. Fixture: the real job log
+    (job 132471692005, lines 380–537)."""
+
+    LOG = (pathlib.Path(__file__).parent / "fixtures" / "job-132471692005-856-verify-2of4.log").read_text()
+    CI_OK = "##[error]ci-ok: a required job did not succeed (verify=failure)\n##[error]Process completed with exit code 1."
+
+    def test_the_brief_quotes_the_failed_dependency_with_its_failing_tests_and_not_ci_ok(self) -> None:
+        state = TempState()
+        self.addCleanup(state.close)
+        runs = (("verify (ubuntu-latest, 2/4)", "FAILURE", 132471692005,
+                 "https://github.com/lunate-agent/lunate/actions/runs/43603026604/job/132471692005"),
+                ("ci-ok", "FAILURE", 132471612161, "https://github.com/lunate-agent/lunate/actions/runs/x/job/132471612161"))
+        p = pull(856, 850, head="cbe54a028", runs=runs, checks=(("ci-ok", "COMPLETED", "FAILURE"),))
+        logs = {"132471692005": self.LOG, "132471612161": self.CI_OK}
+
+        def gh(*args, **_):
+            path = next((a for a in args if "/actions/jobs/" in str(a)), "")
+            if not path:
+                raise AssertionError(f"unexpected gh {args[:2]}")
+            return logs[path.split("/actions/jobs/")[1].split("/")[0]]
+
+        with mock.patch.object(github, "pull", return_value=p), \
+                mock.patch.object(github, "newer_decision", return_value=""), \
+                mock.patch.object(harness, "reran", return_value=frozenset()), \
+                mock.patch.object(github, "failure_kind", return_value="real"), \
+                mock.patch.object(github, "required_checks", return_value=REQUIRED), \
+                mock.patch.object(common, "gh", side_effect=gh):
+            findings, _ = worker.rework_brief(state.cfg, 856)
+        self.assertIn("#### `verify (ubuntu-latest, 2/4)` — failure", findings)
+        self.assertNotIn("#### `ci-ok`", findings, "the roll-up's own log is never quoted when a job it needs failed")
+        errors = findings[findings.index("Errors in the log:"):findings.index("The log around them:")]
+        self.assertIn("failed Lunate.Coding.Tests.LiveSurfaceRepaintTests.The_question_tool_repaints_without_leftover_"
+                      "rows_at_40_columns", errors)
+        self.assertIn("failed Lunate.Coding.Tests.UnixChildProcessPipeLifetimeTests.A_child_holds_no_pipe_end_it_was_"
+                      "not_given", errors)
+        self.assertIn("System.TimeoutException : chat call 2 never started within 60 seconds", errors)
+        self.assertNotIn("\x1b[", findings)
+        self.assertNotIn("[31m", findings)

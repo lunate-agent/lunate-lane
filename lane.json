@@ -35,7 +35,7 @@
     "credential_key": "OPENCODE_GO_API_KEY",
     "credential_env": "OPENCODE_API_KEY",
     "session_timeout": 5400,
-    "stall_idle": 1200
+    "stall_idle": 1200, "build_gate": false
   },
   "paths": {
     "checkout": "~/dev/lunate",

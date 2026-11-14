@@ -1,0 +1,158 @@
+2026-11-14T14:06:30.5973236Z   HelloExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/HelloExtension/bin/Debug/net10.0/HelloExtension.dll
+2026-11-14T14:06:31.7869617Z   UiShowcaseExtension.Tests -> /home/runner/work/lunate/lunate/samples/extensions/ui-showcase/UiShowcaseExtension.Tests/bin/Release/net10.0/UiShowcaseExtension.Tests.dll
+2026-11-14T14:06:31.8659667Z   CodeModeExtension.Tests -> /home/runner/work/lunate/lunate/samples/extensions/code-mode/CodeModeExtension.Tests/bin/Release/net10.0/CodeModeExtension.Tests.dll
+2026-11-14T14:06:31.9194014Z   Lunate.Extensibility.Testing.Tests -> /home/runner/work/lunate/lunate/tests/Lunate.Extensibility.Testing.Tests/bin/Release/net10.0/Lunate.Extensibility.Testing.Tests.dll
+2026-11-14T14:06:31.9206231Z   LspDiagnosticsExtension.Tests -> /home/runner/work/lunate/lunate/extensions/lsp-diagnostics/LspDiagnosticsExtension.Tests/bin/Release/net10.0/LspDiagnosticsExtension.Tests.dll
+2026-11-14T14:06:32.0467785Z   HelloExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/HelloExtension/bin/Release/net10.0/HelloExtension.dll
+2026-11-14T14:06:34.5720930Z   Lunate.Extensibility.Tests -> /home/runner/work/lunate/lunate/tests/Lunate.Extensibility.Tests/bin/Release/net10.0/Lunate.Extensibility.Tests.dll
+2026-11-14T14:06:34.8033041Z   McpExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/McpExtension/bin/Release/net10.0/McpExtension.dll
+2026-11-14T14:06:48.4373183Z   Lunate.Coding.Tests -> /home/runner/work/lunate/lunate/tests/Lunate.Coding.Tests/bin/Release/net10.0/Lunate.Coding.Tests.dll
+2026-11-14T14:06:48.5324253Z   ToolExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/ToolExtension/bin/Release/net10.0/ToolExtension.dll
+2026-11-14T14:06:48.6135646Z   CommandExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/CommandExtension/bin/Release/net10.0/CommandExtension.dll
+2026-11-14T14:06:48.6955803Z   MarkerExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/MarkerExtension/bin/Release/net10.0/MarkerExtension.dll
+2026-11-14T14:06:48.6993327Z   ModelExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/ModelExtension/bin/Release/net10.0/ModelExtension.dll
+2026-11-14T14:06:48.7972440Z   SkillSourceExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/SkillSourceExtension/bin/Release/net10.0/SkillSourceExtension.dll
+2026-11-14T14:06:48.8065199Z   LeakExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/LeakExtension/bin/Release/net10.0/LeakExtension.dll
+2026-11-14T14:06:48.9273167Z   ServiceConsumerExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/ServiceConsumerExtension/bin/Release/net10.0/ServiceConsumerExtension.dll
+2026-11-14T14:06:48.9696193Z 
+2026-11-14T14:06:48.9752239Z Build succeeded.
+2026-11-14T14:06:48.9767044Z     0 Warning(s)
+2026-11-14T14:06:48.9767587Z     0 Error(s)
+2026-11-14T14:06:48.9767809Z 
+2026-11-14T14:06:48.9768059Z Time Elapsed 00:00:53.52
+2026-11-14T14:06:49.0272324Z --- build: 54s
+2026-11-14T14:06:49.0302812Z 
+2026-11-14T14:06:49.0302936Z ==> test
+2026-11-14T14:11:25.7777805Z verify: test failed once (exit 2) — retrying once under the flake budget
+2026-11-14T14:11:25.7805241Z 
+2026-11-14T14:11:25.7805455Z [31mTest run summary: Failed!
+2026-11-14T14:11:25.7806148Z   [m/home/runner/work/lunate/lunate/tests/Lunate.Extensibility.Testing.Tests/bin/Release/net10.0/Lunate.Extensibility.Testing.Tests.dll (net10.0|x64) [32mpassed[m [90m(18s 659ms)[m
+2026-11-14T14:11:25.7807228Z   [m/home/runner/work/lunate/lunate/tests/Lunate.Coding.Tests/bin/Release/net10.0/Lunate.Coding.Tests.dll (net10.0|x64) [31mfailed with 1 error(s)[m [90m(4m 36s 206ms)[m
+2026-11-14T14:11:25.7808115Z   [m/home/runner/work/lunate/lunate/samples/extensions/worktree-tasks/WorktreeTasksExtension.Tests/bin/Release/net10.0/WorktreeTasksExtension.Tests.dll (net10.0|x64) [32mpassed[m [90m(4s 304ms)[m
+2026-11-14T14:11:25.7808945Z   [m/home/runner/work/lunate/lunate/tests/Lunate.Tui.Tests/bin/Release/net10.0/Lunate.Tui.Tests.dll (net10.0|x64) [32mpassed[m [90m(2s 123ms)[m
+2026-11-14T14:11:25.7810472Z   [m/home/runner/work/lunate/lunate/samples/extensions/memory-provider/MemoryProviderExtension.Tests/bin/Release/net10.0/MemoryProviderExtension.Tests.dll (net10.0|x64) [32mpassed[m [90m(1s 591ms)[m
+2026-11-14T14:11:25.7811817Z   [m/home/runner/work/lunate/lunate/extensions/permission-gate/PermissionGateExtension.Tests/bin/Release/net10.0/PermissionGateExtension.Tests.dll (net10.0|x64) [32mpassed[m [90m(1s 418ms)[m
+2026-11-14T14:11:25.7812193Z 
+2026-11-14T14:11:25.7812255Z [m  total: 4908
+2026-11-14T14:11:25.7812511Z [31m  failed: 1
+2026-11-14T14:11:25.7812650Z [m  succeeded: 4903
+2026-11-14T14:11:25.7812771Z   skipped: 4
+2026-11-14T14:11:25.7812899Z   duration: 4m 36s 611ms
+2026-11-14T14:11:25.7813156Z Test run completed with non-success exit code: 2 (see: https://aka.ms/testingplatform/exitcodes)
+2026-11-14T14:16:37.6911706Z Running tests from /home/runner/work/lunate/lunate/tests/Lunate.Tui.Tests/bin/Release/net10.0/Lunate.Tui.Tests.dll (net10.0|x64)
+2026-11-14T14:16:37.6912567Z Running tests from /home/runner/work/lunate/lunate/tests/Lunate.Coding.Tests/bin/Release/net10.0/Lunate.Coding.Tests.dll (net10.0|x64)
+2026-11-14T14:16:37.6913495Z Running tests from /home/runner/work/lunate/lunate/samples/extensions/memory-provider/MemoryProviderExtension.Tests/bin/Release/net10.0/MemoryProviderExtension.Tests.dll (net10.0|x64)
+2026-11-14T14:16:37.6914596Z Running tests from /home/runner/work/lunate/lunate/samples/extensions/worktree-tasks/WorktreeTasksExtension.Tests/bin/Release/net10.0/WorktreeTasksExtension.Tests.dll (net10.0|x64)
+2026-11-14T14:16:37.6916452Z [m/home/runner/work/lunate/lunate/samples/extensions/memory-provider/MemoryProviderExtension.Tests/bin/Release/net10.0/MemoryProviderExtension.Tests.dll (net10.0|x64) [32mpassed[m [90m(1s 382ms)[m
+2026-11-14T14:16:37.6917375Z [m/home/runner/work/lunate/lunate/tests/Lunate.Tui.Tests/bin/Release/net10.0/Lunate.Tui.Tests.dll (net10.0|x64) [32mpassed[m [90m(1s 657ms)[m
+2026-11-14T14:16:37.6918114Z Running tests from /home/runner/work/lunate/lunate/tests/Lunate.Extensibility.Testing.Tests/bin/Release/net10.0/Lunate.Extensibility.Testing.Tests.dll (net10.0|x64)
+2026-11-14T14:16:37.6919123Z [33mskipped[m Lunate.Coding.Tests.OpenCodeGoSystemOneLiveSmokeTests.Opencode_go_systemone_resolves_native_and_returns_a_usable_noul
+2026-11-14T14:16:37.6919730Z   Live contracts require LUNATE_LIVE=1.
+2026-11-14T14:16:37.6920396Z   from /home/runner/work/lunate/lunate/tests/Lunate.Coding.Tests/bin/Release/net10.0/Lunate.Coding.Tests.dll (net10.0|x64)
+2026-11-14T14:16:37.6921470Z Running tests from /home/runner/work/lunate/lunate/extensions/permission-gate/PermissionGateExtension.Tests/bin/Release/net10.0/PermissionGateExtension.Tests.dll (net10.0|x64)
+2026-11-14T14:16:37.6922505Z [33mskipped[m Lunate.Coding.Tests.ChildProcessToolEnvironmentTests.A_passed_through_name_reaches_the_windows_tool_child
+2026-11-14T14:16:37.6923123Z   the Windows spawn path is pinned on Windows; the POSIX test covers its own
+2026-11-14T14:16:37.6923746Z   from /home/runner/work/lunate/lunate/tests/Lunate.Coding.Tests/bin/Release/net10.0/Lunate.Coding.Tests.dll (net10.0|x64)
+2026-11-14T14:16:37.6924828Z [m/home/runner/work/lunate/lunate/extensions/permission-gate/PermissionGateExtension.Tests/bin/Release/net10.0/PermissionGateExtension.Tests.dll (net10.0|x64) [32mpassed[m [90m(1s 293ms)[m
+2026-11-14T14:16:37.6925647Z [m/home/runner/work/lunate/lunate/samples/extensions/worktree-tasks/WorktreeTasksExtension.Tests/bin/Release/net10.0/WorktreeTasksExtension.Tests.dll (net10.0|x64) [32mpassed[m [90m(3s 736ms)[m
+2026-11-14T14:16:37.6926577Z [m/home/runner/work/lunate/lunate/tests/Lunate.Extensibility.Testing.Tests/bin/Release/net10.0/Lunate.Extensibility.Testing.Tests.dll (net10.0|x64) [32mpassed[m [90m(14s 637ms)[m
+2026-11-14T14:16:37.6927339Z [31mfailed[m Lunate.Coding.Tests.UnixChildProcessPipeLifetimeTests.A_child_holds_no_pipe_end_it_was_not_given [90m(88ms)[m
+2026-11-14T14:16:37.6928318Z   from /home/runner/work/lunate/lunate/tests/Lunate.Coding.Tests/bin/Release/net10.0/Lunate.Coding.Tests.dll (net10.0|x64)
+2026-11-14T14:16:37.6929012Z [31m  a child inherited pipe ends it was not given: fds-0.txt holds fd 953, fds-2.txt holds fd 921, fds-3.txt holds fd 983, fds-5.txt holds fd 963, fds-6.txt holds fd 963, fds-7.txt holds fd 914
+2026-11-14T14:16:37.6930128Z [m[90m    at Lunate.Coding.Tests.UnixChildProcessPipeLifetimeTests.A_child_holds_no_pipe_end_it_was_not_given() in /_/tests/Lunate.Coding.Tests/UnixChildProcessPipeLifetimeTests.cs:114[90m
+2026-11-14T14:16:37.6930687Z     --- End of stack trace from previous location ---
+2026-11-14T14:16:37.6933043Z [m[31mfailed[m Lunate.Coding.Tests.LiveSurfaceRepaintTests.The_question_tool_repaints_without_leftover_rows_at_40_columns [90m(1m 00s 009ms)[m
+2026-11-14T14:16:37.6933790Z   from /home/runner/work/lunate/lunate/tests/Lunate.Coding.Tests/bin/Release/net10.0/Lunate.Coding.Tests.dll (net10.0|x64)
+2026-11-14T14:16:37.6934623Z [31m  Xunit.MicrosoftTestingPlatform.XunitException: System.TimeoutException : chat call 2 never started within 60 seconds (started=1).
+2026-11-14T14:16:37.6935593Z [m[90m    at Lunate.Coding.Tests.GatedChatClient.WaitForCallAsync(Int32 call, Nullable`1 timeout) in /_/tests/Lunate.Coding.Tests/InteractiveSessionTestSupport.cs:448[90m
+2026-11-14T14:16:37.6936428Z     at Lunate.Coding.Tests.LiveSurfaceRepaintTests.The_question_tool_repaints_without_leftover_rows_at_40_columns() in /_/tests/Lunate.Coding.Tests/LiveSurfaceRepaintTests.cs:114[90m
+2026-11-14T14:16:37.6936866Z     --- End of stack trace from previous location ---
+2026-11-14T14:16:37.6937236Z [m[33mskipped[m Lunate.Coding.Tests.RoslynMigrationMemoryProbeTests.Hold_after_reference_solution_load
+2026-11-14T14:16:37.6937569Z   set LUNATE_ROSLYN_MEMORY_ROOT to a restored reference solution
+2026-11-14T14:16:37.6937931Z   from /home/runner/work/lunate/lunate/tests/Lunate.Coding.Tests/bin/Release/net10.0/Lunate.Coding.Tests.dll (net10.0|x64)
+2026-11-14T14:16:37.6938412Z [33mskipped[m Lunate.Coding.Tests.RoslynMigrationMemoryProbeTests.Hold_after_ten_edit_to_diagnostics_cycles
+2026-11-14T14:16:37.6938749Z   set LUNATE_ROSLYN_MEMORY_ROOT to a restored reference solution
+2026-11-14T14:16:37.6939098Z   from /home/runner/work/lunate/lunate/tests/Lunate.Coding.Tests/bin/Release/net10.0/Lunate.Coding.Tests.dll (net10.0|x64)
+2026-11-14T14:16:37.6939689Z [m/home/runner/work/lunate/lunate/tests/Lunate.Coding.Tests/bin/Release/net10.0/Lunate.Coding.Tests.dll (net10.0|x64) [31mfailed with 2 error(s)[m [90m(5m 11s 558ms)[m
+2026-11-14T14:16:37.6940038Z Exit code: 2
+2026-11-14T14:16:37.6940117Z 
+2026-11-14T14:16:37.6940201Z [31mTest run summary: Failed!
+2026-11-14T14:16:37.6940657Z   [m/home/runner/work/lunate/lunate/tests/Lunate.Coding.Tests/bin/Release/net10.0/Lunate.Coding.Tests.dll (net10.0|x64) [31mfailed with 2 error(s)[m [90m(5m 11s 558ms)[m
+2026-11-14T14:16:37.6941473Z   [m/home/runner/work/lunate/lunate/tests/Lunate.Tui.Tests/bin/Release/net10.0/Lunate.Tui.Tests.dll (net10.0|x64) [32mpassed[m [90m(1s 657ms)[m
+2026-11-14T14:16:37.6942184Z   [m/home/runner/work/lunate/lunate/samples/extensions/worktree-tasks/WorktreeTasksExtension.Tests/bin/Release/net10.0/WorktreeTasksExtension.Tests.dll (net10.0|x64) [32mpassed[m [90m(3s 736ms)[m
+2026-11-14T14:16:37.6942991Z   [m/home/runner/work/lunate/lunate/extensions/permission-gate/PermissionGateExtension.Tests/bin/Release/net10.0/PermissionGateExtension.Tests.dll (net10.0|x64) [32mpassed[m [90m(1s 293ms)[m
+2026-11-14T14:16:37.6943757Z   [m/home/runner/work/lunate/lunate/tests/Lunate.Extensibility.Testing.Tests/bin/Release/net10.0/Lunate.Extensibility.Testing.Tests.dll (net10.0|x64) [32mpassed[m [90m(14s 637ms)[m
+2026-11-14T14:16:37.6944550Z   [m/home/runner/work/lunate/lunate/samples/extensions/memory-provider/MemoryProviderExtension.Tests/bin/Release/net10.0/MemoryProviderExtension.Tests.dll (net10.0|x64) [32mpassed[m [90m(1s 382ms)[m
+2026-11-14T14:16:37.6944931Z 
+2026-11-14T14:16:37.6944995Z [m  total: 4908
+2026-11-14T14:16:37.6945124Z [31m  failed: 2
+2026-11-14T14:16:37.6945591Z [m  succeeded: 4902
+2026-11-14T14:16:37.6945717Z   skipped: 4
+2026-11-14T14:16:37.6945849Z   duration: 5m 11s 808ms
+2026-11-14T14:16:37.6946102Z Test run completed with non-success exit code: 2 (see: https://aka.ms/testingplatform/exitcodes)
+2026-11-14T14:16:37.6946448Z verify: test failed twice in a row (exit 2) — not a flake
+2026-11-14T14:16:37.6995636Z verify: wall time 642s (rid=linux-x64 shard=2/4 profile=full exit=1)
+2026-11-14T14:16:37.6996000Z shard-timing: wrote artifacts/verify-timing/verify-linux-x64-2-of-4.json
+2026-11-14T14:16:37.7021521Z ##[error]Process completed with exit code 1.
+2026-11-14T14:16:37.7091991Z ##[group]Run actions/upload-artifact@v7
+2026-11-14T14:16:37.7092154Z with:
+2026-11-14T14:16:37.7092281Z   name: verify-timing-linux-x64-2-of-4
+2026-11-14T14:16:37.7092446Z   path: artifacts/verify-timing/
+2026-11-14T14:16:37.7092588Z   if-no-files-found: warn
+2026-11-14T14:16:37.7092718Z   retention-days: 14
+2026-11-14T14:16:37.7092840Z   compression-level: 6
+2026-11-14T14:16:37.7092964Z   overwrite: false
+2026-11-14T14:16:37.7093086Z   include-hidden-files: false
+2026-11-14T14:16:37.7093218Z   archive: true
+2026-11-14T14:16:37.7093327Z env:
+2026-11-14T14:16:37.7093429Z   RID: linux-x64
+2026-11-14T14:16:37.7093563Z   VERIFY_SKIP_PLATFORM_CHECKS: 1
+2026-11-14T14:16:37.7093735Z   DOTNET_CLI_UI_LANGUAGE: en
+2026-11-14T14:16:37.7093871Z   DOTNET_ROOT: /usr/share/dotnet
+2026-11-14T14:16:37.7094009Z ##[endgroup]
+2026-11-14T14:16:37.7965640Z With the provided path, there will be 1 file uploaded
+2026-11-14T14:16:37.7969335Z Artifact name is valid!
+2026-11-14T14:16:37.7969706Z Root directory input is valid!
+2026-11-14T14:16:38.0040156Z Uploading artifact: verify-timing-linux-x64-2-of-4.zip
+2026-11-14T14:16:38.0075087Z Beginning upload of artifact content to blob storage
+2026-11-14T14:16:38.0799824Z Uploaded bytes 254
+2026-11-14T14:16:38.0976850Z Finished uploading artifact content to blob storage!
+2026-11-14T14:16:38.0977579Z SHA256 digest of uploaded artifact is 8353ecddcbd2b56655fc6b66b0f9a10a4bdd78306b08b2ab1e0c979e9b2200ca
+2026-11-14T14:16:38.0978166Z Finalizing artifact upload
+2026-11-14T14:16:38.4429000Z Artifact verify-timing-linux-x64-2-of-4 successfully finalized. Artifact ID 14117950243
+2026-11-14T14:16:38.4429520Z Artifact verify-timing-linux-x64-2-of-4 has been successfully uploaded! Final size is 254 bytes. Artifact ID is 14117950243
+2026-11-14T14:16:38.4432010Z Artifact download URL: https://github.com/lunate-agent/lunate/actions/runs/43603026604/artifacts/14117950243
+2026-11-14T14:16:38.4583327Z Post job cleanup.
+2026-11-14T14:16:38.5138620Z [command]/usr/bin/git version
+2026-11-14T14:16:38.5171988Z git version 2.56.1
+2026-11-14T14:16:38.5194396Z Temporarily overriding HOME='/home/runner/work/_temp/519daf02-1400-4fae-b7ed-fe2026c55370' before making global git config changes
+2026-11-14T14:16:38.5195121Z Adding repository directory to the temporary git global config as a safe directory
+2026-11-14T14:16:38.5198338Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/lunate/lunate
+2026-11-14T14:16:38.5227763Z Removing SSH command configuration
+2026-11-14T14:16:38.5231785Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-11-14T14:16:38.5266044Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-11-14T14:16:38.5504574Z Removing HTTP extra header
+2026-11-14T14:16:38.5509863Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-11-14T14:16:38.5539473Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-11-14T14:16:38.5766536Z Removing includeIf entries pointing to credentials config files
+2026-11-14T14:16:38.5771947Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-11-14T14:16:38.5793602Z includeif.gitdir:/home/runner/work/lunate/lunate/.git.path
+2026-11-14T14:16:38.5794069Z includeif.gitdir:/home/runner/work/lunate/lunate/.git/worktrees/*.path
+2026-11-14T14:16:38.5794456Z includeif.gitdir:/github/workspace/.git.path
+2026-11-14T14:16:38.5794691Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-11-14T14:16:38.5799414Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/lunate/lunate/.git.path
+2026-11-14T14:16:38.5818545Z /home/runner/work/_temp/git-credentials-d28e197f-43a2-42b7-b5c7-8d9cecbb626c.config
+2026-11-14T14:16:38.5825374Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/lunate/lunate/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-d28e197f\-43a2\-42b7\-b5c7\-8d9cecbb626c\.config
+2026-11-14T14:16:38.5860646Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/lunate/lunate/.git/worktrees/*.path
+2026-11-14T14:16:38.5881427Z /home/runner/work/_temp/git-credentials-d28e197f-43a2-42b7-b5c7-8d9cecbb626c.config
+2026-11-14T14:16:38.5886336Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/lunate/lunate/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-d28e197f\-43a2\-42b7\-b5c7\-8d9cecbb626c\.config
+2026-11-14T14:16:38.5912577Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+2026-11-14T14:16:38.5930910Z /github/runner_temp/git-credentials-d28e197f-43a2-42b7-b5c7-8d9cecbb626c.config
+2026-11-14T14:16:38.5936406Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path \/github\/runner_temp\/git\-credentials\-d28e197f\-43a2\-42b7\-b5c7\-8d9cecbb626c\.config
+2026-11-14T14:16:38.5963153Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-11-14T14:16:38.5981734Z /github/runner_temp/git-credentials-d28e197f-43a2-42b7-b5c7-8d9cecbb626c.config
+2026-11-14T14:16:38.5986676Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-d28e197f\-43a2\-42b7\-b5c7\-8d9cecbb626c\.config
+2026-11-14T14:16:38.6013398Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-11-14T14:16:38.6218980Z Removing credentials config '/home/runner/work/_temp/git-credentials-d28e197f-43a2-42b7-b5c7-8d9cecbb626c.config'
+2026-11-14T14:16:38.6338331Z Cleaning up orphan processes
+2026-11-14T14:16:38.6546690Z Terminate orphan process: pid (2935) (VBCSCompiler)
