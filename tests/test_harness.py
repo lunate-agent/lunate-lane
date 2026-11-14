@@ -171,6 +171,24 @@ class SandboxTests(HarnessCase):
         return subprocess.run(harness.sandboxed(command, profile or self.profile()), capture_output=True, text=True,
                               timeout=60)
 
+    def test_msbuilds_node_sockets_and_nothing_else_in_tmp_can_be_created(self) -> None:
+        """#856: MSBuild creates `/private/tmp/MSBuild<pid>` for its nodes; denied, every build hung 5 minutes."""
+        import os
+        name = f"/private/tmp/MSBuild{os.getpid()}9"
+        others = ["/private/tmp/other-file", f"/private/tmp/MSBuild{os.getpid()}x", "/private/tmp/MSBuild",
+                  f"/private/tmp/xMSBuild{os.getpid()}", f"/private/tmp/MSBuild{os.getpid()}/inside"]
+        for path in [name, *others]:
+            self.addCleanup(lambda p=path: os.path.exists(p) and os.unlink(p))
+        script = ("import os, sys\nfor p in sys.argv[1:]:\n"
+                  "    try:\n        open(p, 'w').close(); os.unlink(p); print('ok', p)\n"
+                  "    except OSError as e:\n        print('denied', p, e.errno)\n")
+        done = self.run_in(["/usr/bin/python3", "-c", script, name, *others])
+        lines = done.stdout.splitlines()
+        self.assertEqual(lines[0], f"ok {name}")
+        for path, line in zip(others, lines[1:]):
+            self.assertTrue(line.startswith(f"denied {path}"), line)
+        self.assertIn('(regex #"^/private/tmp/MSBuild[0-9]+$")', self.profile().read_text())
+
     def test_a_sandboxed_child_cannot_read_or_write_any_denied_directory(self) -> None:
         allowed = self.state.root / "allowed.txt"
         allowed.write_text("fine\n")

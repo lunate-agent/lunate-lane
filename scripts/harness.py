@@ -195,6 +195,9 @@ def _rx(path: str, tail: str = "") -> str:
     return '(regex #"^' + re.escape(path).replace('"', '\\"') + tail + '$")'
 
 
+MSBUILD_SOCKETS = '(regex #"^/private/tmp/MSBuild[0-9]+$")'
+
+
 def sandbox_profile(cfg: common.Config, real_home: pathlib.Path | None = None, *, scratch: pathlib.Path,
                     worktree: pathlib.Path, branch: str | None = None) -> str:
     """The session's sandbox (review of #17, round two, item 1). Writes are denied by default; allowed only:
@@ -202,7 +205,9 @@ def sandbox_profile(cfg: common.Config, real_home: pathlib.Path | None = None, *
         the session's scratch (its HOME and TMPDIR) and its worktree;
         what git needs to commit there — `.git/objects`, the worktree's own `.git/worktrees/<name>`, and for a
         worker its own branch ref and that ref's log (not other refs: cleanup trusts `refs/remotes/origin`);
-        the NuGet package cache the lane points sessions at; /dev/null and /dev/tty.
+        the NuGet package cache the lane points sessions at; /dev/null and /dev/tty;
+        MSBuild's node sockets, `/private/tmp/MSBuild<pid>` and nothing else in /tmp (MSBuild puts them in /tmp,
+        not TMPDIR, on macOS; denied, every build waited 5 minutes for nodes that could not connect — #856).
 
     Inside those, the worktree's `.git` pointer and the admin directory's `gitdir`, `commondir` and
     `config.worktree` stay denied. Reads of the lane's and the user's secrets are denied; process-info only on
@@ -219,7 +224,7 @@ def sandbox_profile(cfg: common.Config, real_home: pathlib.Path | None = None, *
     packages = real_home / ".nuget" / "packages"
     if packages.is_dir():
         allowed += [f"(subpath {_sbpl(p)})" for p in _forms([packages])]
-    allowed += ['(literal "/dev/null")', '(literal "/dev/tty")']
+    allowed += ['(literal "/dev/null")', '(literal "/dev/tty")', MSBUILD_SOCKETS]
     pinned = [_rx(form, r"(\.lock)?") for form in _forms([worktree / ".git", admin / "gitdir", admin / "commondir",
                                                             admin / "config.worktree"])]
     deny = " ".join(f"(subpath {_sbpl(p)})" for p in denied_paths(cfg, real_home))
