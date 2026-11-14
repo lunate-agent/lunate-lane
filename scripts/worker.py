@@ -74,7 +74,9 @@ def prepare_worktree(cfg: common.Config, number: int) -> pathlib.Path:
 def _prepare_worktree(cfg: common.Config, number: int) -> pathlib.Path:
     repo, branch = cfg.checkout, f"wt/issue-{number}"
     path = common.state_dir("worktrees") / f"issue-{number}"
-    common.git(repo, "fetch", "-q", "origin")
+    # --prune: a branch deleted on GitHub must not survive as a stale origin ref the card then continues from
+    # (#798, 2026-11-14: wt/issue-798, deleted after #799 merged on the 12th, came back as the whole merged stack)
+    common.git(repo, "fetch", "-q", "--prune", "origin")
     remote = ref_exists(repo, f"refs/remotes/origin/{branch}")
     if (path / ".git").exists():
         current = common.wt_git(cfg, path, "rev-parse", "--abbrev-ref", "HEAD")

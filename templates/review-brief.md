@@ -70,6 +70,12 @@ finish the review before you run it.
 - an OpenSpec lifecycle violation (a hand-edited spec, an archive that is not last, a delta that contradicts
   main's spec or another open PR unannounced, a spec conflict resolved by hand).
 
+**A maintainer's Decision is binding.** A dated entry under the card's "## Decisions" (and a decision issue
+quoted below) settles that question: a finding that contradicts one is never blocking — not a scope violation,
+not a lifecycle violation, not a defect. List it under **Non-blocking** as `contradicts the maintainer's
+Decision of <date>: <the finding>` and judge the rest.
+
+{{CARD_DECISIONS}}
 **Everything else is non-blocking** — wording, naming, style, the pull request's title or description, the
 worker's report, which tests the worker says it ran, a small cleanup in the card's own area, a file or lines
 another open pull request also changes, a test that would

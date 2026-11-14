@@ -25,6 +25,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import threading
 import time
 from typing import Callable
 
@@ -272,12 +273,17 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
         out_file = log_path.open("ab")
     except OSError as exc:
         raise HarnessError(f"the session log {log_path} could not be opened: {exc}") from exc
+    known = (env.get(cfg.harness["credential_env"], ""),)
     with out_file as out:
         try:
-            proc = subprocess.Popen(command, cwd=str(worktree), env=env, stdin=subprocess.DEVNULL, stdout=out,
-                                    stderr=subprocess.STDOUT, start_new_session=True)
+            proc = subprocess.Popen(command, cwd=str(worktree), env=env, stdin=subprocess.DEVNULL,
+                                    stdout=subprocess.PIPE, stderr=subprocess.STDOUT, start_new_session=True)
         except OSError as exc:
             raise HarnessError(f"{command[0]} could not be started ({exc.__class__.__name__}: {exc})") from exc
+        # every line is redacted before it is written: the session's own environment holds the model key, and a
+        # tool call that prints it (`env`) would otherwise put it in this file (2026-11-14: five worker sessions)
+        pump = threading.Thread(target=_redacting_copy, args=(proc.stdout, out, known), daemon=True)
+        pump.start()
         started = last_activity = time.monotonic()
         size, stalled = -1, False
         try:
@@ -301,7 +307,41 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
         except BaseException:
             _kill_group(proc)  # never leave a session running behind a driver that is going away
             raise
+        finally:
+            pump.join(timeout=30)
+            scrub_dir(scratch / "sessions", known)  # Pi's own session files, which it writes itself
     return Outcome(proc.returncode, stalled, int(time.monotonic() - started), leaked_markup(log_path))
+
+
+def _redacting_copy(source, out, known: tuple) -> None:
+    """Copy the session's output to its log a line at a time, each line redacted (`secret_scan.redact_record`)
+    before it is written."""
+    for raw in iter(source.readline, b""):
+        line = raw.decode("utf-8", errors="replace")
+        out.write(secret_scan.redact_record(line, known).encode("utf-8"))
+        out.flush()
+
+
+def scrub_dir(directory: pathlib.Path, known: tuple) -> list[pathlib.Path]:
+    """Redact every file under `directory` in place (`secret_scan.redact_record`), atomically per file; returns
+    the files changed. Pi writes its own session files while it runs, so they are scrubbed when it stops."""
+    changed = []
+    if not directory.is_dir() or directory.is_symlink():
+        return changed
+    for path in sorted(directory.rglob("*")):
+        if not path.is_file() or path.is_symlink():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+            clean = secret_scan.redact_record(text, known)
+            if clean != text:
+                tmp = path.with_name(path.name + ".scrub")
+                tmp.write_text(clean, encoding="utf-8")
+                os.replace(tmp, path)
+                changed.append(path)
+        except OSError as exc:
+            raise HarnessError(f"{path} could not be scrubbed of secrets ({exc.__class__.__name__})") from exc
+    return changed
 
 
 def exit_on_signals() -> None:

@@ -299,7 +299,7 @@ class BriefTests(unittest.TestCase):
 
     def test_the_review_brief_carries_the_spec_comparison_the_neighbours_and_the_intent_decisions(self) -> None:
         text = common.render("review-brief.md", PR="6", REPO="o/r", TITLE="t", HEAD="abc", WORKTREE="/w",
-                             BASE="main", DIFF_FILE="/d", FRAGMENT_CHECK="f", BODY_FILE="/b", VERDICT_CMD="/c", CARD="9",
+                             BASE="main", DIFF_FILE="/d", FRAGMENT_CHECK="f", BODY_FILE="/b", VERDICT_CMD="/c", CARD="9", CARD_DECISIONS="",
                              SPEC_NEIGHBOURS="NEIGHBOURS-HERE", WORKER_REPORT="REPORT-HERE", BODY="b", SCOPE="SCOPE-HERE",
                              DECISIONS="## Decisions this card waited on (verbatim)\n\nDecision: DECIDED-HERE\n")
         self.assertIn("git show origin/main:openspec/specs/<capability>/spec.md", text)
@@ -411,3 +411,41 @@ class ScopeTests(unittest.TestCase):
         self.assertEqual(review.scope_context(mine, "area/"), "The card's area: `area/docs`.")
         self.assertEqual(review.scope_context(pull(9, 9, files=("a.cs",)), "area/"),
                          "The card has no area label: its area is what its own text names.")
+
+
+class CardDecisionsTests(unittest.TestCase):
+    """#848 (card #809), 2026-11-14 09:06: the review flagged `adr/0037-ci-gate-sized-by-event.md:1` as a scope
+    violation ("an ADR renumbering unrelated to the card"); the card's Decisions entry, dated that day, kept it."""
+
+    BODY_809 = ("The 0.4.0 documentation slices moved pages under `docs/dev/` …\n\n**Done when:** one archived "
+                "OpenSpec change updates those path requirements.\n\nRefs #614, #750, #751, #752.\n\n## Decisions\n\n"
+                "- 2026-11-14: The ADR renumbering to 0037 stays in this pull request; it fixes the duplicate ADR 0036 "
+                "on main. The 07:38 lifecycle finding is obsolete since #849 (one pull request per card). Fix "
+                "verify-docs and nothing else.\n")
+    FINDING_848 = ("**Scope violation:** `adr/0037-ci-gate-sized-by-event.md:1` is an ADR renumbering unrelated to the "
+                   "card's documentation-path requirements.")
+
+    def render(self, body):
+        names = {"PR": "848", "REPO": "o/r", "TITLE": "t", "HEAD": "3a0b97ab1", "WORKTREE": "/w", "BASE": "main",
+                 "DIFF_FILE": "/d", "FRAGMENT_CHECK": "f", "BODY_FILE": "/b", "VERDICT_CMD": "/c", "CARD": "809",
+                 "SPEC_NEIGHBOURS": "", "WORKER_REPORT": "", "SCOPE": "", "DECISIONS": "", "BODY": body,
+                 "CARD_DECISIONS": review.card_decisions(body)}
+        return common.render("review-brief.md", **names)
+
+    def test_809s_decision_sits_in_the_verdict_rules_and_binds_over_the_adr_finding(self) -> None:
+        entry = self.BODY_809[self.BODY_809.index("- 2026-11-14"):].strip()
+        self.assertEqual(review.card_decisions(self.BODY_809).strip().splitlines()[-1], entry)
+        text = self.render(self.BODY_809)
+        verdict = text[text.index("## Your verdict"):text.index("## The issue (#809)")]
+        self.assertIn("**A maintainer's Decision is binding.**", verdict)
+        self.assertIn("a finding that contradicts one is never blocking — not a scope violation", verdict)
+        self.assertIn("`contradicts the maintainer's\nDecision of <date>: <the finding>`", verdict)
+        self.assertIn(entry, verdict, "the Decision is weighed where the findings are")
+        self.assertIn("The ADR renumbering to 0037 stays in this pull request", verdict)
+        self.assertIn("adr/0037", self.FINDING_848)  # the finding this Decision makes non-blocking
+
+    def test_no_decisions_section_adds_nothing_and_undated_lines_are_not_decisions(self) -> None:
+        self.assertEqual(review.card_decisions("## Acceptance\n\n- a\n"), "")
+        self.assertEqual(review.card_decisions("## Decisions\n\n- maybe later\n"), "")
+        two = review.card_decisions("## Decisions\n- 2026-11-12: one\n  continued\n- **2026-11-13**: two\n## Next\n- 2026-11-14: not\n")
+        self.assertEqual(two.strip().splitlines()[2:], ["- 2026-11-12: one", "  continued", "- **2026-11-13**: two"])

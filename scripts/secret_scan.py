@@ -69,3 +69,28 @@ def redact(text: str, known: tuple = ()) -> tuple[str, tuple]:
     if left:
         return f"[redacted: the whole message — something shaped like a {left} remained]", tuple(kinds) or (left,)
     return text, tuple(kinds)
+
+
+FRAGMENT = 12  # a run of the configured credential this long is redacted on its own: a stream can split the value
+
+
+def redact_record(text: str, known: tuple = ()) -> str:
+    """`text` with every known value — whole, and any FRAGMENT-long run of it — and every strict secret shape
+    (the ones that are secrets by construction, `secret_kind(strict=True)`) replaced by `[redacted: <kind>]`.
+
+    For what the lane writes to disk as a record (a session transcript, Pi's session files): a line at a time,
+    before it is written. It never withholds a whole line and leaves ordinary text alone (no assignment or opaque
+    heuristics), and the replacement holds no quote or backslash, so a JSON line stays JSON."""
+    for value in known:
+        if not value:
+            continue
+        text = text.replace(value, "[redacted: configured credential]")
+        if len(value) > FRAGMENT:
+            for start in range(len(value) - FRAGMENT + 1):
+                piece = value[start:start + FRAGMENT]
+                if piece in text:
+                    text = text.replace(piece, "[redacted: configured credential]")
+    for kind, pattern in SECRET_SHAPES:
+        if kind not in LOOSE:
+            text = pattern.sub(f"[redacted: {kind}]", text)
+    return text

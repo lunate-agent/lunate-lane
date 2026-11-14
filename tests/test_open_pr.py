@@ -464,6 +464,50 @@ class FailurePathTests(OpenPrCase):
         self.assertNotIn(key, str(e))
         self.assertNotIn(key[3:12], str(e))
 
+    def test_798s_shape_a_value_already_on_main_is_reported_and_only_a_new_one_blocks(self) -> None:
+        """#798, 2026-11-14: the branch (#799's head, squash-merged on the 12th) showed main's own test fixtures as
+        added lines, and the card was parked for a value that had been public on main for two days."""
+        fixture = "sk-" + "fixture-value-on-main"  # a test constant main already has
+        self.commit_on("main", "SetupWizardModelTests.cs", f'const string TypedKey = "{fixture}";\n')
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "main"], cwd=self._tmp, check=True)
+        self.commit_on("wt/issue-5", "Stack.md", "the stacked work\n")  # its own history, as #799's head had
+        self.commit_on("wt/issue-5", "SetupWizardModelTests.cs", f'const string TypedKey = "{fixture}";\n')
+        open_pr.scan(self.repo, "wt/issue-5", "main", "t", "b")  # passes
+        log = (self.state.cfg.state / "logs" / "worker-5.log").read_text()
+        self.assertIn("secret scan: something shaped like a API key at `SetupWizardModelTests.cs:1` is already on "
+                      "origin/main — not new, so it does not block the push (reported only)", log)
+        self.assertNotIn(fixture, log)
+        fresh = "sk-" + "Zq8" * 8  # a value main does not have
+        self.commit_on("wt/issue-5", "New.cs", f'const string K = "{fresh}";\n')
+        with self.assertRaises(open_pr.SecretFound) as caught:
+            open_pr.scan(self.repo, "wt/issue-5", "main", "t", "b")
+        self.assertEqual((caught.exception.kind, caught.exception.path, caught.exception.line), ("API key", "New.cs", 1))
+        self.assertNotIn(fresh, str(caught.exception))
+
+    def test_the_configured_credential_blocks_even_if_main_has_it(self) -> None:
+        key = "configured-model-key-value"
+        self.commit_on("main", "Leak.cs", f"// {key}\n")
+        subprocess.run(["git", "update-ref", "refs/remotes/origin/main", "main"], cwd=self._tmp, check=True)
+        self.commit_on("wt/issue-5", "Other.md", "x\n")
+        self.commit_on("wt/issue-5", "Leak.cs", f"// {key}\n")
+        with self.assertRaises(open_pr.SecretFound) as caught:
+            open_pr.scan(self.repo, "wt/issue-5", "main", "t", "b", (key,))
+        self.assertEqual(caught.exception.kind, "configured credential")
+
+    def test_a_base_that_cannot_be_searched_blocks(self) -> None:
+        self.commit_on("wt/issue-5", "New.cs", 'const string K = "sk-' + "Zq8" * 8 + '";\n')
+        real = subprocess.run
+
+        def grep_fails(argv, *a, **k):
+            if "grep" in argv:
+                return subprocess.CompletedProcess(argv, 128, "", "fatal")
+            return real(argv, *a, **k)
+
+        with mock.patch.object(open_pr.subprocess, "run", side_effect=grep_fails):
+            with self.assertRaises(open_pr.OpenPrError) as caught:
+                open_pr.scan(self.repo, "wt/issue-5", "main", "t", "b")
+        self.assertIn("could not be searched for the secret scan", str(caught.exception))
+
     def test_added_lines_carry_their_file_and_new_line_number(self) -> None:
         diff = ("diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -2,0 +3,2 @@\n+x\n+y\n"
                 "@@ -9 +11 @@\n-old\n+new\ndiff --git a/n.md b/n.md\nnew file mode 100644\n--- /dev/null\n"

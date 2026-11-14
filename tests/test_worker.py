@@ -138,6 +138,17 @@ class WorktreeTests(RepoCase):
         path = worker.prepare_worktree(self.cfg, 4)
         self.assertEqual(git(path, "rev-parse", "HEAD"), sha)
 
+    def test_798s_branch_deleted_on_github_is_not_continued_from_a_stale_origin_ref(self) -> None:
+        """#798: #799 merged from wt/issue-798 on the 12th and the branch was deleted on GitHub; the checkout kept
+        refs/remotes/origin/wt/issue-798, and the rerun continued from it — the whole merged stack as added lines."""
+        old = self.push_branch("wt/issue-798", "stack.txt")
+        git(self.clone, "fetch", "-q", "origin")  # the checkout has seen it
+        git(self.origin, "update-ref", "-d", "refs/heads/wt/issue-798")  # deleted on GitHub after the merge
+        self.assertEqual(git(self.clone, "rev-parse", "refs/remotes/origin/wt/issue-798"), old, "stale, before")
+        path = worker.prepare_worktree(self.cfg, 798)
+        self.assertEqual(git(path, "rev-parse", "HEAD"), git(self.clone, "rev-parse", "origin/main"), "cut from base")
+        self.assertEqual(git(self.clone, "for-each-ref", "refs/remotes/origin/wt/issue-798"), "", "pruned")
+
     def test_a_reused_worktree_is_fast_forwarded_to_the_remote(self) -> None:
         path = worker.prepare_worktree(self.cfg, 4)
         sha = self.push_branch("wt/issue-4-elsewhere", "other.txt")
