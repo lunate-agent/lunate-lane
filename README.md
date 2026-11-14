@@ -202,6 +202,14 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    `git fetch --prune`, so a branch deleted on GitHub is not continued from a stale `origin/` ref (#798). The
    review brief puts the card's dated `## Decisions` entries in its verdict rules: a finding that contradicts one
    is non-blocking (#848's ADR renumber, Decision of 2026-11-14 on #809).
+   **Before every push the branch is built.** Every project holding a file the branch changes — the nearest
+   `.csproj` above it, test projects under `tests/` included — is built with `dotnet build -c Release`, in the
+   session's sandbox and environment without the model key. Compile errors (`file(line,col): error CS0103: …`)
+   are never pushed: they go back into the same Pi session (`--session-id`) to fix, up to 2 rounds; a run that
+   ends still failing is not pushed and counts as an idle run. The early open at the first commit builds too, and
+   waits for a commit that builds. A build that cannot run at all (no error line: a timeout, a hung restore) is
+   logged and does not hold the push — CI still builds it (#856: CS0103 in a new test file, pushed because the
+   worker built only the project it changed).
    **Before every push** the diff's added lines (against `origin/main`), the pull request's title and its body
    are scanned for the shapes that are secrets by construction (private keys, GitHub tokens, `sk-`/`oc_` keys,
    AWS keys, JWTs) and the model credential. A match pushes nothing, parks the card, comments once naming the kind

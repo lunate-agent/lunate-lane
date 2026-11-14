@@ -50,6 +50,11 @@ that reference a type you changed — by filter, never a whole test project, nev
     dotnet build <the project you touched> -c Release -nodeReuse:false
     dotnet test <its test project> -c Release -nodeReuse:false --filter "FullyQualifiedName~<TestClass>"
 
+**Build the test project of any test you add or edit**, not only the project you changed: a test file belongs
+to the project above it under `tests/`, and a test that does not compile fails the whole pull request. Before
+it pushes, the lane builds (`-c Release`) every project your branch touches, test projects included; a build
+that fails is not pushed and comes back to you as compile errors to fix.
+
 Every behaviour change gets a test that fails before it and passes after. Run `dotnet csharpier format .` after
 your last code edit, and before the archive commit.
 {{REWORK}}
