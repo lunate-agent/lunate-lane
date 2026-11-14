@@ -55,6 +55,7 @@ class Outcome:
     stalled: bool
     elapsed: int
     leaked_markup: bool
+    session_id: str = ""  # to continue the same session (`run_session(session_id=...)`)
 
 
 def read_credential(cfg: common.Config) -> str:
@@ -255,7 +256,8 @@ def argv(cfg: common.Config, model: str, session_dir: pathlib.Path, session_id: 
 def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, prompt: str, scratch: pathlib.Path,
                 log_path: pathlib.Path, extra_env: dict | None = None, on_tick: Callable[[], None] | None = None,
                 branch: str | None = None,
-                on_start: Callable[[int, str], None] | None = None, tick: float = 30.0) -> Outcome:
+                on_start: Callable[[int, str], None] | None = None, tick: float = 30.0,
+                session_id: str | None = None) -> Outcome:
     """Run Pi to completion in `worktree`, killing it when its event stream stalls or it passes the hard cap.
 
     Pi runs in a process group of its own; `on_start` gets that group and the session id, so a record can name
@@ -264,7 +266,8 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
     SIGTERM — kills that group before it propagates.
     """
     timeout, idle = int(cfg.harness["session_timeout"]), int(cfg.harness["stall_idle"])
-    session_id = f"{worktree.name}-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
+    # a given id continues that session (Pi's --session-id, same --session-dir): the build gate's fix round
+    session_id = session_id or f"{worktree.name}-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
     env = session_env(cfg, scratch, extra_env)
     command = sandboxed(argv(cfg, model, scratch / "sessions", session_id, prompt),
                         write_profile(cfg, scratch, worktree=worktree, branch=branch))
@@ -310,7 +313,7 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
         finally:
             pump.join(timeout=30)
             scrub_dir(scratch / "sessions", known)  # Pi's own session files, which it writes itself
-    return Outcome(proc.returncode, stalled, int(time.monotonic() - started), leaked_markup(log_path))
+    return Outcome(proc.returncode, stalled, int(time.monotonic() - started), leaked_markup(log_path), session_id)
 
 
 def _redacting_copy(source, out, known: tuple) -> None:

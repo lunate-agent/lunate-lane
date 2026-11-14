@@ -296,6 +296,87 @@ def brief(cfg: common.Config, issue: dict, worktree: pathlib.Path, pr: int | Non
                          BODY=(issue.get("body") or "").strip())
 
 
+# --- the build before every push: a branch whose projects do not compile is never pushed (#856: CS0103 in a new
+# test file, pushed because the worker built only the project it changed, not the test project) ---
+
+BUILD_FIX_ROUNDS = 2  # how often the same session gets its compile errors back before the run ends unpushed
+BUILD_TIMEOUT = 600
+BUILD_ERROR = re.compile(r"^\s*(?:/.*?/)?(?P<where>[^\s(:]+\.(?:cs|csproj|props|targets|fs|vb)(?:\([0-9,]+\))?)"
+                         r"\s*:\s*error\s+(?P<code>[A-Z]+[0-9]+)\s*:\s*(?P<what>.*?)(?:\s+\[[^\]]*\])?\s*$")
+
+
+def touched_projects(cfg: common.Config, worktree: pathlib.Path) -> list[str]:
+    """The projects (`.csproj`, relative to the worktree) holding a file the branch changes against the base — the
+    nearest project above each changed path, test projects under tests/ included."""
+    changed = common.wt_git(cfg, worktree, "diff", "--name-only", f"origin/{cfg.base}...HEAD").splitlines()
+    found: set = set()
+    for name in changed:
+        path = worktree / name
+        if name.endswith(".csproj"):
+            if path.exists():
+                found.add(name)
+            continue
+        folder = path.parent
+        while folder != worktree and worktree in folder.parents:
+            if folder.is_dir():
+                projects = sorted(folder.glob("*.csproj"))
+                if projects:
+                    found.update(str(p.relative_to(worktree)) for p in projects)
+                    break
+            folder = folder.parent
+    return sorted(found)
+
+
+def _run_build(cfg: common.Config, worktree: pathlib.Path, scratch: pathlib.Path, project: str) -> tuple[int, str]:
+    """`dotnet build <project> -c Release`, as the session would run it: in the session's sandbox and environment,
+    without the model credential — a build runs the branch's own MSBuild code."""
+    env = harness.session_env(cfg, scratch)
+    env.pop(cfg.harness["credential_env"], None)
+    command = harness.sandboxed(["dotnet", "build", project, "-c", "Release", "-nodeReuse:false", "-nologo",
+                                 "-v:quiet", "-clp:ErrorsOnly"],
+                                harness.write_profile(cfg, scratch, worktree=worktree, branch=None))
+    try:
+        done = subprocess.run(command, cwd=str(worktree), env=env, capture_output=True, text=True,
+                              timeout=BUILD_TIMEOUT, start_new_session=True)
+    except subprocess.TimeoutExpired:
+        return 124, f"the build of {project} did not finish in {BUILD_TIMEOUT}s"
+    except OSError as exc:
+        return 127, f"the build of {project} could not be started ({exc.__class__.__name__}: {exc})"
+    return done.returncode, (done.stdout or "") + (done.stderr or "")
+
+
+def build_errors(cfg: common.Config, worktree: pathlib.Path, scratch: pathlib.Path, job: str = "") -> list[str]:
+    """Build every touched project; the compile errors, one line each (`file(line,col): error CS0103: …`, the path
+    relative to the worktree), or [] when everything builds. Only compile errors block a push. A build that fails
+    with no error line — it could not run: a timeout, a restore that never finished — is logged under `job` and
+    does not block: CI still builds it, and a lane that cannot build must not stop pushing altogether."""
+    errors: list = []
+    for project in touched_projects(cfg, worktree):
+        rc, output = _run_build(cfg, worktree, scratch, project)
+        if rc == 0:
+            continue
+        lines = []
+        for raw in output.splitlines():
+            match = BUILD_ERROR.match(raw.replace(str(worktree) + "/", ""))
+            if match:
+                lines.append(f"{match['where']}: error {match['code']}: {match['what']}")
+        if not lines:
+            tail = " | ".join([line for line in output.strip().splitlines() if line.strip()][-3:])[:300]
+            common.log(job or "worker", f"the build of {project} could not run ({rc}) — not a compile error, so the "
+                                        f"push is not held for it: {tail}")
+            continue
+        errors.extend(line for line in dict.fromkeys(lines) if line not in errors)
+    return errors[:40]
+
+
+def build_fix_prompt(errors: list[str]) -> str:
+    return ("The lane built the projects your branch changes before pushing it, and the build failed. Nothing was "
+            "pushed. Fix these compile errors, build each project yourself (`dotnet build <project> -c Release "
+            "-nodeReuse:false`, the test project too), and commit the fix — the lane builds again before it pushes:\n\n"
+            + "\n".join(f"- {line}" for line in errors)
+            + "\n\nThen end the session with your report, as before.")
+
+
 def problems(cfg: common.Config, outcome: harness.Outcome, worktree: pathlib.Path, start_head: str,
              resume: bool = False) -> list[str]:
     """Why a finished session is not clean. rc=0 only says the process exited. A `resume` of an orphaned draft
@@ -336,13 +417,20 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
     text = brief(cfg, issue, worktree, rework_pr, findings, has_fragments(cfg, cfg.checkout),
                  github.decisions_section(github.decisions_for(cfg, number)))
     start_head = common.wt_git(cfg, worktree, "rev-parse", "HEAD")
-    opened: dict = {"pr": rework_pr, "tried": False}
+    opened: dict = {"pr": rework_pr, "tried": False, "built": ""}
 
     def open_early() -> None:
         if opened["pr"] is not None or opened["tried"]:
             return
         try:
-            if common.wt_git(cfg, worktree, "rev-parse", "HEAD") == start_head:
+            head = common.wt_git(cfg, worktree, "rev-parse", "HEAD")
+            if head == start_head or head == opened["built"]:
+                return
+            opened["built"] = head
+            failing = build_errors(cfg, worktree, scratch, job)
+            if failing:  # never pushed: tried again when the session commits again
+                common.log(job, f"not opened at {head[:9]}: the build fails ({len(failing)} error(s), first: "
+                                f"{failing[0][:160]})")
                 return
             opened["tried"] = True  # one attempt; the end of the session tries again and fails loudly
             opened["pr"] = dispatch_card.dispatch(cfg.checkout, number, arm=False,
@@ -358,11 +446,22 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
     session_log = common.state_dir("sessions") / f"issue-{number}-{os.getpid()}.jsonl"
     common.log(job, f"session on {cfg.worker_model}" + (f", rework of #{rework_pr}" if rework_pr else ""))
     driver = os.getpid()
-    outcome = harness.run_session(cfg, model=cfg.worker_model, worktree=worktree, prompt=text, scratch=scratch,
-                                  log_path=session_log, extra_env={"LANE_PR_FILE": str(pr_file)}, on_tick=open_early,
-                                  branch=f"wt/issue-{number}",
-                                  on_start=lambda pgid, sid: harness.note_session(number, driver, pgid, sid))
-    return finish(cfg, number, worktree, outcome, start_head, session_log, resume)
+    session = dict(cfg=cfg, model=cfg.worker_model, worktree=worktree, scratch=scratch, log_path=session_log,
+                   extra_env={"LANE_PR_FILE": str(pr_file)}, on_tick=open_early, branch=f"wt/issue-{number}",
+                   on_start=lambda pgid, sid: harness.note_session(number, driver, pgid, sid))
+    outcome = harness.run_session(prompt=text, **session)
+    failing: list = []
+    for round_no in range(1, BUILD_FIX_ROUNDS + 2):
+        if common.wt_git(cfg, worktree, "rev-parse", "HEAD") == start_head:
+            break  # nothing new to push, nothing to build
+        failing = build_errors(cfg, worktree, scratch, job)
+        if not failing or round_no > BUILD_FIX_ROUNDS or outcome.stalled or outcome.rc != 0:
+            break
+        common.log(job, f"the build fails before the push ({len(failing)} error(s), first: {failing[0][:160]}) — "
+                        f"back to the same session to fix it (round {round_no} of {BUILD_FIX_ROUNDS})")
+        outcome = harness.run_session(prompt=build_fix_prompt(failing), session_id=outcome.session_id or None,
+                                      **session)
+    return finish(cfg, number, worktree, outcome, start_head, session_log, resume, failing)
 
 
 def person_reason(cfg: common.Config, report: str) -> str | None:
@@ -380,8 +479,16 @@ def person_reason(cfg: common.Config, report: str) -> str | None:
 
 
 def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: harness.Outcome, start_head: str,
-           session_log: pathlib.Path, resume: bool = False) -> int:
+           session_log: pathlib.Path, resume: bool = False, build_failing: list | None = None) -> int:
     job = f"worker-{number}"
+    if build_failing:  # nothing is pushed; the run counts as idle (its count was taken at launch, never reset here)
+        idle, parked_now = harness.note_run(number, False)
+        common.log(job, f"not pushed: the build still fails after {BUILD_FIX_ROUNDS} fix round(s) — "
+                        f"{len(build_failing)} error(s), first: {build_failing[0][:160]}"
+                        + (f"; idle run {idle} of {harness.IDLE_RUN_LIMIT}" if idle else ""))
+        if parked_now:
+            park(cfg, number, rework_pr_of(cfg, number) or number, "idle", idle)
+        return 1
     found = problems(cfg, outcome, worktree, start_head, resume)
     try:  # read before the push, for its NEEDS-PERSON; an unreadable log never holds the commits back
         report = harness.last_text(session_log).strip() or "(the session left no final message)"

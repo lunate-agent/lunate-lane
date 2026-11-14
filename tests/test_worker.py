@@ -945,3 +945,127 @@ class DeathRecordTests(RepoCase):
                 mock.patch("sys.argv", ["worker.py", "--issue", "817", "--rework", "819"]):
             self.assertEqual(worker.main(), 1)
         self.assertEqual(harness.died_info(), {817: "hint: Diverging branches"})
+
+
+class BuildGateTests(DriveCase):
+    """#856 (card #850), 2026-11-14: the worker added tests/Lunate.Tui.Tests/ThemeFileTests.cs using a `ScratchPath`
+    that does not exist, built only the project it changed, and pushed; CI failed with CS0103 at (30,47) and
+    (39,23). Now the driver builds every touched project, test projects included, before any push."""
+
+    CS0103 = ("/w/tests/Lunate.Tui.Tests/ThemeFileTests.cs(30,47): error CS0103: The name 'ScratchPath' does not "
+              "exist in the current context [/w/tests/Lunate.Tui.Tests/Lunate.Tui.Tests.csproj]")
+
+    def setUp(self) -> None:
+        super().setUp()
+        for path in ("src/Lunate.Tui/Lunate.Tui.csproj", "tests/Lunate.Tui.Tests/Lunate.Tui.Tests.csproj"):
+            (self.clone / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.clone / path).write_text("<Project Sdk=\"Microsoft.NET.Sdk\" />\n")
+        git(self.clone, "add", "-A")
+        git(self.clone, "commit", "-q", "-m", "projects")
+        git(self.clone, "push", "-q", "origin", "HEAD:main")
+        self.builds, self.prompts, self.fixed_after = [], [], 1
+
+    def build(self, cfg, worktree, scratch, project):
+        self.builds.append(project)
+        broken = "ScratchPath" in (worktree / "tests/Lunate.Tui.Tests/ThemeFileTests.cs").read_text()
+        if project.startswith("tests/") and broken:
+            return 1, self.CS0103.replace("/w/", str(worktree) + "/") + "\nBuild FAILED.\n"
+        return 0, ""
+
+    def session(self):
+        def run(cfg, *, worktree, log_path, extra_env, on_tick, prompt, session_id=None, **_):
+            self.prompts.append((prompt, session_id))
+            git(worktree, "config", "user.email", "w@example.invalid")
+            git(worktree, "config", "user.name", "w")
+            test = worktree / "tests/Lunate.Tui.Tests/ThemeFileTests.cs"
+            if len(self.prompts) == 1:  # #856's commit: the theme code and a test file that does not compile
+                (worktree / "src/Lunate.Tui/ThemeFile.cs").write_text("class ThemeFile {}\n")
+                test.write_text("var path = ScratchPath(\"theme.json\");\n")
+            elif len(self.prompts) > self.fixed_after:  # the fix round that fixes it
+                test.write_text("var path = Path.Combine(Path.GetTempPath(), \"theme.json\");\n")
+            else:  # a fix round that commits something else and leaves the error
+                (worktree / "src/Lunate.Tui/ThemeFile.cs").write_text(f"class ThemeFile {{}} // {len(self.prompts)}\n")
+            git(worktree, "add", "-A")
+            git(worktree, "commit", "-q", "-m", f"round {len(self.prompts)}")
+            on_tick()
+            log_path.write_text('{"type":"message_end","message":{"content":[{"type":"text","text":"done"}]}}\n')
+            return harness.Outcome(0, False, 60, False, "issue-850-s1")
+
+        return mock.patch.object(harness, "run_session", side_effect=run)
+
+    def test_touched_projects_include_the_test_project_of_a_new_test_file(self) -> None:
+        path = worker.prepare_worktree(self.cfg, 850)
+        (path / "tests/Lunate.Tui.Tests/ThemeFileTests.cs").write_text("x\n")
+        (path / "src/Lunate.Tui/ThemeFile.cs").write_text("x\n")
+        (path / "docs").mkdir()
+        (path / "docs/themes.md").write_text("x\n")
+        git(path, "add", "-A")
+        git(path, "-c", "user.email=w@x", "-c", "user.name=w", "commit", "-q", "-m", "w")
+        self.assertEqual(worker.touched_projects(self.cfg, path),
+                         ["src/Lunate.Tui/Lunate.Tui.csproj", "tests/Lunate.Tui.Tests/Lunate.Tui.Tests.csproj"])
+
+    def test_856s_cs0103_goes_back_to_the_same_session_and_is_pushed_only_once_it_builds(self) -> None:
+        with self.session(), mock.patch.object(worker, "_run_build", side_effect=self.build):
+            self.assertEqual(worker.drive(self.cfg, 850, None), 0)
+        self.assertEqual(len(self.prompts), 2)
+        fix, sid = self.prompts[1]
+        self.assertEqual(sid, "issue-850-s1", "the same session continues")
+        self.assertIn("tests/Lunate.Tui.Tests/ThemeFileTests.cs(30,47): error CS0103: The name 'ScratchPath' does "
+                      "not exist in the current context", fix)
+        self.assertIn("Nothing was pushed", fix)
+        self.assertIn("tests/Lunate.Tui.Tests/Lunate.Tui.Tests.csproj", self.builds)
+        # the broken first commit is never pushed; the fixed one opens unarmed at the session's tick, then arms
+        self.assertEqual(self.dispatched, [False, True])
+        log = (self.cfg.state / "logs" / "worker-850.log").read_text()
+        self.assertLess(log.index("not opened at"), log.index("opened #77 at the first commit"))
+        self.assertIn("the build fails before the push (1 error(s), first: tests/Lunate.Tui.Tests/ThemeFileTests.cs"
+                      "(30,47): error CS0103", log)
+
+    def test_a_session_that_never_fixes_it_is_not_pushed_and_counts_as_idle(self) -> None:
+        self.fixed_after = 99
+        harness.note_attempt(850)  # the feeder counts the launch
+        with self.session(), mock.patch.object(worker, "_run_build", side_effect=self.build):
+            self.assertEqual(worker.drive(self.cfg, 850, None), 1)
+        self.assertEqual(len(self.prompts), 1 + worker.BUILD_FIX_ROUNDS)
+        self.assertEqual(self.dispatched, [], "never pushed")
+        self.assertEqual(harness.idle_runs(850), 1, "an idle run, not reset by its unpushed commits")
+        log = (self.cfg.state / "logs" / "worker-850.log").read_text()
+        self.assertIn(f"not pushed: the build still fails after {worker.BUILD_FIX_ROUNDS} fix round(s)", log)
+
+    def test_the_build_runs_sandboxed_without_the_model_key(self) -> None:
+        seen = {}
+
+        real = subprocess.run
+
+        def run(command, *args, **kwargs):
+            if command and command[0] == harness.SANDBOX_EXEC:
+                seen.update(command=command, env=kwargs["env"])
+                return subprocess.CompletedProcess(command, 0, "", "")
+            return real(command, *args, **kwargs)
+
+        path = worker.prepare_worktree(self.cfg, 850)
+        with mock.patch.object(worker.subprocess, "run", side_effect=run), \
+                mock.patch.object(harness, "read_credential", return_value="model-credential-value-1234"):
+            worker._run_build(self.cfg, path, self.cfg.state / "scratch" / "issue-850",
+                              "tests/Lunate.Tui.Tests/Lunate.Tui.Tests.csproj")
+        self.assertEqual(seen["command"][0], harness.SANDBOX_EXEC)
+        self.assertIn("-c", seen["command"])
+        self.assertEqual(seen["command"][seen["command"].index("-c") + 1], "Release")
+        self.assertNotIn(self.cfg.harness["credential_env"], seen["env"])
+        self.assertNotIn("model-credential-value-1234", " ".join(seen["env"].values()))
+
+    def test_the_brief_says_to_build_the_test_project(self) -> None:
+        text = worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), None, "", True)
+        self.assertIn("**Build the test project of any test you add or edit**", text)
+
+    def test_a_build_that_cannot_run_is_logged_and_does_not_hold_the_push(self) -> None:
+        """A restore that never finishes (seen when the build ran in a nested sandbox) is not a compile error."""
+        def hung(cfg, worktree, scratch, project):
+            return 1, "  Determining projects to restore...\n\nBuild FAILED.\n    0 Warning(s)\n    0 Error(s)\n"
+
+        with self.session(), mock.patch.object(worker, "_run_build", side_effect=hung):
+            self.assertEqual(worker.drive(self.cfg, 850, None), 0)
+        self.assertEqual(len(self.prompts), 1, "nothing to send back")
+        self.assertEqual(self.dispatched, [False, True])
+        self.assertIn("could not run (1) — not a compile error, so the push is not held for it",
+                      (self.cfg.state / "logs" / "worker-850.log").read_text())
