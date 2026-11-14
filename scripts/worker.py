@@ -163,17 +163,30 @@ LOG_TAIL_CHARS = 6000
 MAX_FAILING_LOGS = 5
 
 
+LOG_ERROR = re.compile(r"##\[error\]|\berror [A-Z]{2,}\d{3,}:|\[FAIL\]|^\s*Failed [A-Za-z]|\berror:", re.IGNORECASE)
+RUNNER_ROOT = re.compile(r"/home/runner/work/[^/\s]+/[^/\s]+/|[A-Z]:\\a\\[^\\\s]+\\[^\\\s]+\\|/Users/runner/work/[^/\s]+/[^/\s]+/")
+
+
 def log_tail(cfg: common.Config, job_id: int) -> str:
-    """The last lines of a GitHub Actions job's log. Supporting material for a brief: a log that cannot be read
-    is said so in the brief (the decision to rework was made on readable state), never left out silently."""
+    """What a worker needs from a failed GitHub Actions job's log: its error lines first (compiler errors,
+    `##[error]`, failing tests), then the last lines before the job's clean-up steps. The raw last lines are the
+    artifact upload and git clean-up — #856's brief quoted those and never showed its CS0103. Supporting material
+    for a brief: a log that cannot be read is said so in the brief, never left out silently."""
     if not job_id:
         return "(not a GitHub Actions job — no log to fetch; see the check's page)"
     try:
         raw = common.gh("api", f"repos/{cfg.slug}/actions/jobs/{int(job_id)}/logs", timeout=120)
     except LaneError as exc:
         return f"(the log could not be read: {exc})"
-    lines = [re.sub(r"^\d{4}-\d\d-\d\dT[\d:.]+Z ", "", line) for line in raw.splitlines()]
-    return "\n".join(lines[-LOG_TAIL_LINES:])[-LOG_TAIL_CHARS:]
+    lines = [RUNNER_ROOT.sub("", re.sub(r"^\d{4}-\d\d-\d\dT[\d:.]+Z ", "", line)) for line in raw.splitlines()]
+    cut = next((i for i, line in enumerate(lines) if line.startswith("Post job cleanup")), len(lines))
+    body = lines[:cut]
+    hits = [i for i, line in enumerate(body) if LOG_ERROR.search(line)]
+    if not hits:
+        return "\n".join(body[-LOG_TAIL_LINES:])[-LOG_TAIL_CHARS:]
+    errors = list(dict.fromkeys(body[i].strip() for i in hits))
+    context = "\n".join(body[max(0, hits[0] - LOG_TAIL_LINES // 2):hits[-1] + 1])  # what led up to them
+    return ("Errors in the log:\n" + "\n".join(errors[:40]) + "\n\nThe log around them:\n" + context)[:LOG_TAIL_CHARS]
 
 
 def conflicts(cfg: common.Config, worktree: pathlib.Path) -> list[str]:
@@ -216,7 +229,10 @@ def rework_brief(cfg: common.Config, pr: int, worktree: pathlib.Path | None = No
                         "has an entry added after this branch's head was committed. It is binding: carry it out "
                         "(the whole card, with its Decisions, is below), then end with your report.\n\n> " + newer)
     stuck = github.stuck_reason(p, required, cfg.reviewer_app, harness.reran())
-    if stuck and stuck.startswith("required checks"):
+    # a draft is never "stuck", but its jobs can still have failed for real (a draft's own ci-ok fails by design):
+    # #856's round 3 started as an orphaned draft and its brief never said the head does not compile
+    draft_failing = p.draft and any(r[1] not in github.PASSED and r[1] and r[0] not in required for r in p.runs)
+    if (stuck and stuck.startswith("required checks")) or (not stuck and draft_failing):
         failing = [r for r in p.runs if r[1] not in github.PASSED and r[1]]
         failing.sort(key=lambda r: (r[0] in required, r[0]))  # the jobs first, the required roll-up last
         parts = [f"Required checks failing on `{p.head[:9]}`: "
@@ -225,7 +241,7 @@ def rework_brief(cfg: common.Config, pr: int, worktree: pathlib.Path | None = No
                  + ". Failing check runs: " + ", ".join(f"`{r[0]}` ({r[1].lower()})" for r in failing) + "."]
         for name, conclusion, job, url, *_ in failing[:MAX_FAILING_LOGS]:
             parts.append(f"#### `{name}` — {conclusion.lower()}\n{url}\n\n```\n{log_tail(cfg, job)}\n```")
-        if stuck != "required checks failing":
+        if stuck and stuck != "required checks failing":
             parts.insert(0, "They were cancelled or timed out, were rerun once on this head, and failed the same "
                             "way again: look for what makes them hang or run out of time (a test that never ends, "
                             "a step that waits on input), not only for a failing assertion.")
@@ -457,8 +473,9 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
     outcome = harness.run_session(prompt=text, **session)
     failing: list = []
     for round_no in range(1, BUILD_FIX_ROUNDS + 2):
-        if common.wt_git(cfg, worktree, "rev-parse", "HEAD") == start_head:
-            break  # nothing new to push, nothing to build
+        if not rework_pr and common.wt_git(cfg, worktree, "rev-parse", "HEAD") == start_head:
+            break  # a new card with no commit: nothing to push, nothing to build
+        # a rework builds its head even without a new commit: a head that does not compile goes back to the session
         failing = build_errors(cfg, worktree, scratch, job)
         if not failing or round_no > BUILD_FIX_ROUNDS or outcome.stalled or outcome.rc != 0:
             break

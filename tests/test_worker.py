@@ -1085,3 +1085,69 @@ class DecisionReworkBriefTests(unittest.TestCase):
         self.assertIn("### A maintainer decided something after your last commit", findings)
         self.assertIn("> " + newest, findings)
         self.assertFalse(resume)
+
+
+class Rework856Tests(BuildGateTests):
+    """#856 (card #850), 2026-11-14. Its CI failed on CS0103 ('ScratchPath', ThemeFileTests.cs (30,47) and (39,23)),
+    but round 2's brief quoted the job log's last 60 lines — the artifact upload and git clean-up — and round 3
+    started as an orphaned draft with no checks section at all; both sessions ended idle without touching the
+    error. The fixture is the real job log (lines 300–531 of job 132438064283)."""
+
+    LOG = (pathlib.Path(__file__).parent / "fixtures" / "job-132438064283-856-verify.log").read_text()
+
+    def test_the_log_tail_leads_with_the_compile_errors_not_the_clean_up(self) -> None:
+        with mock.patch.object(common, "gh", return_value=self.LOG):
+            text = worker.log_tail(self.cfg, 132438064283)
+        self.assertTrue(text.startswith("Errors in the log:\n"))
+        self.assertIn("##[error]tests/Lunate.Tui.Tests/ThemeFileTests.cs(30,47): error CS0103: The name 'ScratchPath' "
+                      "does not exist in the current context", text)
+        self.assertIn("ThemeFileTests.cs(39,23): error CS0103", text)
+        self.assertIn("##[error]Process completed with exit code 1.", text)
+        self.assertNotIn("Post job cleanup", text)
+        self.assertNotIn("Uploading artifact", text, "the clean-up and uploads are not what the worker needs")
+        self.assertFalse(any("/home/runner/work/" in line for line in text.splitlines() if "error CS" in line))
+
+    def test_round_3s_orphaned_draft_brief_carries_the_failing_jobs_with_their_errors(self) -> None:
+        runs = (("verify (ubuntu-latest, 1/4)", "FAILURE", 132438064283, "https://github.com/x/job/132438064283"),
+                ("ci-ok", "FAILURE", 0, "https://ci/ok"))
+        p = pull(856, 850, head="d35ed99a1", draft=True, runs=runs, checks=(("ci-ok", "COMPLETED", "FAILURE"),))
+        with mock.patch.object(github, "pull", return_value=p), \
+                mock.patch.object(github, "newer_decision", return_value=""), \
+                mock.patch.object(github, "worker_report", return_value="**Incomplete — stalled**"), \
+                mock.patch.object(harness, "reran", return_value=frozenset()), \
+                mock.patch.object(common, "gh", return_value=self.LOG):
+            findings, resume = worker.rework_brief(self.cfg, 856)
+        self.assertIn("### Checks are failing", findings)
+        self.assertIn("`verify (ubuntu-latest, 1/4)` (failure)", findings)
+        self.assertIn("error CS0103: The name 'ScratchPath' does not exist", findings)
+        self.assertIn("### The last run did not finish", findings)
+        self.assertFalse(resume, "a head that does not build is not a finished draft to just verify")
+
+    def test_a_rework_that_makes_no_commit_still_gets_its_heads_compile_errors_back(self) -> None:
+        # #856's head on origin: the theme code and the test file that does not compile
+        git(self.clone, "switch", "-q", "-c", "wt/issue-850", "origin/main")
+        (self.clone / "src/Lunate.Tui/ThemeFile.cs").write_text("class ThemeFile {}\n")
+        (self.clone / "tests/Lunate.Tui.Tests/ThemeFileTests.cs").write_text("var path = ScratchPath(\"t.json\");\n")
+        git(self.clone, "add", "-A")
+        git(self.clone, "commit", "-q", "-m", "theme")
+        git(self.clone, "push", "-q", "origin", "wt/issue-850")
+        git(self.clone, "switch", "-q", "--detach", "origin/main")
+
+        def run(cfg, *, worktree, log_path, extra_env, on_tick, prompt, session_id=None, **_):
+            self.prompts.append((prompt, session_id))
+            if len(self.prompts) > 1:  # given the compile error, the session fixes it
+                git(worktree, "config", "user.email", "w@example.invalid")
+                git(worktree, "config", "user.name", "w")
+                (worktree / "tests/Lunate.Tui.Tests/ThemeFileTests.cs").write_text("var path = \"t.json\";\n")
+                git(worktree, "commit", "-qam", "fix")
+            log_path.write_text('{"type":"message_end","message":{"content":[{"type":"text","text":"done"}]}}\n')
+            return harness.Outcome(0, False, 60, False, "issue-850-r3")
+
+        with mock.patch.object(harness, "run_session", side_effect=run), \
+                mock.patch.object(worker, "_run_build", side_effect=self.build), \
+                mock.patch.object(worker, "rework_brief", return_value=("### The last run did not finish", True)):
+            self.assertEqual(worker.drive(self.cfg, 850, 856), 0)
+        self.assertEqual(len(self.prompts), 2, "round 3's session got the compile error back although it made no commit")
+        self.assertIn("ThemeFileTests.cs(30,47): error CS0103: The name 'ScratchPath'", self.prompts[1][0])
+        self.assertEqual(self.prompts[1][1], "issue-850-r3")
+        self.assertEqual(self.dispatched, [True])

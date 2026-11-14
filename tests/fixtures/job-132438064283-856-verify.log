@@ -1,0 +1,232 @@
+2026-11-14T11:50:08.2597955Z   Restored /home/runner/work/lunate/lunate/src/Lunate.Protocols/Lunate.Protocols.csproj (in 18 ms).
+2026-11-14T11:50:08.2796436Z   Restored /home/runner/work/lunate/lunate/src/Lunate.Extensibility.Remote/Lunate.Extensibility.Remote.csproj (in 8 ms).
+2026-11-14T11:50:08.2818724Z   Restored /home/runner/work/lunate/lunate/src/Lunate.Extensibility/Lunate.Extensibility.csproj (in 13 ms).
+2026-11-14T11:50:08.2916119Z   Restored /home/runner/work/lunate/lunate/src/Lunate.Extensibility.Restore/Lunate.Extensibility.Restore.csproj (in 17 ms).
+2026-11-14T11:50:08.2968013Z   Restored /home/runner/work/lunate/lunate/src/Lunate.Extensibility.Testing/Lunate.Extensibility.Testing.csproj (in 21 ms).
+2026-11-14T11:50:08.2980776Z   Restored /home/runner/work/lunate/lunate/src/Lunate.Extensibility.Abstractions/Lunate.Extensibility.Abstractions.csproj (in 5 ms).
+2026-11-14T11:50:08.3051957Z   Restored /home/runner/work/lunate/lunate/src/Lunate.Contracts/Lunate.Contracts.csproj (in 4 ms).
+2026-11-14T11:50:08.3208584Z   Restored /home/runner/work/lunate/lunate/src/Lunate.Ai.SystemOne/Lunate.Ai.SystemOne.csproj (in 4 ms).
+2026-11-14T11:50:08.3210653Z   Restored /home/runner/work/lunate/lunate/src/Lunate.Ai/Lunate.Ai.csproj (in 11 ms).
+2026-11-14T11:50:08.3212200Z   Restored /home/runner/work/lunate/lunate/src/Lunate.Extensibility.Compile/Lunate.Extensibility.Compile.csproj (in 20 ms).
+2026-11-14T11:50:08.3286466Z   Restored /home/runner/work/lunate/lunate/src/Lunate.Ai.Decisions/Lunate.Ai.Decisions.csproj (in 2 ms).
+2026-11-14T11:50:08.3321134Z   Restored /home/runner/work/lunate/lunate/src/Lunate.Coding/Lunate.Coding.csproj (in 17 ms).
+2026-11-14T11:50:08.3354878Z   Restored /home/runner/work/lunate/lunate/samples/extensions/worktree-tasks/WorktreeTasksExtension/WorktreeTasksExtension.csproj (in 3 ms).
+2026-11-14T11:50:08.3530143Z   Restored /home/runner/work/lunate/lunate/samples/extensions/ui-showcase/UiShowcaseExtension/UiShowcaseExtension.csproj (in 6 ms).
+2026-11-14T11:50:08.3568030Z   Restored /home/runner/work/lunate/lunate/src/Lunate.Agent/Lunate.Agent.csproj (in 11 ms).
+2026-11-14T11:50:08.3743689Z   Restored /home/runner/work/lunate/lunate/tests/tools/TestMcpServer/TestMcpServer.csproj (in 7 ms).
+2026-11-14T11:50:08.3943700Z   Restored /home/runner/work/lunate/lunate/tests/TestExtensions/ToolExtension/ToolExtension.csproj (in 7 ms).
+2026-11-14T11:50:08.4206383Z   Restored /home/runner/work/lunate/lunate/samples/extensions/ui-showcase/UiShowcaseExtension.Tests/UiShowcaseExtension.Tests.csproj (in 29 ms).
+2026-11-14T11:50:08.4238424Z   Restored /home/runner/work/lunate/lunate/tests/TestExtensions/SkillSourceExtension/SkillSourceExtension.csproj (in 7 ms).
+2026-11-14T11:50:08.4268497Z   Restored /home/runner/work/lunate/lunate/samples/extensions/worktree-tasks/WorktreeTasksExtension.Tests/WorktreeTasksExtension.Tests.csproj (in 41 ms).
+2026-11-14T11:50:08.4271265Z   Restored /home/runner/work/lunate/lunate/samples/extensions/node-remote/NodeRemoteExtension.Tests/NodeRemoteExtension.Tests.csproj (in 29 ms).
+2026-11-14T11:50:08.4298591Z   Restored /home/runner/work/lunate/lunate/tests/TestExtensions/ModelExtension/ModelExtension.csproj (in 4 ms).
+2026-11-14T11:50:08.4388209Z   Restored /home/runner/work/lunate/lunate/tests/TestExtensions/ServiceConsumerExtension/ServiceConsumerExtension.csproj (in 6 ms).
+2026-11-14T11:50:08.4417848Z   Restored /home/runner/work/lunate/lunate/tests/TestExtensions/LeakExtension/LeakExtension.csproj (in 3 ms).
+2026-11-14T11:50:08.4447861Z   Restored /home/runner/work/lunate/lunate/tests/TestExtensions/McpExtension/McpExtension.csproj (in 9 ms).
+2026-11-14T11:50:08.4474250Z   Restored /home/runner/work/lunate/lunate/tests/TestExtensions/MarkerExtension/MarkerExtension.csproj (in 7 ms).
+2026-11-14T11:50:08.4475974Z   Restored /home/runner/work/lunate/lunate/tests/TestExtensions/HelloExtension/HelloExtension.csproj (in 4 ms).
+2026-11-14T11:50:08.4538021Z   Restored /home/runner/work/lunate/lunate/tests/TestExtensions/FakeLsp/FakeLsp.csproj (in 3 ms).
+2026-11-14T11:50:08.4568013Z   Restored /home/runner/work/lunate/lunate/tests/TestExtensions/HelloExtension.Support/HelloExtension.Support.csproj (in 6 ms).
+2026-11-14T11:50:08.4597805Z   Restored /home/runner/work/lunate/lunate/tests/TestExtensions/CommandExtension/CommandExtension.csproj (in 5 ms).
+2026-11-14T11:50:08.4657998Z   Restored /home/runner/work/lunate/lunate/tests/Lunate.TestSupport/Lunate.TestSupport.csproj (in 2 ms).
+2026-11-14T11:50:08.5228228Z   Restored /home/runner/work/lunate/lunate/tests/Lunate.Roslyn.Tests/Lunate.Roslyn.Tests.csproj (in 21 ms).
+2026-11-14T11:50:08.5318122Z   Restored /home/runner/work/lunate/lunate/tests/Lunate.Protocols.Tests/Lunate.Protocols.Tests.csproj (in 29 ms).
+2026-11-14T11:50:08.5728828Z   Restored /home/runner/work/lunate/lunate/tests/Lunate.Extensibility.Tests/Lunate.Extensibility.Tests.csproj (in 37 ms).
+2026-11-14T11:50:08.5748937Z   Restored /home/runner/work/lunate/lunate/tests/Lunate.Extensibility.Testing.Tests/Lunate.Extensibility.Testing.Tests.csproj (in 22 ms).
+2026-11-14T11:50:08.5894111Z   Restored /home/runner/work/lunate/lunate/samples/extensions/memory-provider/MemoryProviderExtension/MemoryProviderExtension.csproj (in 10 ms).
+2026-11-14T11:50:08.5998506Z   Restored /home/runner/work/lunate/lunate/samples/extensions/mcp-from-extension/McpFromExtensionExtension/McpFromExtensionExtension.csproj (in 4 ms).
+2026-11-14T11:50:08.6100976Z   Restored /home/runner/work/lunate/lunate/samples/extensions/model-router/ModelRouterExtension.Tests/ModelRouterExtension.Tests.csproj (in 41 ms).
+2026-11-14T11:50:08.6228866Z   Restored /home/runner/work/lunate/lunate/samples/extensions/mcp-from-extension/McpFromExtensionExtension.Tests/FakeMcpServer/FakeMcpServer.csproj (in 6 ms).
+2026-11-14T11:50:08.6378564Z   Restored /home/runner/work/lunate/lunate/samples/extensions/memory-provider/MemoryProviderExtension.Tests/MemoryProviderExtension.Tests.csproj (in 35 ms).
+2026-11-14T11:50:08.6431340Z   Restored /home/runner/work/lunate/lunate/samples/extensions/code-mode/CodeModeExtension/CodeModeExtension.csproj (in 6 ms).
+2026-11-14T11:50:08.6468760Z   Restored /home/runner/work/lunate/lunate/tests/Lunate.Tui.Tests/Lunate.Tui.Tests.csproj (in 187 ms).
+2026-11-14T11:50:08.6548661Z   Restored /home/runner/work/lunate/lunate/extensions/subagents/SubagentsExtension/SubagentsExtension.csproj (in 3 ms).
+2026-11-14T11:50:08.6578865Z   Restored /home/runner/work/lunate/lunate/samples/extensions/mcp-from-extension/McpFromExtensionExtension.Tests/McpFromExtensionExtension.Tests.csproj (in 25 ms).
+2026-11-14T11:50:08.6637347Z   Restored /home/runner/work/lunate/lunate/extensions/permission-gate/PermissionGateExtension/PermissionGateExtension.csproj (in 3 ms).
+2026-11-14T11:50:08.6758867Z   Restored /home/runner/work/lunate/lunate/extensions/lsp-diagnostics/LspDiagnosticsExtension/LspDiagnosticsExtension.csproj (in 3 ms).
+2026-11-14T11:50:08.6958515Z   Restored /home/runner/work/lunate/lunate/samples/extensions/code-mode/CodeModeExtension.Tests/CodeModeExtension.Tests.csproj (in 31 ms).
+2026-11-14T11:50:08.7004212Z   Restored /home/runner/work/lunate/lunate/extensions/subagents/SubagentsExtension.Tests/SubagentsExtension.Tests.csproj (in 32 ms).
+2026-11-14T11:50:08.7008032Z   Restored /home/runner/work/lunate/lunate/extensions/lsp-diagnostics/LspDiagnosticsExtension.Tests/FakeLspServer/FakeLspServer.csproj (in 0.9 ms).
+2026-11-14T11:50:08.7030094Z   Restored /home/runner/work/lunate/lunate/extensions/permission-gate/PermissionGateExtension.Tests/PermissionGateExtension.Tests.csproj (in 27 ms).
+2026-11-14T11:50:08.7122554Z   Restored /home/runner/work/lunate/lunate/extensions/lsp-diagnostics/LspDiagnosticsExtension.Tests/LspDiagnosticsExtension.Tests.csproj (in 21 ms).
+2026-11-14T11:50:14.7029178Z   Lunate.Ai.Decisions -> /home/runner/work/lunate/lunate/src/Lunate.Ai.Decisions/bin/Release/net10.0/Lunate.Ai.Decisions.dll
+2026-11-14T11:50:14.9625198Z   FakeLspServer -> /home/runner/work/lunate/lunate/extensions/lsp-diagnostics/LspDiagnosticsExtension.Tests/FakeLspServer/bin/Release/net10.0/FakeLspServer.dll
+2026-11-14T11:50:15.2460210Z   Lunate.Contracts -> /home/runner/work/lunate/lunate/src/Lunate.Contracts/bin/Release/net10.0/Lunate.Contracts.dll
+2026-11-14T11:50:16.7179947Z   FakeMcpServer -> /home/runner/work/lunate/lunate/samples/extensions/mcp-from-extension/McpFromExtensionExtension.Tests/FakeMcpServer/bin/Release/net10.0/FakeMcpServer.dll
+2026-11-14T11:50:18.6260308Z   Lunate.Extensibility.Abstractions -> /home/runner/work/lunate/lunate/src/Lunate.Extensibility.Abstractions/bin/Release/net10.0/Lunate.Extensibility.Abstractions.dll
+2026-11-14T11:50:19.7285587Z   Lunate.TestSupport -> /home/runner/work/lunate/lunate/tests/Lunate.TestSupport/bin/Release/net10.0/Lunate.TestSupport.dll
+2026-11-14T11:50:20.7610927Z   LspDiagnosticsExtension -> /home/runner/work/lunate/lunate/extensions/lsp-diagnostics/LspDiagnosticsExtension/bin/Release/net10.0/LspDiagnosticsExtension.dll
+2026-11-14T11:50:21.1405221Z   Lunate.Tui -> /home/runner/work/lunate/lunate/src/Lunate.Tui/bin/Release/net10.0/Lunate.Tui.dll
+2026-11-14T11:50:21.5805641Z   ModelRouterExtension -> /home/runner/work/lunate/lunate/samples/extensions/model-router/ModelRouterExtension/bin/Release/net10.0/ModelRouterExtension.dll
+2026-11-14T11:50:22.0970862Z   TemplateExtension -> /home/runner/work/lunate/lunate/templates/extension/TemplateExtension/bin/Release/net10.0/TemplateExtension.dll
+2026-11-14T11:50:22.9468238Z   Lunate.Ai -> /home/runner/work/lunate/lunate/src/Lunate.Ai/bin/Release/net10.0/Lunate.Ai.dll
+2026-11-14T11:50:23.2419103Z   WorktreeTasksExtension -> /home/runner/work/lunate/lunate/samples/extensions/worktree-tasks/WorktreeTasksExtension/bin/Release/net10.0/WorktreeTasksExtension.dll
+2026-11-14T11:50:23.7746039Z   UiShowcaseExtension -> /home/runner/work/lunate/lunate/samples/extensions/ui-showcase/UiShowcaseExtension/bin/Release/net10.0/UiShowcaseExtension.dll
+2026-11-14T11:50:24.2168866Z   MemoryProviderExtension -> /home/runner/work/lunate/lunate/samples/extensions/memory-provider/MemoryProviderExtension/bin/Release/net10.0/MemoryProviderExtension.dll
+2026-11-14T11:50:24.3058513Z   TestMcpServer -> /home/runner/work/lunate/lunate/tests/tools/TestMcpServer/bin/Release/net10.0/TestMcpServer.dll
+2026-11-14T11:50:24.4598830Z   McpFromExtensionExtension -> /home/runner/work/lunate/lunate/samples/extensions/mcp-from-extension/McpFromExtensionExtension/bin/Release/net10.0/McpFromExtensionExtension.dll
+2026-11-14T11:50:24.9007167Z   Lunate.Ai.SystemOne -> /home/runner/work/lunate/lunate/src/Lunate.Ai.SystemOne/bin/Release/net10.0/Lunate.Ai.SystemOne.dll
+2026-11-14T11:50:24.9604778Z   Lunate.Roslyn -> /home/runner/work/lunate/lunate/src/Lunate.Roslyn/bin/Release/net10.0/Lunate.Roslyn.dll
+2026-11-14T11:50:31.1502534Z   Lunate.Ai.Tests -> /home/runner/work/lunate/lunate/tests/Lunate.Ai.Tests/bin/Release/net10.0/Lunate.Ai.Tests.dll
+2026-11-14T11:50:31.8636492Z   Lunate.Agent -> /home/runner/work/lunate/lunate/src/Lunate.Agent/bin/Release/net10.0/Lunate.Agent.dll
+2026-11-14T11:50:32.7412656Z   Lunate.Extensibility.Remote -> /home/runner/work/lunate/lunate/src/Lunate.Extensibility.Remote/bin/Release/net10.0/Lunate.Extensibility.Remote.dll
+2026-11-14T11:50:32.9174465Z   SubagentsExtension -> /home/runner/work/lunate/lunate/extensions/subagents/SubagentsExtension/bin/Release/net10.0/SubagentsExtension.dll
+2026-11-14T11:50:33.0787533Z   PermissionGateExtension -> /home/runner/work/lunate/lunate/extensions/permission-gate/PermissionGateExtension/bin/Release/net10.0/PermissionGateExtension.dll
+2026-11-14T11:50:34.1388456Z   Lunate.Protocols -> /home/runner/work/lunate/lunate/src/Lunate.Protocols/bin/Release/net10.0/Lunate.Protocols.dll
+2026-11-14T11:50:34.6039596Z   Lunate.Roslyn.BuiltIn -> /home/runner/work/lunate/lunate/src/Lunate.Roslyn.BuiltIn/bin/Release/net10.0/Lunate.Roslyn.BuiltIn.dll
+2026-11-14T11:50:36.2617709Z   CodeModeExtension -> /home/runner/work/lunate/lunate/samples/extensions/code-mode/CodeModeExtension/bin/Release/net10.0/CodeModeExtension.dll
+2026-11-14T11:50:42.2505691Z ##[error]/home/runner/work/lunate/lunate/tests/Lunate.Tui.Tests/ThemeFileTests.cs(30,47): error CS0103: The name 'ScratchPath' does not exist in the current context [/home/runner/work/lunate/lunate/tests/Lunate.Tui.Tests/Lunate.Tui.Tests.csproj]
+2026-11-14T11:50:42.2515385Z ##[error]/home/runner/work/lunate/lunate/tests/Lunate.Tui.Tests/ThemeFileTests.cs(39,23): error CS0103: The name 'ScratchPath' does not exist in the current context [/home/runner/work/lunate/lunate/tests/Lunate.Tui.Tests/Lunate.Tui.Tests.csproj]
+2026-11-14T11:50:42.2582584Z   Lunate.Extensibility -> /home/runner/work/lunate/lunate/src/Lunate.Extensibility/bin/Release/net10.0/Lunate.Extensibility.dll
+2026-11-14T11:50:44.2627886Z   Lunate.Roslyn.Tests -> /home/runner/work/lunate/lunate/tests/Lunate.Roslyn.Tests/bin/Release/net10.0/Lunate.Roslyn.Tests.dll
+2026-11-14T11:50:44.5679594Z   Lunate.Extensibility.Compile -> /home/runner/work/lunate/lunate/src/Lunate.Extensibility.Compile/bin/Release/net10.0/Lunate.Extensibility.Compile.dll
+2026-11-14T11:50:45.9171561Z   Lunate.Extensibility.Restore -> /home/runner/work/lunate/lunate/src/Lunate.Extensibility.Restore/bin/Release/net10.0/Lunate.Extensibility.Restore.dll
+2026-11-14T11:50:57.2167468Z   Lunate.Coding -> /home/runner/work/lunate/lunate/src/Lunate.Coding/bin/Release/net10.0/lunate.dll
+2026-11-14T11:50:57.2460058Z   Lunate.Extensibility.Restore.Tests -> /home/runner/work/lunate/lunate/tests/Lunate.Extensibility.Restore.Tests/bin/Release/net10.0/Lunate.Extensibility.Restore.Tests.dll
+2026-11-14T11:50:57.2759939Z   Lunate.Extensibility.Compile.Tests -> /home/runner/work/lunate/lunate/tests/Lunate.Extensibility.Compile.Tests/bin/Release/net10.0/Lunate.Extensibility.Compile.Tests.dll
+2026-11-14T11:50:57.5898335Z   FakeLsp -> /home/runner/work/lunate/lunate/tests/TestExtensions/FakeLsp/bin/Debug/net10.0/FakeLsp.dll
+2026-11-14T11:50:58.1308281Z   McpExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/McpExtension/bin/Debug/net10.0/McpExtension.dll
+2026-11-14T11:50:58.7650184Z   HelloExtension.Support -> /home/runner/work/lunate/lunate/tests/TestExtensions/HelloExtension.Support/bin/Debug/net10.0/HelloExtension.Support.dll
+2026-11-14T11:50:58.9201704Z   ToolExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/ToolExtension/bin/Debug/net10.0/ToolExtension.dll
+2026-11-14T11:50:59.2236211Z   Lunate.Extensibility.Testing -> /home/runner/work/lunate/lunate/src/Lunate.Extensibility.Testing/bin/Release/net10.0/Lunate.Extensibility.Testing.dll
+2026-11-14T11:51:02.4208460Z   CommandExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/CommandExtension/bin/Debug/net10.0/CommandExtension.dll
+2026-11-14T11:51:02.7699063Z   NodeRemoteExtension.Tests -> /home/runner/work/lunate/lunate/samples/extensions/node-remote/NodeRemoteExtension.Tests/bin/Release/net10.0/NodeRemoteExtension.Tests.dll
+2026-11-14T11:51:02.8151353Z   PermissionGateExtension.Tests -> /home/runner/work/lunate/lunate/extensions/permission-gate/PermissionGateExtension.Tests/bin/Release/net10.0/PermissionGateExtension.Tests.dll
+2026-11-14T11:51:05.5168689Z   CodeModeExtension.Tests -> /home/runner/work/lunate/lunate/samples/extensions/code-mode/CodeModeExtension.Tests/bin/Release/net10.0/CodeModeExtension.Tests.dll
+2026-11-14T11:51:06.8241716Z   Lunate.Extensibility.Remote.Tests -> /home/runner/work/lunate/lunate/tests/Lunate.Extensibility.Remote.Tests/bin/Release/net10.0/Lunate.Extensibility.Remote.Tests.dll
+2026-11-14T11:51:06.8560975Z   HelloExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/HelloExtension/bin/Debug/net10.0/HelloExtension.dll
+2026-11-14T11:51:07.0592148Z   SubagentsExtension.Tests -> /home/runner/work/lunate/lunate/extensions/subagents/SubagentsExtension.Tests/bin/Release/net10.0/SubagentsExtension.Tests.dll
+2026-11-14T11:51:08.9838788Z   Lunate.Extensibility.Testing.Tests -> /home/runner/work/lunate/lunate/tests/Lunate.Extensibility.Testing.Tests/bin/Release/net10.0/Lunate.Extensibility.Testing.Tests.dll
+2026-11-14T11:51:10.0578476Z   MarkerExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/MarkerExtension/bin/Debug/net10.0/MarkerExtension.dll
+2026-11-14T11:51:10.1818451Z   HelloExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/HelloExtension/bin/Release/net10.0/HelloExtension.dll
+2026-11-14T11:51:10.4238398Z   ModelExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/ModelExtension/bin/Debug/net10.0/ModelExtension.dll
+2026-11-14T11:51:11.0616313Z   LeakExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/LeakExtension/bin/Debug/net10.0/LeakExtension.dll
+2026-11-14T11:51:11.1384540Z   McpExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/McpExtension/bin/Release/net10.0/McpExtension.dll
+2026-11-14T11:51:11.9718433Z   Lunate.Agent.Tests -> /home/runner/work/lunate/lunate/tests/Lunate.Agent.Tests/bin/Release/net10.0/Lunate.Agent.Tests.dll
+2026-11-14T11:51:14.0060005Z   MemoryProviderExtension.Tests -> /home/runner/work/lunate/lunate/samples/extensions/memory-provider/MemoryProviderExtension.Tests/bin/Release/net10.0/MemoryProviderExtension.Tests.dll
+2026-11-14T11:51:14.5419078Z   TemplateExtension.Tests -> /home/runner/work/lunate/lunate/templates/extension/TemplateExtension.Tests/bin/Release/net10.0/TemplateExtension.Tests.dll
+2026-11-14T11:51:14.8168883Z   Lunate.Contracts -> /home/runner/work/lunate/lunate/src/Lunate.Contracts/bin/Release/net10.0/Lunate.Contracts.dll
+2026-11-14T11:51:14.8938772Z   Lunate.Extensibility.Abstractions -> /home/runner/work/lunate/lunate/src/Lunate.Extensibility.Abstractions/bin/Release/net10.0/Lunate.Extensibility.Abstractions.dll
+2026-11-14T11:51:15.0469476Z   TemplateExtension -> /home/runner/work/lunate/lunate/templates/extension/TemplateExtension/bin/Release/net10.0/TemplateExtension.dll
+2026-11-14T11:51:15.9104746Z   McpFromExtensionExtension.Tests -> /home/runner/work/lunate/lunate/samples/extensions/mcp-from-extension/McpFromExtensionExtension.Tests/bin/Release/net10.0/McpFromExtensionExtension.Tests.dll
+2026-11-14T11:51:18.0693938Z   Lunate.Extensibility.Tests -> /home/runner/work/lunate/lunate/tests/Lunate.Extensibility.Tests/bin/Release/net10.0/Lunate.Extensibility.Tests.dll
+2026-11-14T11:51:18.1242301Z   WorktreeTasksExtension.Tests -> /home/runner/work/lunate/lunate/samples/extensions/worktree-tasks/WorktreeTasksExtension.Tests/bin/Release/net10.0/WorktreeTasksExtension.Tests.dll
+2026-11-14T11:51:18.1629982Z   Lunate.Protocols.Tests -> /home/runner/work/lunate/lunate/tests/Lunate.Protocols.Tests/bin/Release/net10.0/Lunate.Protocols.Tests.dll
+2026-11-14T11:51:18.1770249Z   ModelRouterExtension.Tests -> /home/runner/work/lunate/lunate/samples/extensions/model-router/ModelRouterExtension.Tests/bin/Release/net10.0/ModelRouterExtension.Tests.dll
+2026-11-14T11:51:18.3729384Z   SkillSourceExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/SkillSourceExtension/bin/Debug/net10.0/SkillSourceExtension.dll
+2026-11-14T11:51:18.4008986Z   ToolExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/ToolExtension/bin/Release/net10.0/ToolExtension.dll
+2026-11-14T11:51:18.5669978Z   ServiceConsumerExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/ServiceConsumerExtension/bin/Debug/net10.0/ServiceConsumerExtension.dll
+2026-11-14T11:51:18.8220277Z   UiShowcaseExtension.Tests -> /home/runner/work/lunate/lunate/samples/extensions/ui-showcase/UiShowcaseExtension.Tests/bin/Release/net10.0/UiShowcaseExtension.Tests.dll
+2026-11-14T11:51:19.0528636Z   CommandExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/CommandExtension/bin/Release/net10.0/CommandExtension.dll
+2026-11-14T11:51:45.1430835Z   Lunate.Coding.Tests -> /home/runner/work/lunate/lunate/tests/Lunate.Coding.Tests/bin/Release/net10.0/Lunate.Coding.Tests.dll
+2026-11-14T11:51:45.2661573Z   MarkerExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/MarkerExtension/bin/Release/net10.0/MarkerExtension.dll
+2026-11-14T11:51:45.3109763Z   LspDiagnosticsExtension.Tests -> /home/runner/work/lunate/lunate/extensions/lsp-diagnostics/LspDiagnosticsExtension.Tests/bin/Release/net10.0/LspDiagnosticsExtension.Tests.dll
+2026-11-14T11:51:45.3192298Z   ModelExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/ModelExtension/bin/Release/net10.0/ModelExtension.dll
+2026-11-14T11:51:45.5196839Z   SkillSourceExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/SkillSourceExtension/bin/Release/net10.0/SkillSourceExtension.dll
+2026-11-14T11:51:45.5253794Z   LeakExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/LeakExtension/bin/Release/net10.0/LeakExtension.dll
+2026-11-14T11:51:45.7233052Z   ServiceConsumerExtension -> /home/runner/work/lunate/lunate/tests/TestExtensions/ServiceConsumerExtension/bin/Release/net10.0/ServiceConsumerExtension.dll
+2026-11-14T11:51:45.7557345Z 
+2026-11-14T11:51:45.7564081Z Build FAILED.
+2026-11-14T11:51:45.7564353Z 
+2026-11-14T11:51:45.7569119Z ##[error]/home/runner/work/lunate/lunate/tests/Lunate.Tui.Tests/ThemeFileTests.cs(30,47): error CS0103: The name 'ScratchPath' does not exist in the current context [/home/runner/work/lunate/lunate/tests/Lunate.Tui.Tests/Lunate.Tui.Tests.csproj]
+2026-11-14T11:51:45.7574187Z ##[error]/home/runner/work/lunate/lunate/tests/Lunate.Tui.Tests/ThemeFileTests.cs(39,23): error CS0103: The name 'ScratchPath' does not exist in the current context [/home/runner/work/lunate/lunate/tests/Lunate.Tui.Tests/Lunate.Tui.Tests.csproj]
+2026-11-14T11:51:45.7576851Z     0 Warning(s)
+2026-11-14T11:51:45.7577215Z     2 Error(s)
+2026-11-14T11:51:45.7577423Z 
+2026-11-14T11:51:45.7577612Z Time Elapsed 00:01:42.86
+2026-11-14T11:51:45.8186232Z verify: wall time 106s (rid=linux-x64 shard=1/4 profile=full exit=1)
+2026-11-14T11:51:45.8187714Z shard-timing: wrote artifacts/verify-timing/verify-linux-x64-1-of-4.json
+2026-11-14T11:51:45.8210633Z ##[error]Process completed with exit code 1.
+2026-11-14T11:51:45.8303687Z ##[group]Run actions/upload-artifact@v7
+2026-11-14T11:51:45.8304014Z with:
+2026-11-14T11:51:45.8304239Z   name: verify-timing-linux-x64-1-of-4
+2026-11-14T11:51:45.8304539Z   path: artifacts/verify-timing/
+2026-11-14T11:51:45.8304799Z   if-no-files-found: warn
+2026-11-14T11:51:45.8305031Z   retention-days: 14
+2026-11-14T11:51:45.8305243Z   compression-level: 6
+2026-11-14T11:51:45.8305475Z   overwrite: false
+2026-11-14T11:51:45.8305685Z   include-hidden-files: false
+2026-11-14T11:51:45.8305921Z   archive: true
+2026-11-14T11:51:45.8306114Z env:
+2026-11-14T11:51:45.8306288Z   RID: linux-x64
+2026-11-14T11:51:45.8306495Z   VERIFY_SKIP_PLATFORM_CHECKS: 1
+2026-11-14T11:51:45.8307052Z   DOTNET_CLI_UI_LANGUAGE: en
+2026-11-14T11:51:45.8307312Z   DOTNET_ROOT: /usr/share/dotnet
+2026-11-14T11:51:45.8307556Z ##[endgroup]
+2026-11-14T11:51:45.9903897Z With the provided path, there will be 1 file uploaded
+2026-11-14T11:51:45.9918197Z Artifact name is valid!
+2026-11-14T11:51:45.9943282Z Root directory input is valid!
+2026-11-14T11:51:46.2125812Z Uploading artifact: verify-timing-linux-x64-1-of-4.zip
+2026-11-14T11:51:46.2187634Z Beginning upload of artifact content to blob storage
+2026-11-14T11:51:46.3174900Z Uploaded bytes 254
+2026-11-14T11:51:46.3380678Z Finished uploading artifact content to blob storage!
+2026-11-14T11:51:46.3381846Z SHA256 digest of uploaded artifact is fa98daf5f96944e1c5b8a9c31575ce107401e38e5649399cd63e68ea849bfec2
+2026-11-14T11:51:46.3382888Z Finalizing artifact upload
+2026-11-14T11:51:46.6787358Z Artifact verify-timing-linux-x64-1-of-4 successfully finalized. Artifact ID 14112528000
+2026-11-14T11:51:46.6788658Z Artifact verify-timing-linux-x64-1-of-4 has been successfully uploaded! Final size is 254 bytes. Artifact ID is 14112528000
+2026-11-14T11:51:46.6792639Z Artifact download URL: https://github.com/lunate-agent/lunate/actions/runs/43591834286/artifacts/14112528000
+2026-11-14T11:51:46.7039975Z ##[group]Run actions/upload-artifact@v7
+2026-11-14T11:51:46.7040507Z with:
+2026-11-14T11:51:46.7040869Z   name: verify-linux-x64
+2026-11-14T11:51:46.7041315Z   path: artifacts/
+.artifacts/
+
+2026-11-14T11:51:46.7041789Z   if-no-files-found: warn
+2026-11-14T11:51:46.7042233Z   compression-level: 6
+2026-11-14T11:51:46.7042860Z   overwrite: false
+2026-11-14T11:51:46.7043270Z   include-hidden-files: false
+2026-11-14T11:51:46.7043716Z   archive: true
+2026-11-14T11:51:46.7044057Z env:
+2026-11-14T11:51:46.7044785Z   RID: linux-x64
+2026-11-14T11:51:46.7045166Z   VERIFY_SKIP_PLATFORM_CHECKS: 1
+2026-11-14T11:51:46.7045609Z   DOTNET_CLI_UI_LANGUAGE: en
+2026-11-14T11:51:46.7046105Z   DOTNET_ROOT: /usr/share/dotnet
+2026-11-14T11:51:46.7046554Z ##[endgroup]
+2026-11-14T11:51:46.8733348Z Multiple search paths detected. Calculating the least common ancestor of all paths
+2026-11-14T11:51:46.8736238Z The least common ancestor is /home/runner/work/lunate/lunate. This will be the root directory of the artifact
+2026-11-14T11:51:46.8737851Z With the provided path, there will be 1 file uploaded
+2026-11-14T11:51:46.8739389Z Artifact name is valid!
+2026-11-14T11:51:46.8740154Z Root directory input is valid!
+2026-11-14T11:51:47.0938419Z Uploading artifact: verify-linux-x64.zip
+2026-11-14T11:51:47.1003247Z Beginning upload of artifact content to blob storage
+2026-11-14T11:51:47.2013039Z Uploaded bytes 302
+2026-11-14T11:51:47.2175505Z Finished uploading artifact content to blob storage!
+2026-11-14T11:51:47.2177240Z SHA256 digest of uploaded artifact is a33cfa6addb5f446cb86de00f023dee2c1df595e294c59ae4b60d3dc7a0c5ca6
+2026-11-14T11:51:47.2178722Z Finalizing artifact upload
+2026-11-14T11:51:47.5564575Z Artifact verify-linux-x64 successfully finalized. Artifact ID 14112503090
+2026-11-14T11:51:47.5565895Z Artifact verify-linux-x64 has been successfully uploaded! Final size is 302 bytes. Artifact ID is 14112503090
+2026-11-14T11:51:47.5567556Z Artifact download URL: https://github.com/lunate-agent/lunate/actions/runs/43591834286/artifacts/14112503090
+2026-11-14T11:51:47.5787418Z Post job cleanup.
+2026-11-14T11:51:47.6711081Z [command]/usr/bin/git version
+2026-11-14T11:51:47.6790445Z git version 2.56.1
+2026-11-14T11:51:47.6849551Z Temporarily overriding HOME='/home/runner/work/_temp/fe8f4cf2-1358-464b-8305-641a01ee9301' before making global git config changes
+2026-11-14T11:51:47.6861834Z Adding repository directory to the temporary git global config as a safe directory
+2026-11-14T11:51:47.6863591Z [command]/usr/bin/git config --global --add safe.directory /home/runner/work/lunate/lunate
+2026-11-14T11:51:47.6920807Z Removing SSH command configuration
+2026-11-14T11:51:47.6929631Z [command]/usr/bin/git config --local --name-only --get-regexp core\.sshCommand
+2026-11-14T11:51:47.6992119Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'core\.sshCommand' && git config --local --unset-all 'core.sshCommand' || :"
+2026-11-14T11:51:47.7453280Z Removing HTTP extra header
+2026-11-14T11:51:47.7454960Z [command]/usr/bin/git config --local --name-only --get-regexp http\.https\:\/\/github\.com\/\.extraheader
+2026-11-14T11:51:47.7496288Z [command]/usr/bin/git submodule foreach --recursive sh -c "git config --local --name-only --get-regexp 'http\.https\:\/\/github\.com\/\.extraheader' && git config --local --unset-all 'http.https://github.com/.extraheader' || :"
+2026-11-14T11:51:47.7862491Z Removing includeIf entries pointing to credentials config files
+2026-11-14T11:51:47.7870593Z [command]/usr/bin/git config --local --name-only --get-regexp ^includeIf\.gitdir:
+2026-11-14T11:51:47.7900981Z includeif.gitdir:/home/runner/work/lunate/lunate/.git.path
+2026-11-14T11:51:47.7902194Z includeif.gitdir:/home/runner/work/lunate/lunate/.git/worktrees/*.path
+2026-11-14T11:51:47.7903374Z includeif.gitdir:/github/workspace/.git.path
+2026-11-14T11:51:47.7904533Z includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-11-14T11:51:47.7910090Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/lunate/lunate/.git.path
+2026-11-14T11:51:47.7936055Z /home/runner/work/_temp/git-credentials-99d9d0e3-59be-45ac-a380-97b8bc99ace2.config
+2026-11-14T11:51:47.7949322Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/lunate/lunate/.git.path \/home\/runner\/work\/_temp\/git\-credentials\-99d9d0e3\-59be\-45ac\-a380\-97b8bc99ace2\.config
+2026-11-14T11:51:47.7990455Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/home/runner/work/lunate/lunate/.git/worktrees/*.path
+2026-11-14T11:51:47.8020520Z /home/runner/work/_temp/git-credentials-99d9d0e3-59be-45ac-a380-97b8bc99ace2.config
+2026-11-14T11:51:47.8033267Z [command]/usr/bin/git config --local --unset includeif.gitdir:/home/runner/work/lunate/lunate/.git/worktrees/*.path \/home\/runner\/work\/_temp\/git\-credentials\-99d9d0e3\-59be\-45ac\-a380\-97b8bc99ace2\.config
+2026-11-14T11:51:47.8072209Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git.path
+2026-11-14T11:51:47.8100008Z /github/runner_temp/git-credentials-99d9d0e3-59be-45ac-a380-97b8bc99ace2.config
+2026-11-14T11:51:47.8113542Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git.path \/github\/runner_temp\/git\-credentials\-99d9d0e3\-59be\-45ac\-a380\-97b8bc99ace2\.config
+2026-11-14T11:51:47.8152114Z [command]/usr/bin/git config --local --get-all includeif.gitdir:/github/workspace/.git/worktrees/*.path
+2026-11-14T11:51:47.8177883Z /github/runner_temp/git-credentials-99d9d0e3-59be-45ac-a380-97b8bc99ace2.config
+2026-11-14T11:51:47.8188690Z [command]/usr/bin/git config --local --unset includeif.gitdir:/github/workspace/.git/worktrees/*.path \/github\/runner_temp\/git\-credentials\-99d9d0e3\-59be\-45ac\-a380\-97b8bc99ace2\.config
+2026-11-14T11:51:47.8267254Z [command]/usr/bin/git submodule foreach --recursive git config --local --show-origin --name-only --get-regexp remote.origin.url
+2026-11-14T11:51:47.8566793Z Removing credentials config '/home/runner/work/_temp/git-credentials-99d9d0e3-59be-45ac-a380-97b8bc99ace2.config'
+2026-11-14T11:51:47.8742531Z Cleaning up orphan processes
+2026-11-14T11:51:47.9112318Z Terminate orphan process: pid (3244) (VBCSCompiler)
