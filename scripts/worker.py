@@ -210,6 +210,11 @@ def rework_brief(cfg: common.Config, pr: int, worktree: pathlib.Path | None = No
              and r.state == "CHANGES_REQUESTED"]
     if found:
         sections.append("### The reviewer requested changes\n\n" + found[-1].strip())
+    newer = github.newer_decision(cfg, p)
+    if newer:  # a maintainer decided after the last commit: carry it out before this can merge
+        sections.append("### A maintainer decided something after your last commit\n\nThe card's `## Decisions` "
+                        "has an entry added after this branch's head was committed. It is binding: carry it out "
+                        "(the whole card, with its Decisions, is below), then end with your report.\n\n> " + newer)
     stuck = github.stuck_reason(p, required, cfg.reviewer_app, harness.reran())
     if stuck and stuck.startswith("required checks"):
         failing = [r for r in p.runs if r[1] not in github.PASSED and r[1]]
@@ -245,7 +250,7 @@ def rework_brief(cfg: common.Config, pr: int, worktree: pathlib.Path | None = No
                         f"it. Merge `origin/{cfg.base}`, find what breaks in combination, and fix it.")
     resume = False
     if p.draft:
-        resume = not sections
+        resume = not sections and not newer
         report = github.worker_report(cfg, pr)
         incomplete = [line.strip() for line in report.splitlines() if line.strip().startswith("**Incomplete")]
         sections.append(

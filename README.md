@@ -149,7 +149,15 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      feeder also dismisses those bot reviews itself, as the reviewer identity, with "Superseded by the
      maintainer's approval at the current head", reads each back and logs it, so GitHub reads it APPROVED and
      the next tick enqueues it. Only the bot's own standing requests for changes on that head — never a person's
-     review, never one the bot posted after the approval. A refusal is logged and the tick goes on.
+     review, never one the bot posted after the approval. Every standing bot request for changes goes, at any
+     head — one left on an older head keeps GitHub's reviewDecision from approving (#839). A dismissal GitHub
+     refuses because the review is dismissed already counts as done (logged as info). A refusal is logged and
+     the tick goes on.
+   - **a newer Decision reworks first**: when the card's `## Decisions` has an entry that first appeared (by the
+     card's edit history; an entry's date has no time of day) after the pull request's head commit, the pull
+     request is due for a rework that carries it out — approved and green or not. It is not enqueued, armed
+     auto-merge is turned off, and the rework brief quotes the entry (#839 would have merged without #624's
+     newest decision).
      If the worker armed auto-merge on it (it does when it marks a pull request ready), GitHub's auto-merge
      usually gets there first: it enqueues the pull request the moment it reads APPROVED, and the timeline
      attributes the `added_to_merge_queue` to the arming identity, `lunate-worker` — with no feeder log line,

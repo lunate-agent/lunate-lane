@@ -26,6 +26,7 @@ from scripts.github import Card, Pull, needs_person, stuck_reason, verdict, wait
 
 ORPHANED = "orphaned draft"
 PERSON = "needs a person: "
+DECIDED = "a Decision newer than its last commit: "
 
 
 @dataclasses.dataclass(frozen=True)
@@ -87,6 +88,8 @@ def rework_reason(p: Pull, reviewer_app: str, required: frozenset = frozenset(),
                   and r.state == "CHANGES_REQUESTED"]
         person = needs_person(bodies[-1]) if bodies else None
         return PERSON + person if person else "changes requested"
+    if p.state == "OPEN" and p.decided_after:  # approved and green or not: the card's newest Decision comes first
+        return DECIDED + p.decided_after
     stuck = stuck_reason(p, required, reviewer_app, reran)
     if stuck:
         return stuck

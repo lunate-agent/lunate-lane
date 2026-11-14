@@ -1069,3 +1069,19 @@ class BuildGateTests(DriveCase):
         self.assertEqual(self.dispatched, [False, True])
         self.assertIn("could not run (1) — not a compile error, so the push is not held for it",
                       (self.cfg.state / "logs" / "worker-850.log").read_text())
+
+
+class DecisionReworkBriefTests(unittest.TestCase):
+    def test_839s_rework_brief_names_the_newer_decision_and_it_is_the_only_reason(self) -> None:
+        state = TempState()
+        self.addCleanup(state.close)
+        newest = "- 2026-11-14 (afternoon): The rerun is done and verified: rerun-624-bosgame-2."
+        p = pull(839, 624, head="64a8aec75e", reviews=[review("APPROVED", commit="64a8aec75e", author="wdaniel1993")],
+                 committed="2026-11-14T07:06:48Z")
+        with mock.patch.object(github, "pull", return_value=p), \
+                mock.patch.object(github, "required_checks", return_value=REQUIRED), \
+                mock.patch.object(github, "newer_decision", return_value=newest):
+            findings, resume = worker.rework_brief(state.cfg, 839)
+        self.assertIn("### A maintainer decided something after your last commit", findings)
+        self.assertIn("> " + newest, findings)
+        self.assertFalse(resume)

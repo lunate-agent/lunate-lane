@@ -766,9 +766,11 @@ class SupersededReviewTests(unittest.TestCase):
         theirs = pull(843, 831, head="h", reviews=[Review(person, "CHANGES_REQUESTED", "h", "", 1), Review(bot, "APPROVED", "h", "", 2),
                                                    Review("someone", "APPROVED", "h", "", 3)])
         self.assertEqual(github.superseded_by_person(theirs, bot), ("", ()))
-        # an older head's request for changes is not this head's
-        old = pull(843, 831, head="h2", reviews=[Review(bot, "CHANGES_REQUESTED", "h1", "", 1), Review(person, "APPROVED", "h2", "", 2)])
-        self.assertEqual(github.superseded_by_person(old, bot), ("", ()))
+        # an older head's standing request for changes goes too (#839); a person's at an older head never does
+        old = pull(843, 831, head="h2", reviews=[Review(bot, "CHANGES_REQUESTED", "h1", "", 1),
+                                                 Review(person, "CHANGES_REQUESTED", "h1", "", 3),
+                                                 Review(person, "APPROVED", "h2", "", 2)])
+        self.assertEqual(github.superseded_by_person(old, bot), (person, (1,)))
         # a review that GitHub says is not the bot's standing request at this head is left, even if the read said so
         self.server[self.BOT_ID]["user"] = {"login": person}
         self.assertEqual(feed.main(), 0)
@@ -785,3 +787,96 @@ class SupersededReviewTests(unittest.TestCase):
         self.assertEqual(feed.main(), 0)
         self.assertIn("FAILED to dismiss lunate-reviewer's request for changes on #843 at c6262afc after "
                       "@wdaniel1993's approval — GitHub refused PUT", self.log())
+
+
+class Shape839Tests(unittest.TestCase):
+    """#839 (card #624), 2026-11-14. lunate-reviewer asked for changes at 9817096fa (01:24Z) and at 64a8aec75
+    (07:37Z), the head; the maintainer approved 64a8aec75 at 12:33Z. GitHub's reviewDecision stayed
+    CHANGES_REQUESTED because of the older head's review; the maintainer dismissed both by hand at 12:40:13Z, one
+    second before the feeder's own call, which GitHub refused as already dismissed. And #624's newest Decision
+    appeared at 12:22:33Z, after #839's last commit (07:06:48Z): approved and clean, it would have merged without it."""
+
+    HEAD, OLD = "64a8aec75e", "9817096fa1"
+
+    def setUp(self) -> None:
+        FeedTests.setUp(self)
+        self.addCleanup(FeedTests.tearDown, self)
+        from scripts import identity, open_pr
+        self.server = {5900388701: {"user": {"login": "lunate-reviewer"}, "state": "CHANGES_REQUESTED", "commit_id": self.OLD},
+                       5902748044: {"user": {"login": "lunate-reviewer"}, "state": "CHANGES_REQUESTED", "commit_id": self.HEAD},
+                       5904348527: {"user": {"login": "wdaniel1993"}, "state": "APPROVED", "commit_id": self.HEAD}}
+        self.calls, self.race = [], set()
+        for patch in (mock.patch.object(identity, "installation_token", return_value="t"),
+                      mock.patch.object(common, "rest", side_effect=self.rest),
+                      mock.patch.object(github, "can_write", return_value=True),
+                      mock.patch.object(github, "newer_decision", return_value=""),
+                      mock.patch.object(open_pr, "enqueue", return_value={"state": "QUEUED", "position": 1}),
+                      mock.patch.object(open_pr, "disarm")):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.open_pr = open_pr
+        github.milestone_cards.return_value = []
+        github.open_pulls.return_value = [pull(839, 624, head=self.HEAD)]
+        self.shape()
+
+    def rest(self, token, method, path, payload=None):
+        self.calls.append((method, path))
+        rid = int(path.split("/reviews/")[1].split("/")[0])
+        if method == "PUT":
+            if rid in self.race:  # the maintainer's own dismissal landed first
+                self.server[rid]["state"] = "DISMISSED"
+                raise common.ApiError(f"GitHub refused PUT {path} (422): {{\"message\":\"Can not dismiss a dismissed "
+                                      "pull request review\"}}")
+            self.server[rid]["state"] = "DISMISSED"
+            return {}
+        return dict(self.server[rid])
+
+    def shape(self, **over):
+        from scripts.github import Review
+        reviews = [Review(r["user"]["login"], r["state"], r["commit_id"], "", i) for i, r in self.server.items()]
+        standing = any(r["state"] == "CHANGES_REQUESTED" for r in self.server.values())
+        github.pull.return_value = pull(839, 624, head=self.HEAD, node_id="PR_839", reviews=reviews,
+                                        review_decision="CHANGES_REQUESTED" if standing else "APPROVED",
+                                        committed="2026-11-14T07:06:48Z", **over)
+
+    def log(self):
+        return (self.state.cfg.state / "logs" / "feed.log").read_text()
+
+    def test_an_approval_of_the_head_dismisses_the_bots_reviews_on_every_head_and_never_a_persons(self) -> None:
+        self.assertEqual(github.superseded_by_person(github.pull.return_value, "lunate-reviewer"),
+                         ("wdaniel1993", (5900388701, 5902748044)))
+        self.assertEqual(feed.main(), 0)
+        self.assertEqual({k: v["state"] for k, v in self.server.items()},
+                         {5900388701: "DISMISSED", 5902748044: "DISMISSED", 5904348527: "APPROVED"})
+        self.assertNotIn(("PUT", "/repos/lunate-agent/lunate/pulls/839/reviews/5904348527/dismissals"), self.calls)
+        self.shape()
+        self.assertEqual(feed.main(), 0)
+        self.open_pr.enqueue.assert_called_once_with(839, "PR_839", self.HEAD)
+
+    def test_already_dismissed_by_someone_else_is_done_not_failed(self) -> None:
+        self.race = {5902748044}
+        self.assertEqual(feed.main(), 0)
+        log = self.log()
+        self.assertNotIn("FAILED", log)
+        self.assertIn("review 5902748044 on #839 was dismissed by someone else meanwhile — done", log)
+        self.assertEqual(self.server[5900388701]["state"], "DISMISSED", "the other one still goes")
+        self.server[5900388701]["state"] = "DISMISSED"  # read as dismissed before the call: nothing to do
+        self.shape()
+        self.calls.clear()
+        self.assertEqual(feed.main(), 0)
+        self.assertEqual([c for c in self.calls if c[0] == "PUT"], [])
+
+    def test_a_decision_newer_than_the_last_commit_reworks_and_is_never_enqueued_first(self) -> None:
+        for review_id in self.server:
+            if self.server[review_id]["user"]["login"] == "lunate-reviewer":
+                self.server[review_id]["state"] = "DISMISSED"
+        self.shape(auto_merge=True)  # approved, green, clean, armed: it would have merged
+        newest = ("- 2026-11-14 (afternoon): The rerun is done and verified: rerun-624-bosgame-2 on Bosgame, 20/20 "
+                  "resolved counts reconciled with their report.json.")
+        github.newer_decision.return_value = newest
+        self.assertEqual(feed.main(), 0)
+        self.open_pr.enqueue.assert_not_called()
+        self.open_pr.disarm.assert_called_once_with(839, "PR_839")
+        self.assertEqual([(l.card, l.rework_pr) for l in self.started], [(624, 839)])
+        self.assertTrue(self.started[0].reason.startswith("a Decision newer than its last commit: - 2026-11-14 (afternoon)"))
+        self.assertIn("has a Decision newer than 64a8aec7", self.log())
