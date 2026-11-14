@@ -36,9 +36,10 @@ class ReviewError(LaneError):
 
 
 def skip_reason(p: github.Pull, required: frozenset, running: dict, reviewer: str, others=(),
-                rereview: bool = False) -> str | None:
+                rereview: bool = False, parked=frozenset()) -> str | None:
     """Why this pull request is not reviewed now, or None if it is due. `others` are the open pull requests (any
-    author, with their files): one that is older and touches the same OpenSpec capability holds this one back.
+    author, with their files): one that is older, ready and not parked (`parked`: the parked cards) and touches
+    the same OpenSpec capability holds this one back.
     A `rereview` (`lane.py rereview`) reviews a head the bot already reviewed; every other rule holds."""
     if p.state != "OPEN":
         return f"is {p.state.lower()}"
@@ -60,7 +61,7 @@ def skip_reason(p: github.Pull, required: frozenset, running: dict, reviewer: st
     person = github.person_approved(p, reviewer)
     if person:  # the bot's review was dismissed and a person approved: reviewing again would overrule them
         return f"@{person} approved it at {p.head[:8]}"
-    overlap = github.spec_overlap(p, [o for o in others if o.number != p.number])
+    overlap = github.spec_overlap(p, [o for o in others if o.number != p.number], parked)
     if overlap:
         older, shared = overlap
         return f"older #{older} also changes the OpenSpec capability {', '.join(sorted(shared))} — it lands first"
@@ -81,13 +82,14 @@ def reviewer_model(cfg: common.Config, p: github.Pull) -> str:
 def due(cfg: common.Config) -> list[github.Pull]:
     required = github.required_checks(cfg)
     running = harness.running_workers()
+    parked = harness.parked_cards()  # a parked pull request holds no spec overlap back
     found = []
     pulls = github.open_pulls(cfg)
     for summary in pulls:
         if summary.author != cfg.worker_app:
             continue
         p = github.pull(cfg, summary.number)
-        reason = skip_reason(p, required, running, cfg.reviewer_app, pulls)
+        reason = skip_reason(p, required, running, cfg.reviewer_app, pulls, parked=parked)
         if reason:
             common.log(JOB, f"#{p.number} skipped — {reason}")
         else:
@@ -172,7 +174,8 @@ def rereview(cfg: common.Config, number: int, actor: str = "") -> tuple[str, str
     p = github.pull(cfg, number)
     if p.author != cfg.worker_app:
         return "SKIPPED", f"is not a {cfg.worker_app} pull request"
-    reason = skip_reason(p, required, harness.running_workers(), cfg.reviewer_app, others, rereview=True)
+    reason = skip_reason(p, required, harness.running_workers(), cfg.reviewer_app, others, rereview=True,
+                         parked=harness.parked_cards())
     if reason:
         common.log(JOB, f"#{p.number} not re-reviewed — {reason}")
         return "SKIPPED", reason

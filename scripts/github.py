@@ -102,9 +102,11 @@ def capabilities(paths) -> frozenset:
     return frozenset(m.group(1) for m in map(SPEC_PATH.match, paths) if m)
 
 
-def spec_overlap(p: Pull, others) -> tuple[int, frozenset] | None:
+def spec_overlap(p: Pull, others, parked=frozenset()) -> tuple[int, frozenset] | None:
     """The oldest *older*, ready (not draft) open pull request touching one of `p`'s OpenSpec capabilities, and
-    the shared ones. A draft does not hold anything back: it may stay unfinished for days (review of #17).
+    the shared ones. A draft does not hold anything back: it may stay unfinished for days (review of #17). Nor
+    does one whose card is `parked`: it waits on a person, maybe for days (#847 and #848 sat behind parked #843
+    on ci-pipeline, 2026-11-14).
 
     A pull request whose files were not read cannot be cleared: that is a refusal, not 'no overlap'.
     """
@@ -116,7 +118,7 @@ def spec_overlap(p: Pull, others) -> tuple[int, frozenset] | None:
     for other in sorted(others, key=lambda o: o.number):
         if other.number >= p.number:
             break
-        if other.draft:
+        if other.draft or (other.card is not None and other.card in parked):
             continue
         if other.files is None:
             raise GhError(f"#{other.number}'s files were not read — cannot clear #{p.number} of a spec overlap")

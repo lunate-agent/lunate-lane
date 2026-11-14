@@ -189,7 +189,7 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    reviewer tick that finds the driver dead kills that session before clearing the record.
 3. **Reviewer** (`scripts/review.py`, every 10 minutes). For each open worker pull request that is not a draft,
    has no running worker, has every *required* check green on its head, has no review from
-   `lunate-reviewer` at that head, and is not held back by an *older*, ready (not draft) open pull request (any author) that changes
+   `lunate-reviewer` at that head, and is not held back by an *older*, ready (not draft) and unparked open pull request (any author) that changes
    the same OpenSpec capability (`openspec/specs/<cap>/…` or a change's `specs/<cap>/…` delta) — the older one
    lands first: runs a Pi session on a reviewer model — `models.reviewer.full` (`opencode-go/gpt-6-luna`) for any
    pull request touching `src/`, `tests/`, `openspec/` or `.github/` (or whose file list is empty), and
