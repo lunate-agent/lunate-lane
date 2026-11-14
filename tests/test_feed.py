@@ -880,3 +880,16 @@ class Shape839Tests(unittest.TestCase):
         self.assertEqual([(l.card, l.rework_pr) for l in self.started], [(624, 839)])
         self.assertTrue(self.started[0].reason.startswith("a Decision newer than its last commit: - 2026-11-14 (afternoon)"))
         self.assertIn("has a Decision newer than 64a8aec7", self.log())
+
+
+class ParkedNotEnqueuedTests(unittest.TestCase):
+    def test_856_approved_green_and_ready_but_its_card_parked_is_never_enqueued(self) -> None:
+        FeedTests.setUp(self)
+        self.addCleanup(FeedTests.tearDown, self)
+        from scripts import open_pr
+        github.milestone_cards.return_value = []
+        github.open_pulls.return_value = [pull(856, 850)]
+        github.pull.return_value = pull(856, 850, node_id="PR_856", reviews=[review("APPROVED")])
+        harness.park(850, "manual", "scope decision 2026-11-14")
+        with mock.patch.object(open_pr, "enqueue", side_effect=AssertionError("never enqueued while parked")):
+            self.assertEqual(feed.main(), 0)

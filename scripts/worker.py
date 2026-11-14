@@ -594,6 +594,13 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
         common.git(cfg.checkout, "fetch", "-q", "origin")
         if ref_exists(cfg.checkout, f"refs/remotes/origin/wt/issue-{number}"):
             reconcile(cfg, worktree, number)
+    # read again now, just before the push: a card parked while this run worked (#850 at 18:40, its run finished
+    # 18:50 and armed #856) has its commits pushed, but its pull request stays a draft with auto-merge off
+    data = harness.attempts(number)
+    if data["parked"] and not parked_now:
+        found.append(f"card #{number} was parked while this run worked ({data['reason'] or 'parked'}) — its commits "
+                     "are pushed, the pull request stays a draft with auto-merge off")
+        common.log(job, found[-1])
     try:
         result = dispatch_card.dispatch(cfg.checkout, number, arm=not found and not blockers,
                                         known=(harness.read_credential(cfg),))
