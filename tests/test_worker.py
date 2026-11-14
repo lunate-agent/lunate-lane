@@ -1053,6 +1053,33 @@ class BuildGateTests(DriveCase):
         self.assertEqual(seen["command"][seen["command"].index("-c") + 1], "Release")
         self.assertNotIn(self.cfg.harness["credential_env"], seen["env"])
         self.assertNotIn("model-credential-value-1234", " ".join(seen["env"].values()))
+        self.assertIn("--no-restore", seen["command"], "a lane-started restore hung 5 minutes in the sandbox")
+
+    def test_a_build_beside_a_running_session_leaves_its_home_alone(self) -> None:
+        scratch = self.cfg.state / "scratch" / "issue-850"
+        (scratch / "home" / ".pi").mkdir(parents=True)
+        (scratch / "home" / ".pi" / "settings.json").write_text("{}")
+        path = worker.prepare_worktree(self.cfg, 850)
+        real = subprocess.run
+        with mock.patch.object(worker.subprocess, "run", side_effect=lambda c, *a, **k: subprocess.CompletedProcess(c, 0, "", "")
+                               if c and c[0] == harness.SANDBOX_EXEC else real(c, *a, **k)), \
+                mock.patch.object(harness, "read_credential", return_value="k"):
+            worker._run_build(self.cfg, path, scratch, "tests/Lunate.Tui.Tests/Lunate.Tui.Tests.csproj")
+        self.assertTrue((scratch / "home" / ".pi" / "settings.json").exists(), "the session's HOME was not reseeded")
+
+    def test_a_project_never_restored_is_not_a_compile_error(self) -> None:
+        def unrestored(cfg, worktree, scratch, project):
+            return 1, (f"{worktree}/tests/Lunate.Tui.Tests/Lunate.Tui.Tests.csproj : error NETSDK1004: Assets file "
+                       f"'{worktree}/tests/Lunate.Tui.Tests/obj/project.assets.json' not found. Run a NuGet package "
+                       "restore to generate this file.")
+
+        path = worker.prepare_worktree(self.cfg, 850)
+        (path / "tests/Lunate.Tui.Tests/X.cs").write_text("x\n")
+        git(path, "add", "-A")
+        git(path, "-c", "user.email=w@x", "-c", "user.name=w", "commit", "-qm", "x")
+        with mock.patch.object(worker, "_run_build", side_effect=unrestored):
+            self.assertEqual(worker.build_errors(self.cfg, path, self.cfg.state / "scratch" / "issue-850", "worker-850"), [])
+        self.assertIn("could not run (1) — not a compile error", (self.cfg.state / "logs" / "worker-850.log").read_text())
 
     def test_the_brief_says_to_build_the_test_project(self) -> None:
         text = worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), None, "", True)
@@ -1131,7 +1158,10 @@ class Rework856Tests(BuildGateTests):
         git(self.clone, "add", "-A")
         git(self.clone, "commit", "-q", "-m", "theme")
         git(self.clone, "push", "-q", "origin", "wt/issue-850")
+        head = git(self.clone, "rev-parse", "HEAD")
         git(self.clone, "switch", "-q", "--detach", "origin/main")
+        self.patches.append(mock.patch.object(github, "pull", return_value=pull(856, 850, head=head)))
+        self.patches[-1].start()
 
         def run(cfg, *, worktree, log_path, extra_env, on_tick, prompt, session_id=None, **_):
             self.prompts.append((prompt, session_id))
@@ -1151,3 +1181,46 @@ class Rework856Tests(BuildGateTests):
         self.assertIn("ThemeFileTests.cs(30,47): error CS0103: The name 'ScratchPath'", self.prompts[1][0])
         self.assertEqual(self.prompts[1][1], "issue-850-r3")
         self.assertEqual(self.dispatched, [True])
+
+
+
+class StartAtHeadTests(RepoCase):
+    """A rework starts from exactly the pull request's head (2026-11-14: checked on #850, whose worktree was at
+    #856's head d35ed99a1 and clean — the guard makes it so whatever an earlier round left)."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.head = self.push_branch("wt/issue-850", "theme.cs")
+        self.path = worker.prepare_worktree(self.cfg, 850)
+        for key, value in (("user.email", "w@example.invalid"), ("user.name", "w")):
+            git(self.path, "config", key, value)
+        self.pull = mock.patch.object(github, "pull", return_value=pull(856, 850, head=self.head))
+        self.pull.start()
+        self.addCleanup(self.pull.stop)
+
+    def test_at_the_head_and_clean_nothing_happens(self) -> None:
+        self.assertEqual(worker.start_at_head(self.cfg, self.path, 850, 856, "worker-850"), "")
+        self.assertEqual(git(self.path, "rev-parse", "HEAD"), self.head)
+
+    def test_leftovers_are_archived_local_commits_kept_and_the_worktree_reset_to_the_head(self) -> None:
+        (self.path / "ThemeFileTests.cs").write_text("an earlier round's unfinished edit\n")
+        git(self.path, "add", "ThemeFileTests.cs")
+        git(self.path, "commit", "-qm", "local only")
+        local = git(self.path, "rev-parse", "HEAD")
+        (self.path / "theme.cs").write_text("uncommitted\n")
+        (self.path / "scratch.txt").write_text("untracked\n")
+        what = worker.start_at_head(self.cfg, self.path, 850, 856, "worker-850")
+        self.assertEqual(git(self.path, "rev-parse", "HEAD"), self.head)
+        self.assertEqual(git(self.path, "status", "--porcelain", "--untracked-files=all"), "")
+        archives = list((self.cfg.state / "retired").glob("850-*.tar.gz"))
+        self.assertEqual(len(archives), 1)
+        import tarfile
+        with tarfile.open(archives[0]) as tar:
+            self.assertEqual(sorted(tar.getnames()), ["scratch.txt", "theme.cs"])
+            self.assertEqual(tar.extractfile("theme.cs").read(), b"uncommitted\n")
+        refs = git(self.clone, "for-each-ref", "--format=%(refname) %(objectname)", "refs/lane/retired/").split()
+        self.assertEqual((refs[0].startswith("refs/lane/retired/issue-850-"), refs[1]), (True, local))
+        log = (self.cfg.state / "logs" / "worker-850.log").read_text()
+        self.assertIn(f"not #856's head {self.head[:9]}", log)
+        self.assertIn("2 uncommitted or untracked path(s) archived", log)
+        self.assertIn(f"reset to {self.head[:9]}", what)
