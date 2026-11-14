@@ -1278,3 +1278,34 @@ class CiOkDependencyTests(unittest.TestCase):
         self.assertIn("System.TimeoutException : chat call 2 never started within 60 seconds", errors)
         self.assertNotIn("\x1b[", findings)
         self.assertNotIn("[31m", findings)
+
+
+class ParkedWhileRunningTests(DriveCase):
+    """#856 (card #850), 2026-11-14: its rework started 18:00; the card was parked by hand at 18:40 (scope
+    decision: 0.5.0, paused); the run finished at 18:50 and marked #856 ready and armed auto-merge. A run that
+    finishes after its card was parked pushes its commits but leaves the pull request a draft, auto-merge off."""
+
+    def test_a_card_parked_mid_run_is_pushed_as_a_draft_never_armed(self) -> None:
+        def parked_at_1840(cfg, *, worktree, log_path, extra_env, on_tick, **_):
+            git(worktree, "config", "user.email", "w@example.invalid")
+            git(worktree, "config", "user.name", "w")
+            (worktree / "fix.cs").write_text("fixed\n")
+            git(worktree, "add", "fix.cs")
+            git(worktree, "commit", "-q", "-m", "fix")
+            harness.park(3, "manual", "scope decision 2026-11-14: 0.5.0, paused until 0.4.0 ships")  # 18:40
+            log_path.write_text('{"type":"message_end","message":{"content":[{"type":"text","text":"done"}]}}\n')
+            return harness.Outcome(0, False, 60, False)  # 18:50
+
+        with mock.patch.object(harness, "run_session", side_effect=parked_at_1840):
+            self.assertEqual(worker.drive(self.cfg, 3, None), 1)
+        self.assertEqual(self.dispatched[-1], False, "pushed, never armed or marked ready")
+        number, body = self.comments[-1]
+        self.assertIn("card #3 was parked while this run worked (manual)", body)
+        self.assertIn("stays a draft", body)
+        self.assertIn("card #3 was parked while this run worked", (self.cfg.state / "logs" / "worker-3.log").read_text())
+        self.assertEqual(harness.parked_details(), {3: "manual"}, "still parked")
+
+    def test_a_card_not_parked_is_armed_as_before(self) -> None:
+        with self.fake_session():
+            self.assertEqual(worker.drive(self.cfg, 3, None), 0)
+        self.assertEqual(self.dispatched[-1], True)

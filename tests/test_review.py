@@ -38,6 +38,13 @@ class SkipTests(unittest.TestCase):
         self.assertIn("already reviewed", self.reason(pull(1, 9, reviews=[a_review("APPROVED")])))
         self.assertIsNone(self.reason(pull(1, 9, head="h2", reviews=[a_review("CHANGES_REQUESTED", commit="h1")])))
 
+    def test_a_pull_request_whose_card_is_parked_is_not_reviewed(self) -> None:
+        """#856: card #850 parked at 18:40 — it waits on a person, not on a review."""
+        p = pull(856, 850, files=("src/a.cs",))
+        self.assertEqual(review.skip_reason(p, REQUIRED, {}, "lunate-reviewer", [p], parked=frozenset({850})),
+                         "its card #850 is parked")
+        self.assertIsNone(review.skip_reason(p, REQUIRED, {}, "lunate-reviewer", [p], parked=frozenset()))
+
     def test_847_and_848_are_not_held_behind_843_while_it_is_parked_or_a_draft(self) -> None:
         """2026-11-14 07:25: #847 and #848 were skipped every run behind #843 (card #831, parked) on ci-pipeline."""
         p843 = pull(843, 831, files=("openspec/changes/archive/2026-11-14-ci-fast-pr-gate/specs/ci-pipeline/spec.md",
@@ -73,7 +80,7 @@ class SkipTests(unittest.TestCase):
                 mock.patch.object(review.harness, "running_workers", return_value={}), \
                 mock.patch.object(review.harness, "parked_cards", return_value=frozenset({831})), \
                 mock.patch("sys.stdout", new=io.StringIO()):
-            self.assertEqual([p.number for p in review.due(state.cfg)], [843, 847])
+            self.assertEqual([p.number for p in review.due(state.cfg)], [847], "a parked card's #843 is not reviewed")
             review.harness.parked_cards.return_value = frozenset()
             self.assertEqual([p.number for p in review.due(state.cfg)], [843])
 

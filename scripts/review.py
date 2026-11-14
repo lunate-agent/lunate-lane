@@ -44,6 +44,8 @@ def skip_reason(p: github.Pull, required: frozenset, running: dict, reviewer: st
     A `rereview` (`lane.py rereview`) reviews a head the bot already reviewed; every other rule holds."""
     if p.state != "OPEN":
         return f"is {p.state.lower()}"
+    if p.card is not None and p.card in parked:  # parked: it waits on a person, not on a review
+        return f"its card #{p.card} is parked"
     if p.draft:
         return "is a draft"
     if p.waits_on:  # a slice started before its predecessor: reviewed once the predecessor has landed
