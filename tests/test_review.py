@@ -38,6 +38,45 @@ class SkipTests(unittest.TestCase):
         self.assertIn("already reviewed", self.reason(pull(1, 9, reviews=[a_review("APPROVED")])))
         self.assertIsNone(self.reason(pull(1, 9, head="h2", reviews=[a_review("CHANGES_REQUESTED", commit="h1")])))
 
+    def test_847_and_848_are_not_held_behind_843_while_it_is_parked_or_a_draft(self) -> None:
+        """2026-11-14 07:25: #847 and #848 were skipped every run behind #843 (card #831, parked) on ci-pipeline."""
+        p843 = pull(843, 831, files=("openspec/changes/archive/2026-11-14-ci-fast-pr-gate/specs/ci-pipeline/spec.md",
+                                     "openspec/specs/ci-pipeline/spec.md", ".github/workflows/ci.yml"))
+        p847 = pull(847, 805, files=("openspec/changes/archive/2026-11-14-pre-ready-gate/specs/ci-pipeline/spec.md",
+                                     "openspec/specs/ci-pipeline/spec.md"))
+        p848 = pull(848, 809, files=("openspec/changes/archive/2026-11-14-specs-name-current-docs-paths/specs/"
+                                     "ci-pipeline/spec.md", "openspec/specs/ci-pipeline/spec.md",
+                                     "openspec/specs/tui/spec.md"))
+        others = [p843, p847, p848]
+        # parked: neither waits on it — but #848 still waits on #847, which is ready, unparked and older
+        self.assertIsNone(review.skip_reason(p847, REQUIRED, {}, "lunate-reviewer", others, parked=frozenset({831})))
+        self.assertIn("older #847 also changes the OpenSpec capability ci-pipeline",
+                      review.skip_reason(p848, REQUIRED, {}, "lunate-reviewer", others, parked=frozenset({831})))
+        # #847 parked as well: #848 is due
+        self.assertIsNone(review.skip_reason(p848, REQUIRED, {}, "lunate-reviewer", others,
+                                             parked=frozenset({831, 805})))
+        # a draft #843 holds nothing back either
+        drafts = [pull(843, 831, files=p843.files, draft=True), p847]
+        self.assertIsNone(review.skip_reason(p847, REQUIRED, {}, "lunate-reviewer", drafts))
+        # ready and unparked, #843 lands first, as before
+        self.assertIn("older #843 also changes the OpenSpec capability ci-pipeline",
+                      review.skip_reason(p847, REQUIRED, {}, "lunate-reviewer", others))
+
+    def test_the_review_run_reads_the_parked_cards_for_the_overlap(self) -> None:
+        state = TempState()
+        self.addCleanup(state.close)
+        p843 = pull(843, 831, files=("openspec/specs/ci-pipeline/spec.md",))
+        p847 = pull(847, 805, files=("openspec/specs/ci-pipeline/spec.md",))
+        with mock.patch.object(review.github, "required_checks", return_value=REQUIRED), \
+                mock.patch.object(review.github, "open_pulls", return_value=[p843, p847]), \
+                mock.patch.object(review.github, "pull", side_effect=lambda cfg, n: {843: p843, 847: p847}[n]), \
+                mock.patch.object(review.harness, "running_workers", return_value={}), \
+                mock.patch.object(review.harness, "parked_cards", return_value=frozenset({831})), \
+                mock.patch("sys.stdout", new=io.StringIO()):
+            self.assertEqual([p.number for p in review.due(state.cfg)], [843, 847])
+            review.harness.parked_cards.return_value = frozenset()
+            self.assertEqual([p.number for p in review.due(state.cfg)], [843])
+
     def test_an_older_open_pull_request_on_the_same_capability_holds_a_newer_one_back(self) -> None:
         older = pull(4, 8, author="someone", files=("openspec/specs/agent-loop/spec.md",))
         newer = pull(6, 9, files=("openspec/changes/x/specs/agent-loop/spec.md", "src/A.cs"))
