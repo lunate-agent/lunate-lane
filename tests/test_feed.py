@@ -649,3 +649,109 @@ class QueueEjectionFeedTests(unittest.TestCase):
             self.assertEqual(feed.main(), 1)
         self.assertEqual(harness.requeues(824, "h1"), ("2026-11-13T18:11:07Z",))
         self.assertIn("#824 is not in the merge queue", self.log())
+
+
+class SupersededReviewTests(unittest.TestCase):
+    """#843 on 2026-11-14: lunate-reviewer asked for changes at c6262afc (02:27), the maintainer approved that head
+    (06:36). The lane acted on the approval, but GitHub's reviewDecision stayed CHANGES_REQUESTED, so it was never
+    enqueued. Now the lane dismisses the bot's review itself, and the next tick enqueues it."""
+
+    HEAD = "c6262afc5d"
+    BOT_ID = 5900875935
+
+    def setUp(self) -> None:
+        FeedTests.setUp(self)
+        self.addCleanup(FeedTests.tearDown, self)
+        self.server = {self.BOT_ID: {"id": self.BOT_ID, "user": {"login": "lunate-reviewer"}, "state": "CHANGES_REQUESTED",
+                                     "commit_id": self.HEAD},
+                       77: {"id": 77, "user": {"login": "wdaniel1993"}, "state": "APPROVED", "commit_id": self.HEAD}}
+        self.calls = []
+        self.writers = {"wdaniel1993"}
+        from scripts import identity, open_pr
+        for patch in (mock.patch.object(identity, "installation_token", return_value="t"),
+                      mock.patch.object(common, "rest", side_effect=self.rest),
+                      mock.patch.object(github, "can_write", side_effect=lambda cfg, who: who in self.writers),
+                      mock.patch.object(open_pr, "enqueue", return_value={"state": "QUEUED", "position": 1})):
+            patch.start()
+            self.addCleanup(patch.stop)
+        self.enqueue = open_pr.enqueue
+        self.shape()
+
+    def rest(self, token, method, path, payload=None):
+        self.calls.append((method, path, payload))
+        review_id = int(path.split("/reviews/")[1].split("/")[0])
+        if method == "PUT":
+            self.server[review_id]["state"] = "DISMISSED"
+            return {}
+        return dict(self.server[review_id])
+
+    def shape(self):
+        """#843 as the feeder reads it from what GitHub holds now (the bot's review first, then the person's)."""
+        from scripts.github import Review
+        reviews = [Review(s["user"]["login"], s["state"], s["commit_id"], "", i) for i, s in self.server.items()]
+        decision = "APPROVED" if self.server[self.BOT_ID]["state"] == "DISMISSED" else "CHANGES_REQUESTED"
+        github.milestone_cards.return_value = []
+        github.open_pulls.return_value = [pull(843, 831, head=self.HEAD)]
+        github.pull.return_value = pull(843, 831, head=self.HEAD, node_id="PR_843", reviews=reviews,
+                                        review_decision=decision)
+
+    def log(self):
+        return (self.state.cfg.state / "logs" / "feed.log").read_text()
+
+    def test_843s_bot_review_is_dismissed_and_the_next_tick_enqueues_it(self) -> None:
+        self.assertEqual(github.superseded_by_person(github.pull.return_value, "lunate-reviewer"),
+                         ("wdaniel1993", (self.BOT_ID,)))
+        self.assertEqual(feed.main(), 0)
+        self.assertEqual(self.server[self.BOT_ID]["state"], "DISMISSED")
+        self.assertEqual(self.server[77]["state"], "APPROVED", "the person's review is never touched")
+        put = [c for c in self.calls if c[0] == "PUT"]
+        self.assertEqual(put, [("PUT", f"/repos/lunate-agent/lunate/pulls/843/reviews/{self.BOT_ID}/dismissals",
+                                {"message": "Superseded by the maintainer's approval at the current head",
+                                 "event": "DISMISS"})])
+        self.enqueue.assert_not_called()  # GitHub still read CHANGES_REQUESTED on this tick's read
+        self.assertIn(f"dismissed lunate-reviewer's request for changes on #843 at c6262afc (review {self.BOT_ID}): "
+                      "Superseded by the maintainer's approval at the current head — @wdaniel1993 approved it", self.log())
+        self.shape()  # the next tick reads the dismissal and GitHub's APPROVED
+        self.assertEqual(feed.main(), 0)
+        self.enqueue.assert_called_once_with(843, "PR_843", self.HEAD)
+        self.assertEqual(len([c for c in self.calls if c[0] == "PUT"]), 1, "dismissed once")
+
+    def test_never_without_write_access_and_never_in_a_dry_run(self) -> None:
+        with mock.patch.object(sys, "argv", ["feed.py", "--dry-run"]):
+            self.assertEqual(feed.main(), 0)
+        self.assertIn(f"would dismiss lunate-reviewer's request for changes on #843 at c6262afc (review {self.BOT_ID})",
+                      self.log())
+        self.writers = set()
+        self.assertEqual(feed.main(), 0)
+        self.assertEqual([c for c in self.calls if c[0] == "PUT"], [])
+        self.assertIn("@wdaniel1993 approved after it but has no write access", self.log())
+
+    def test_never_the_other_way_round(self) -> None:
+        from scripts.github import Review
+        bot, person = "lunate-reviewer", "wdaniel1993"
+        # the bot asked for changes after the person approved: nothing supersedes it
+        later = pull(843, 831, head="h", reviews=[Review(person, "APPROVED", "h", "", 1), Review(bot, "CHANGES_REQUESTED", "h", "", 2)])
+        self.assertEqual(github.superseded_by_person(later, bot), ("", ()))
+        # a person's request for changes is never the bot's to dismiss, whatever the bot says after it
+        theirs = pull(843, 831, head="h", reviews=[Review(person, "CHANGES_REQUESTED", "h", "", 1), Review(bot, "APPROVED", "h", "", 2),
+                                                   Review("someone", "APPROVED", "h", "", 3)])
+        self.assertEqual(github.superseded_by_person(theirs, bot), ("", ()))
+        # an older head's request for changes is not this head's
+        old = pull(843, 831, head="h2", reviews=[Review(bot, "CHANGES_REQUESTED", "h1", "", 1), Review(person, "APPROVED", "h2", "", 2)])
+        self.assertEqual(github.superseded_by_person(old, bot), ("", ()))
+        # a review that GitHub says is not the bot's standing request at this head is left, even if the read said so
+        self.server[self.BOT_ID]["user"] = {"login": person}
+        self.assertEqual(feed.main(), 0)
+        self.assertEqual([c for c in self.calls if c[0] == "PUT"], [])
+        self.assertIn(f"left review {self.BOT_ID} on #843", self.log())
+
+    def test_a_refused_dismissal_is_logged_and_the_tick_goes_on(self) -> None:
+        def refuse(token, method, path, payload=None):
+            if method == "PUT":
+                raise common.ApiError(f"GitHub refused PUT {path} (403): Resource not accessible by integration")
+            return self.rest(token, method, path, payload)
+
+        common.rest.side_effect = refuse
+        self.assertEqual(feed.main(), 0)
+        self.assertIn("FAILED to dismiss lunate-reviewer's request for changes on #843 at c6262afc after "
+                      "@wdaniel1993's approval — GitHub refused PUT", self.log())

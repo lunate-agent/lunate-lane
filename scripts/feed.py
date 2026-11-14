@@ -17,7 +17,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from scripts import cards, cleanup, common, github, harness, open_pr, parked, worker  # noqa: E402
+from scripts import cards, cleanup, common, github, harness, identity, open_pr, parked, worker  # noqa: E402
 from scripts.common import LaneError  # noqa: E402
 
 JOB = "feed"
@@ -62,7 +62,51 @@ def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[
                and not p.draft and not p.in_queue and not p.waits_on and not p.disarmed_by and not p.dequeued_by
                and p.ejection is not None and p.ejection.kind == "infra" and p.review_decision == "APPROVED"
                and github.verdict(p, cfg.reviewer_app) == "APPROVED"]
-    return launches, notes, rerun, enqueue, disarm, ejected
+    superseded = [p for p in worker_pulls if p.state == "OPEN" and github.superseded_by_person(p, cfg.reviewer_app)[1]]
+    return launches, notes, rerun, enqueue, disarm, ejected, superseded
+
+
+SUPERSEDED = "Superseded by the maintainer's approval at the current head"
+
+
+def dismiss_superseded(cfg: common.Config, p: github.Pull, dry_run: bool) -> list[int]:
+    """A person with write access approved the worker pull request at its head after the reviewer bot asked for
+    changes there: dismiss those bot reviews, as the reviewer identity, with `SUPERSEDED`, and read each back. The
+    lane already acts on the person's approval (`github.verdict`); this makes GitHub's reviewDecision agree, so
+    the next tick enqueues it. Only the bot's own requests for changes on this head are touched — each is read
+    first and left alone unless it is exactly that — never a person's review. A failure is logged, not fatal.
+    Returns the review ids dismissed."""
+    person, ids = github.superseded_by_person(p, cfg.reviewer_app)
+    what = f"{cfg.reviewer_app}'s request for changes on #{p.number} at {p.head[:8]}"
+    try:
+        if not github.can_write(cfg, person):
+            common.log(JOB, f"left {what}: @{person} approved after it but has no write access")
+            return []
+        if dry_run:
+            common.log(JOB, f"would dismiss {what} (review {', '.join(map(str, ids))}): superseded by @{person}'s "
+                            "approval at the current head")
+            return []
+        token = identity.installation_token("reviewer")
+        done = []
+        for review_id in ids:
+            path = f"/repos/{cfg.slug}/pulls/{int(p.number)}/reviews/{int(review_id)}"
+            before = common.rest(token, "GET", path)
+            if (github.login(before.get("user")) != cfg.reviewer_app or before.get("state") != "CHANGES_REQUESTED"
+                    or before.get("commit_id") != p.head):
+                common.log(JOB, f"left review {review_id} on #{p.number}: it is not {cfg.reviewer_app}'s standing "
+                                f"request for changes at {p.head[:8]}")
+                continue
+            common.rest(token, "PUT", path + "/dismissals", {"message": SUPERSEDED, "event": "DISMISS"})
+            if common.rest(token, "GET", path).get("state") != "DISMISSED":
+                raise LaneError(f"review {review_id} on #{p.number} does not read back as dismissed")
+            done.append(review_id)
+    except LaneError as exc:
+        common.log(JOB, f"FAILED to dismiss {what} after @{person}'s approval — {exc}")
+        return []
+    if done:
+        common.log(JOB, f"dismissed {what} (review {', '.join(map(str, done))}): {SUPERSEDED} — @{person} approved "
+                        "it; it is treated as approved and enqueued once GitHub reads it so")
+    return done
 
 
 def requeue(cfg: common.Config, p: github.Pull, dry_run: bool) -> None:
@@ -161,7 +205,9 @@ def tick(dry_run: bool = False) -> None:
     parked.clear_closed(cfg, harness.parked_cards(), JOB, dry_run)  # a closed card waits on nobody
     if not dry_run:  # a park or unpark that happened without its label and assignment, or whose flagging failed
         parked.reconcile(cfg, harness.parked_cards(), JOB)
-    launches, notes, reruns, enqueues, disarms, ejected = decide_all(cfg)
+    launches, notes, reruns, enqueues, disarms, ejected, superseded = decide_all(cfg)
+    for p in superseded:  # first: GitHub reads it APPROVED from the next tick, which enqueues it
+        dismiss_superseded(cfg, p, dry_run)
     for p in reruns:
         rerun(cfg, p, dry_run)
     # the launches first, in the order they were chosen, then the notes on why nothing else was (#3)
