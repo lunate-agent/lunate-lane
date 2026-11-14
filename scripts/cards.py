@@ -6,7 +6,8 @@ be tested without a network.
     order:  pins first, then `kind/bug`, then cards other open issues wait on, then oldest first
     room:   total WIP (cards with an open worker PR or a running worker, less parked cards with no worker
             running) below the limit, and no other card of the same area in flight — a parked card still holds
-            its area
+            its area. A `kind/bug` card skips the area rule (it still counts toward WIP, still waits on its
+            blocked-by, and still holds its area for the cards after it)
     skip:   an issue labelled `kind/decision` is a question for a maintainer, not work: never started. Blocking is
             GitHub's native blocked-by and nothing else
     rework: a worker PR whose reviewer requested changes on its current head goes back to a worker on its own
@@ -154,7 +155,7 @@ def plan(*, cards: list[Card], open_pulls: list[Pull], worker_pulls: list[Pull],
         if card.blocked_by:
             notes.append(f"#{card.number} waits on " + ", ".join(f"#{n}" for n in card.blocked_by))
             continue
-        if areas & occupied:
+        if areas & occupied and rules.bug_label not in card.labels:  # a bug is not held back by its area
             notes.append(f"#{card.number} skipped — {', '.join(sorted(areas & occupied))} already in flight")
             continue
         launches.append(Launch(card.number, None, areas))
