@@ -165,7 +165,9 @@ LOG_TAIL_CHARS = 6000
 MAX_FAILING_LOGS = 5
 
 
-LOG_ERROR = re.compile(r"##\[error\]|\berror [A-Z]{2,}\d{3,}:|\[FAIL\]|^\s*Failed [A-Za-z]|\berror:", re.IGNORECASE)
+LOG_ERROR = re.compile(r"##\[error\]|\berror [A-Z]{2,}\d{3,}:|\[FAIL\]|^\s*failed [A-Za-z]|\berror:|Exception\s?:"
+                       r"|Test run summary: Failed", re.IGNORECASE)
+ANSI = re.compile(r"\x1b\[[0-9;]*m|\[(?:\d{1,2}(?:;\d{1,2})*)?m(?=\S|\s|$)")
 RUNNER_ROOT = re.compile(r"/home/runner/work/[^/\s]+/[^/\s]+/|[A-Z]:\\a\\[^\\\s]+\\[^\\\s]+\\|/Users/runner/work/[^/\s]+/[^/\s]+/")
 
 
@@ -180,7 +182,8 @@ def log_tail(cfg: common.Config, job_id: int) -> str:
         raw = common.gh("api", f"repos/{cfg.slug}/actions/jobs/{int(job_id)}/logs", timeout=120)
     except LaneError as exc:
         return f"(the log could not be read: {exc})"
-    lines = [RUNNER_ROOT.sub("", re.sub(r"^\d{4}-\d\d-\d\dT[\d:.]+Z ", "", line)) for line in raw.splitlines()]
+    lines = [ANSI.sub("", RUNNER_ROOT.sub("", re.sub(r"^\d{4}-\d\d-\d\dT[\d:.]+Z ", "", line)))
+             for line in raw.splitlines()]
     cut = next((i for i, line in enumerate(lines) if line.startswith("Post job cleanup")), len(lines))
     body = lines[:cut]
     hits = [i for i, line in enumerate(body) if LOG_ERROR.search(line)]
@@ -241,7 +244,10 @@ def rework_brief(cfg: common.Config, pr: int, worktree: pathlib.Path | None = No
                  + ", ".join(sorted(n for n in required if github.check_state(
                      dataclasses.replace(p, checks=tuple(c for c in p.checks if c[0] == n)), frozenset({n})) == "failing"))
                  + ". Failing check runs: " + ", ".join(f"`{r[0]}` ({r[1].lower()})" for r in failing) + "."]
-        for name, conclusion, job, url, *_ in failing[:MAX_FAILING_LOGS]:
+        # the jobs a roll-up like ci-ok depends on, never the roll-up itself: its log only says which job failed
+        # (#856: "ci-ok: a required job did not succeed (verify=failure)"); the roll-up only when nothing else failed
+        quoted = [r for r in failing if r[0] not in required] or failing
+        for name, conclusion, job, url, *_ in quoted[:MAX_FAILING_LOGS]:
             parts.append(f"#### `{name}` — {conclusion.lower()}\n{url}\n\n```\n{log_tail(cfg, job)}\n```")
         if stuck and stuck != "required checks failing":
             parts.insert(0, "They were cancelled or timed out, were rerun once on this head, and failed the same "
@@ -377,6 +383,8 @@ def build_errors(cfg: common.Config, worktree: pathlib.Path, scratch: pathlib.Pa
     relative to the worktree), or [] when everything builds. Only compile errors block a push. A build that fails
     with no error line — it could not run: a timeout, a restore that never finished — is logged under `job` and
     does not block: CI still builds it, and a lane that cannot build must not stop pushing altogether."""
+    if not cfg.harness.get("build_gate", False):  # off until the sandboxed build stops hanging (lane.json)
+        return []
     errors: list = []
     for project in touched_projects(cfg, worktree):
         rc, output = _run_build(cfg, worktree, scratch, project)
