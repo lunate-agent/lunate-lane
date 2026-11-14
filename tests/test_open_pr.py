@@ -440,8 +440,36 @@ class FailurePathTests(OpenPrCase):
         with self.assertRaises(open_pr.SecretFound) as caught:
             open_pr.open_pr(self.repo, "lane/x", "t", "b")
         self.assertEqual((caught.exception.kind, caught.exception.where), ("GitHub token", "diff's added lines"))
+        self.assertEqual((caught.exception.path, caught.exception.line), ("Config.cs", 1))
         self.assertNotIn(token, str(caught.exception))
         self.assertIn("nothing was pushed", str(caught.exception))
+
+    def test_the_match_is_located_by_file_and_new_line_never_by_value(self) -> None:
+        """#798 (2026-11-14 04:12): "the diff's added lines" alone, and the worktree gone — nobody could judge it."""
+        key = "sk-" + "Vb7" * 8
+        self.commit_on("lane/x", "README.md", "# Title\n\nplain\n")
+        subprocess.run(["git", "switch", "-q", "lane/x"], cwd=self._tmp, check=True)
+        (self.repo / "README.md").write_text("# Title\n\nplain\nmore\n")
+        (self.repo / "docs").mkdir()
+        (self.repo / "docs" / "setup.md").write_text("one\ntwo\n" + f"export OPENAI_API_KEY={key}\n")
+        subprocess.run(["git", "add", "-A"], cwd=self._tmp, check=True)
+        subprocess.run(["git", "commit", "-q", "-m", "docs"], cwd=self._tmp, check=True)
+        subprocess.run(["git", "switch", "-q", "main"], cwd=self._tmp, check=True)
+        with self.assertRaises(open_pr.SecretFound) as caught:
+            open_pr.scan(self.repo, "lane/x", "main", "t", "b")
+        e = caught.exception
+        self.assertEqual((e.kind, e.path, e.line), ("API key", "docs/setup.md", 3))
+        self.assertEqual(str(e), "the diff's added lines at `docs/setup.md:3` holds something shaped like a API key "
+                                 "— nothing was pushed")
+        self.assertNotIn(key, str(e))
+        self.assertNotIn(key[3:12], str(e))
+
+    def test_added_lines_carry_their_file_and_new_line_number(self) -> None:
+        diff = ("diff --git a/a.txt b/a.txt\n--- a/a.txt\n+++ b/a.txt\n@@ -2,0 +3,2 @@\n+x\n+y\n"
+                "@@ -9 +11 @@\n-old\n+new\ndiff --git a/n.md b/n.md\nnew file mode 100644\n--- /dev/null\n"
+                "+++ b/n.md\n@@ -0,0 +1 @@\n+first\n")
+        self.assertEqual(list(open_pr.added_lines(diff)),
+                         [("a.txt", 3, "x"), ("a.txt", 4, "y"), ("a.txt", 11, "new"), ("n.md", 1, "first")])
 
     def test_the_title_and_body_are_scanned_and_a_known_value_is_caught_without_a_shape(self) -> None:
         jwt = "eyJhbGciOiJIUzI1.eyJzdWIiOiIxMjM0.SflKxwRJSMeKKF2Q"

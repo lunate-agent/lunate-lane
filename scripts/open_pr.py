@@ -53,23 +53,53 @@ class ReadyRunError(OpenPrError):
 
 
 class SecretFound(OpenPrError):
-    """What would be pushed or posted holds something secret-shaped. Names the kind and where — never the value."""
+    """What would be pushed or posted holds something secret-shaped. Names the kind and where — the file and the
+    line in the branch for the diff (`path`, `line`) — never the value."""
 
-    def __init__(self, kind: str, where: str) -> None:
-        super().__init__(f"the {where} holds something shaped like a {kind} — nothing was pushed")
-        self.kind, self.where = kind, where
+    def __init__(self, kind: str, where: str, path: str = "", line: int = 0) -> None:
+        self.kind, self.where, self.path, self.line = kind, where, path, line
+        super().__init__(f"the {self.location} holds something shaped like a {kind} — nothing was pushed")
+
+    @property
+    def location(self) -> str:
+        return f"{self.where} at `{self.path}:{self.line}`" if self.path else self.where
+
+
+HUNK = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@")
+
+
+def added_lines(diff: str):
+    """(path, line in the new file, text) for each added line of a `--unified=0` diff."""
+    path, number = "", 0
+    for raw in diff.splitlines():
+        if raw.startswith("+++ "):
+            target = raw[4:]
+            path = target[2:] if target.startswith("b/") else ("" if target == "/dev/null" else target)
+        elif raw.startswith("@@"):
+            match = HUNK.match(raw)
+            number = int(match.group(1)) if match else 0
+        elif raw.startswith("+"):
+            yield path, number, raw[1:]
+            number += 1
 
 
 def scan(repo: pathlib.Path, branch: str, base: str, title: str, body: str, known: tuple = ()) -> None:
     """Before every push (#12): the diff's added lines against the base, the title and the body. A match raises
-    SecretFound; an unreadable diff is a failure, never a clean scan."""
+    SecretFound naming the kind and, for the diff, the first matching file and line; an unreadable diff is a
+    failure, never a clean scan."""
     try:
         diff = common.git(repo, "diff", "--no-color", "--no-textconv", "--no-ext-diff", "--unified=0",
                           f"origin/{base}...refs/heads/{branch}")
     except common.GitError as exc:
         raise OpenPrError(f"the diff of {branch} could not be read for the secret scan: {exc}") from exc
-    added = "\n".join(line[1:] for line in diff.splitlines() if line.startswith("+") and not line.startswith("+++"))
-    for where, text in (("diff's added lines", added), ("title", title), ("body", body)):
+    lines = list(added_lines(diff))
+    added = "\n".join(text for _, _, text in lines)
+    kind = secret_scan.secret_kind(added, known, strict=True)
+    if kind:  # the whole first (a shape could span lines), then the first line that holds it, for where
+        at = next(((path, n) for path, n, text in lines if secret_scan.secret_kind(text, known, strict=True)),
+                  ("", 0))
+        raise SecretFound(kind, "diff's added lines", *at)
+    for where, text in (("title", title), ("body", body)):
         kind = secret_scan.secret_kind(text, known, strict=True)
         if kind:
             raise SecretFound(kind, where)

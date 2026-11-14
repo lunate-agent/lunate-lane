@@ -77,6 +77,24 @@ class FinishedCardTests(unittest.TestCase):
         self.assertIn(why, cleanup.read_held()[card])
         self.assertIn(f"card #{card} is done", (self.cfg.state / "logs" / "feed.log").read_text())
 
+    def test_798s_shape_a_card_parked_for_a_secret_keeps_its_worktree_until_unparked(self) -> None:
+        """#798, 2026-11-14: parked for a secret at 04:12, its worktree removed at 04:20 because #799 (the maintainer's
+        stacked pull request on wt/issue-798) had merged two days before. Kept now, until it is unparked."""
+        path = self.card(798)
+        self.states = {798: [(799, "MERGED")]}
+        harness.park(798, "secret")
+        cleanup.tidy(self.cfg, "feed", [], {})
+        self.assertTrue((path / ".git").exists())
+        self.assertIn("wt/issue-798", git(self.clone, "branch", "--list", "wt/issue-798"))
+        self.assertTrue((self.cfg.state / "scratch" / "issue-798").exists())
+        self.assertEqual(cleanup.read_held(), {798: cleanup.SECRET_KEPT})
+        self.landed.assert_not_called()
+        harness.park(799, "idle")  # any other park is not a reason to keep it
+        harness.unpark(798)
+        cleanup.tidy(self.cfg, "feed", [], {})
+        self.assertFalse(path.exists())
+        self.assertEqual(cleanup.read_held(), {})
+
     def test_a_dirty_or_untracked_worktree_is_kept_and_flagged(self) -> None:
         """Review of #17, item 4."""
         dirty, untracked = self.card(1), self.card(2)
