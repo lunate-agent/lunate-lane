@@ -373,3 +373,44 @@ class SweepClosedTests(Case):
             with mock.patch.object(sys, "argv", ["feed.py"]):
                 self.assertEqual(feed.main(), 0)
         self.assertEqual(self.has(780), (False, False))
+
+
+class ParkDisarmsTests(Case):
+    """#856 (card #850), 2026-11-14: parked at 15:20 after 3 rework rounds, its auto-merge armed since 15:05 —
+    green and approved, it would have merged with its card parked. Every park now turns auto-merge off."""
+
+    def test_856s_park_turns_auto_merge_off_and_reads_it_back(self) -> None:
+        self.gh.pulls_of[850] = {856}
+        self.gh.pulls[856] = {"state": "open", "auto_merge": {"enabled_by": {"login": "lunate-worker"}}}
+        self.assertEqual(parked.flag(self.cfg, 850, 856, job="feed"), [])
+        self.assertEqual(self.gh.disarmed, [(856, "PR_856")])
+        self.assertIsNone(self.gh.pulls[856]["auto_merge"])
+        self.assertIn("auto-merge turned off on #856 (read back)", self.log("feed"))
+
+    def test_a_pull_request_not_armed_is_left_alone_and_unpark_never_arms(self) -> None:
+        self.gh.pulls_of[850] = {856}
+        parked.flag(self.cfg, 850, 856)
+        self.assertEqual(self.gh.disarmed, [])
+        parked.unflag(self.cfg, 850)
+        self.assertIsNone(self.gh.pulls[856]["auto_merge"], "unparking does not re-arm: the normal path does")
+
+    def test_a_disarm_that_does_not_read_back_is_a_failure_for_the_digest_and_is_retried(self) -> None:
+        self.gh.pulls_of[850] = {856}
+        self.gh.pulls[856] = {"state": "open", "auto_merge": {"enabled_by": {"login": "lunate-worker"}}}
+        self.gh.fail.add("/pulls/856/auto-merge")
+        failed = parked.flag(self.cfg, 850, 856)
+        self.assertEqual(failed, ["#856: #856's auto-merge still reads as on after turning it off"])
+        self.assertIn(850, parked.errors())
+        self.gh.fail.clear()
+        parked.reconcile(self.cfg, {850}, "feed")  # the next tick tries again
+        self.assertEqual(parked.errors(), {})
+        self.assertIsNone(self.gh.pulls[856]["auto_merge"])
+
+    def test_every_park_path_disarms(self) -> None:
+        """The feeder's rework-cap park goes through worker.park, which flags; so do idle, person, ready, secret
+        and lane.py park."""
+        self.gh.pulls_of[850] = {856}
+        self.gh.pulls[856] = {"state": "open", "auto_merge": {"enabled_by": {"login": "lunate-worker"}}}
+        harness.park(850, "reworks")
+        worker.park(self.cfg, 850, 856, "reworks", 3)
+        self.assertEqual(self.gh.disarmed, [(856, "PR_856")])

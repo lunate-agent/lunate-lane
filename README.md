@@ -130,7 +130,9 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      next tick. A card parked by hand shows in the digest as "parked by hand" with
      its reason. **Every park is visible on GitHub** (`scripts/parked.py`): the card and its open pull request get
      the label `parked.label` (`lane/parked`) and are assigned to `parked.assignee` (lane.json), as the worker
-     identity, read back; an unpark takes the label off and the assignment where the lane added it. A failure is
+     identity, read back, and its auto-merge is turned off (read back): a parked card's pull request never merges
+     on its own (#856 stayed armed for 15 minutes after its park). An unpark takes the label off and the
+     assignment where the lane added it, and never re-arms: the normal path does, once ready, approved and green. A failure is
      logged and listed under "Waiting on you", and the feeder retries it each tick (it also flags a park and
      unflags an unpark made any other way). A parked card that is closed is unparked by the feeder, logged. Each
      tick also takes the label off any closed issue or pull request still carrying it (`parked.sweep_closed`),
