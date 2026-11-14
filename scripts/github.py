@@ -79,6 +79,8 @@ class Pull:
     runs: tuple = ()  # Run, for every check run on the head
     review_decision: str = ""  # GitHub's: APPROVED, CHANGES_REQUESTED, REVIEW_REQUIRED, or '' when none is required
     waits_on: tuple = ()  # open issues its card is blocked by: not reviewed, not armed, not enqueued until they close
+    committed: str = ""  # the head commit's committedDate (ISO)
+    decided_after: str = ""  # the card's newest Decision entry, when it appeared after `committed` (feed sets it)
 
     @property
     def capabilities(self) -> frozenset:
@@ -348,6 +350,7 @@ def pull(cfg: common.Config, number: int) -> Pull:
         (c["context"], "COMPLETED" if c["state"] not in ("PENDING", "EXPECTED") else c["state"], c["state"])
         for c in contexts if c["__typename"] != "CheckRun")
     return Pull(
+        committed=str((commits[0]["commit"] if commits else {}).get("committedDate") or ""),
         number=int(node["number"]), title=str(node.get("title") or ""), state=str(node["state"]),
         draft=bool(node["isDraft"]), created=str(node["createdAt"]), author=login(node.get("author")),
         branch=str(node["headRefName"]), head=str(node["headRefOid"]), mergeable=mergeable,
@@ -507,17 +510,68 @@ def person_approved(p: Pull, reviewer: str) -> str:
     return people[-1] if people else ""
 
 
+DECISION_ENTRY = re.compile(r"^\s*[-*]\s*\**(\d{4}-\d{2}-\d{2})\b")
+CARD_EDITS = """query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){
+createdAt body userContentEdits(first:100){pageInfo{hasNextPage} nodes{editedAt diff}}}}}"""
+
+
+def decision_entries(body: str) -> list[str]:
+    """The dated list items under the card's `## Decisions`, each as its first line."""
+    entries, inside = [], False
+    for line in (body or "").splitlines():
+        if line.startswith("## "):
+            inside = line.strip().lower() == "## decisions"
+        elif inside and DECISION_ENTRY.match(line):
+            entries.append(line.strip())
+    return entries
+
+
+def decision_times(cfg: common.Config, card: int) -> list[tuple[str, str]]:
+    """(entry, when it first appeared on the card) for each dated `## Decisions` entry in the card's body now. An
+    entry's own date has no time of day, so the time comes from the card's edit history: the first edit whose text
+    holds the entry. One that is in no recorded edit dates from the card's creation."""
+    data = common.graphql(CARD_EDITS, owner=cfg.owner, name=cfg.name, n=int(card))
+    issue = (data.get("repository") or {}).get("issue")
+    if not issue:
+        raise GhError(f"card #{card} was not found in {cfg.slug}")
+    edits = issue["userContentEdits"]
+    if (edits.get("pageInfo") or {}).get("hasNextPage"):
+        raise GhError(f"card #{card} has more than 100 edits — cannot tell when its Decisions appeared")
+    history = sorted(((str(e["editedAt"]), str(e.get("diff") or "")) for e in edits["nodes"]), key=lambda e: e[0])
+    out = []
+    for entry in decision_entries(issue.get("body") or ""):
+        key = " ".join(entry.split())[:120]
+        when = next((at for at, text in history if key in " ".join(text.split())), str(issue["createdAt"]))
+        out.append((entry, when))
+    return out
+
+
+def newer_decision(cfg: common.Config, p: Pull) -> str:
+    """The card's newest Decision entry that appeared after the pull request's head commit, or ''. Such a pull
+    request is due for a rework that carries it out, approved and green or not, and is not enqueued first (#839,
+    2026-11-14: approved and clean, it would have merged without #624's newest decision)."""
+    if p.card is None or not p.committed:
+        return ""
+    committed = _when(p.committed)
+    later = [(when, entry) for entry, when in decision_times(cfg, p.card)
+             if committed is not None and (_when(when) or committed) > committed]
+    return max(later)[1] if later else ""
+
+
 def superseded_by_person(p: Pull, reviewer: str) -> tuple[str, tuple[int, ...]]:
-    """(person, bot review ids): the reviewer bot's requests for changes on the current head that a person's later
-    approval on that head supersedes, still standing (not dismissed), with that person's login; ('', ()) when there
-    are none. Only ever the bot's reviews: a person's review is never superseded by the bot's."""
-    on_head = [r for r in p.reviews if r.commit == p.head]
-    approvals = [i for i, r in enumerate(on_head) if r.author != reviewer and r.state == "APPROVED"]
+    """(person, bot review ids): the reviewer bot's standing (not dismissed) requests for changes that a person's
+    approval of the current head supersedes, with that person's login; ('', ()) when there are none. Every one on
+    an older head (#839, 2026-11-14: two left at 9817096fa and 64a8aec75 kept GitHub's reviewDecision from
+    approving), and on the current head those before the approval — a bot review after it still stands. Only ever
+    the bot's reviews: a person's review is never superseded by the bot's."""
+    order = list(p.reviews)
+    approvals = [i for i, r in enumerate(order) if r.commit == p.head and r.author != reviewer and r.state == "APPROVED"]
     if not approvals:
         return "", ()
     last = approvals[-1]
-    ids = tuple(r.id for r in on_head[:last] if r.author == reviewer and r.state == "CHANGES_REQUESTED" and r.id)
-    return (on_head[last].author, ids) if ids else ("", ())
+    ids = tuple(r.id for i, r in enumerate(order) if r.author == reviewer and r.state == "CHANGES_REQUESTED" and r.id
+                and (r.commit != p.head or i < last))
+    return (order[last].author, ids) if ids else ("", ())
 
 
 WRITE_ACCESS = ("admin", "maintain", "write")
@@ -836,7 +890,7 @@ def needs_enqueue(p: Pull, required: frozenset, reviewer: str) -> bool:
     (GitHub refuses the enqueue with "Waiting on code owner review"), so such a pull request waits for the
     maintainer's approval — the digest lists it — and the next tick after it enqueues it."""
     return (p.state == "OPEN" and not p.draft and not p.in_queue and not p.disarmed_by and not p.dequeued_by
-            and not p.waits_on and p.mergeable == "MERGEABLE" and not p.queue_removal and p.ejection is None
+            and not p.waits_on and not p.decided_after and p.mergeable == "MERGEABLE" and not p.queue_removal and p.ejection is None
             and p.review_decision == "APPROVED" and check_state(p, required) == "green"
             and verdict(p, reviewer) == "APPROVED")
 

@@ -867,3 +867,42 @@ class QueueEjectionTests(unittest.TestCase):
         jobs["total_count"] += 1
         with self.gh(jobs=jobs), self.assertRaises(GhError):
             github.queue_ejection(CFG, 824, "failed_checks", "2026-11-13T18:11:07Z", "MERGEABLE")
+
+
+class NewerDecisionTests(unittest.TestCase):
+    """Card #624's `## Decisions` and its edit history (2026-11-14), against #839's head commit (07:06:48Z)."""
+
+    D1 = "- 2026-11-14: Commit the run's evidence into the repository under eval/swebench/runs/<run-id>/: predictions."
+    D2 = "- 2026-11-14: Rerun the benchmark as a maintainer step outside the lane (same harness, budget cap $5)."
+    D3 = "- 2026-11-14 (afternoon): The rerun is done and verified: rerun-624-bosgame-2 on Bosgame, 20/20 resolved."
+
+    def answer(self, body, edits, more=False):
+        return {"repository": {"issue": {"createdAt": "2026-11-07T08:02:05Z", "body": body, "userContentEdits": {
+            "pageInfo": {"hasNextPage": more}, "nodes": [{"editedAt": at, "diff": text} for at, text in edits]}}}}
+
+    def card_624(self):
+        head = "Card text.\n\n## Decisions\n\n"
+        return self.answer(head + "\n\n".join((self.D1, self.D2, self.D3)) + "\n", [
+            ("2026-11-14T12:22:33Z", head + "\n\n".join((self.D1, self.D2, self.D3))),
+            ("2026-11-14T08:14:53Z", head + "\n\n".join((self.D1, self.D2))),
+            ("2026-11-14T06:40:01Z", head + self.D1),
+            ("2026-11-07T08:02:05Z", "Card text.")])
+
+    def test_839s_head_is_older_than_624s_newest_decision(self) -> None:
+        with mock.patch.object(common, "graphql", return_value=self.card_624()):
+            times = github.decision_times(CFG, 624)
+            self.assertEqual([when for _, when in times],
+                             ["2026-11-14T06:40:01Z", "2026-11-14T08:14:53Z", "2026-11-14T12:22:33Z"])
+            p = pull(839, 624, committed="2026-11-14T07:06:48Z")
+            self.assertEqual(github.newer_decision(CFG, p), self.D3)
+            self.assertEqual(github.newer_decision(CFG, pull(839, 624, committed="2026-11-14T13:00:00Z")), "",
+                             "a rework committed after it carries it")
+            self.assertEqual(github.newer_decision(CFG, pull(839, None, committed="2026-11-14T07:06:48Z")), "")
+
+    def test_an_entry_in_no_recorded_edit_dates_from_the_cards_creation_and_too_many_edits_is_a_refusal(self) -> None:
+        body = "## Decisions\n\n- 2026-11-01: from the start\n\n## Next\n\n- 2026-11-02: not a decision\n"
+        with mock.patch.object(common, "graphql", return_value=self.answer(body, [])):
+            self.assertEqual(github.decision_times(CFG, 9), [("- 2026-11-01: from the start", "2026-11-07T08:02:05Z")])
+        with mock.patch.object(common, "graphql", return_value=self.answer(body, [], more=True)):
+            with self.assertRaises(GhError):
+                github.decision_times(CFG, 9)

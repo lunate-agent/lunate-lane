@@ -10,6 +10,7 @@ read that fails stops the tick with a named error: an unreadable count is never 
 
 from __future__ import annotations
 
+import dataclasses
 import pathlib
 import subprocess
 import sys
@@ -47,6 +48,9 @@ def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[
     milestone = github.milestone_cards(cfg)
     pulls = github.open_pulls(cfg)
     worker_pulls = [github.pull(cfg, p.number) for p in pulls if p.author == cfg.worker_app]
+    # the card's newest Decision, when it came after the head commit: a rework, never an enqueue first (#839)
+    worker_pulls = [dataclasses.replace(p, decided_after=github.newer_decision(cfg, p))
+                    if p.state == "OPEN" and p.card is not None and p.card not in running else p for p in worker_pulls]
     pins = cards.load_pins(cfg.pins)
     required = github.required_checks(cfg)
     reran, parked = harness.reran(), harness.parked_cards()
@@ -57,7 +61,7 @@ def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[
              and github.failure_kind(p, required) == "infra"]
     enqueue = [p for p in worker_pulls if p.card not in running and p.card not in parked
                and github.needs_enqueue(p, required, cfg.reviewer_app)]
-    disarm = [p for p in worker_pulls if p.state == "OPEN" and p.auto_merge and p.waits_on]
+    disarm = [p for p in worker_pulls if p.state == "OPEN" and p.auto_merge and (p.waits_on or p.decided_after)]
     ejected = [p for p in worker_pulls if p.card not in running and p.card not in parked and p.state == "OPEN"
                and not p.draft and not p.in_queue and not p.waits_on and not p.disarmed_by and not p.dequeued_by
                and p.ejection is not None and p.ejection.kind == "infra" and p.review_decision == "APPROVED"
@@ -67,11 +71,12 @@ def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[
 
 
 SUPERSEDED = "Superseded by the maintainer's approval at the current head"
+ALREADY_DISMISSED = "Can not dismiss a dismissed pull request review"  # GitHub's 422 when it is dismissed already
 
 
 def dismiss_superseded(cfg: common.Config, p: github.Pull, dry_run: bool) -> list[int]:
-    """A person with write access approved the worker pull request at its head after the reviewer bot asked for
-    changes there: dismiss those bot reviews, as the reviewer identity, with `SUPERSEDED`, and read each back. The
+    """A person with write access approved the worker pull request at its head: dismiss every standing request for
+    changes the reviewer bot left on it, at any head (`github.superseded_by_person`): dismiss those bot reviews, as the reviewer identity, with `SUPERSEDED`, and read each back. The
     lane already acts on the person's approval (`github.verdict`); this makes GitHub's reviewDecision agree, so
     the next tick enqueues it. Only the bot's own requests for changes on this head are touched — each is read
     first and left alone unless it is exactly that — never a person's review. A failure is logged, not fatal.
@@ -91,12 +96,23 @@ def dismiss_superseded(cfg: common.Config, p: github.Pull, dry_run: bool) -> lis
         for review_id in ids:
             path = f"/repos/{cfg.slug}/pulls/{int(p.number)}/reviews/{int(review_id)}"
             before = common.rest(token, "GET", path)
-            if (github.login(before.get("user")) != cfg.reviewer_app or before.get("state") != "CHANGES_REQUESTED"
-                    or before.get("commit_id") != p.head):
-                common.log(JOB, f"left review {review_id} on #{p.number}: it is not {cfg.reviewer_app}'s standing "
-                                f"request for changes at {p.head[:8]}")
+            if github.login(before.get("user")) != cfg.reviewer_app:
+                common.log(JOB, f"left review {review_id} on #{p.number}: it is not {cfg.reviewer_app}'s")
                 continue
-            common.rest(token, "PUT", path + "/dismissals", {"message": SUPERSEDED, "event": "DISMISS"})
+            if before.get("state") == "DISMISSED":
+                common.log(JOB, f"review {review_id} on #{p.number} is dismissed already — nothing to do")
+                continue
+            if before.get("state") != "CHANGES_REQUESTED":
+                common.log(JOB, f"left review {review_id} on #{p.number}: it is not a standing request for changes")
+                continue
+            try:
+                common.rest(token, "PUT", path + "/dismissals", {"message": SUPERSEDED, "event": "DISMISS"})
+            except LaneError as exc:
+                if ALREADY_DISMISSED not in str(exc):
+                    raise
+                # someone dismissed it between the read and the call (#839, 13:40:13): the goal state holds
+                common.log(JOB, f"review {review_id} on #{p.number} was dismissed by someone else meanwhile — done")
+                continue
             if common.rest(token, "GET", path).get("state") != "DISMISSED":
                 raise LaneError(f"review {review_id} on #{p.number} does not read back as dismissed")
             done.append(review_id)
@@ -276,12 +292,16 @@ def tick(dry_run: bool = False) -> None:
     for p in ejected:
         requeue(cfg, p, dry_run)
     for p in disarms:
-        what = f"#{p.number}: card #{p.card} {github.waits_line(p.waits_on)}"
+        why = (github.waits_line(p.waits_on) if p.waits_on else
+               f"has a Decision newer than {p.head[:8]}: {p.decided_after[:120]}")
+        what = f"#{p.number}: card #{p.card} {why}"
         if dry_run:
             common.log(JOB, f"would turn auto-merge off on {what}")
             continue
         open_pr.disarm(p.number, p.node_id)
-        common.log(JOB, f"turned auto-merge off on {what} — it is enqueued once approved after they close")
+        common.log(JOB, f"turned auto-merge off on {what} — "
+                        + ("it is enqueued once approved after they close" if p.waits_on else
+                           "it is reworked first, then reviewed and enqueued again"))
     # after the launches, so a cleanup that fails never holds work back — it still fails the tick, by name
     cleanup.tidy(cfg, JOB, github.open_pulls(cfg), harness.running_workers(), dry_run)
 
