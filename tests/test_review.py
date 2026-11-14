@@ -76,7 +76,7 @@ class VerdictTests(unittest.TestCase):
                     review.read_verdict(self.path)
 
     def test_a_well_formed_verdict_is_read(self) -> None:
-        self.path.write_text(json.dumps({"event": "REQUEST_CHANGES", "body": "1. not met — x.cs:3"}))
+        self.path.write_text(json.dumps({"event": "REQUEST_CHANGES", "body": "1. not met — x.cs:3", "written_by": "scripts/verdict.py"}))
         self.assertEqual(review.read_verdict(self.path), ("REQUEST_CHANGES", "1. not met — x.cs:3"))
 
 
@@ -260,7 +260,7 @@ class BriefTests(unittest.TestCase):
 
     def test_the_review_brief_carries_the_spec_comparison_the_neighbours_and_the_intent_decisions(self) -> None:
         text = common.render("review-brief.md", PR="6", REPO="o/r", TITLE="t", HEAD="abc", WORKTREE="/w",
-                             BASE="main", DIFF_FILE="/d", FRAGMENT_CHECK="f", VERDICT_FILE="/v", CARD="9",
+                             BASE="main", DIFF_FILE="/d", FRAGMENT_CHECK="f", BODY_FILE="/b", VERDICT_CMD="/c", CARD="9",
                              SPEC_NEIGHBOURS="NEIGHBOURS-HERE", WORKER_REPORT="REPORT-HERE", BODY="b", SCOPE="SCOPE-HERE",
                              DECISIONS="## Decisions this card waited on (verbatim)\n\nDecision: DECIDED-HERE\n")
         self.assertIn("git show origin/main:openspec/specs/<capability>/spec.md", text)
@@ -292,7 +292,7 @@ class NeedsPersonVerdictTests(unittest.TestCase):
 
     def test_an_approval_with_needs_person_is_posted_as_a_request_for_changes(self) -> None:
         body = "1. met.\n4. cannot tell.\nNEEDS-PERSON: check 4 needs a real release"
-        self.path.write_text(json.dumps({"event": "APPROVE", "body": body}))
+        self.path.write_text(json.dumps({"event": "APPROVE", "body": body, "written_by": "scripts/verdict.py"}))
         self.assertEqual(review.read_verdict(self.path), ("REQUEST_CHANGES", body))
 
     def test_the_review_brief_blocks_only_on_the_five_kinds_and_leaves_test_evidence_to_ci(self) -> None:

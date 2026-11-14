@@ -369,8 +369,8 @@ def person_reason(cfg: common.Config, report: str) -> str | None:
     reason = github.needs_person(report)
     if reason is None:
         raw = github.raw_needs_person(report)
-        if raw is not None:  # about the card's Maintainer steps: the maintainer's after the merge, not a park
-            common.log("worker", "NEEDS-PERSON about the card's Maintainer steps is not a park — they are for the "
+        if raw is not None:  # Maintainer steps, or evidence only after the merge: the maintainer's, not a park
+            common.log("worker", "NEEDS-PERSON about a maintainer step after merge is not a park — it is for the "
                                  "maintainer after the merge: " + secret_scan.redact(
                                      raw, (harness.read_credential(cfg),))[0][:200])
         return None

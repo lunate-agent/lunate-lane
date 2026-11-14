@@ -133,7 +133,7 @@ class MaintainerStepsTests(unittest.TestCase):
 
     def test_817s_reason_is_not_a_needs_person(self) -> None:
         report = "Cause named, fix applied.\n\nNEEDS-PERSON: " + REASON_817 + "\n"
-        self.assertTrue(github.about_maintainer_steps(REASON_817))
+        self.assertTrue(github.after_merge_only(REASON_817))
         self.assertIsNone(github.needs_person(report))
         self.assertEqual(github.raw_needs_person(report), REASON_817)
         other = "NEEDS-PERSON: whether `cache prune` may delete pinned entries; the Maintainer steps say nothing"
@@ -146,7 +146,7 @@ class MaintainerStepsTests(unittest.TestCase):
         with mock.patch.object(harness, "read_credential", return_value=None):
             self.assertIsNone(worker.person_reason(state.cfg, "Done.\nNEEDS-PERSON: " + REASON_817))
         log = (state.cfg.state / "logs" / "worker.log").read_text()
-        self.assertIn("NEEDS-PERSON about the card's Maintainer steps is not a park", log)
+        self.assertIn("NEEDS-PERSON about a maintainer step after merge is not a park", log)
 
     def test_a_review_that_asks_a_person_for_them_is_an_ordinary_rework_not_a_park(self) -> None:
         body = "1. met\n\nNEEDS-PERSON: " + REASON_817
@@ -156,9 +156,9 @@ class MaintainerStepsTests(unittest.TestCase):
     def test_an_approval_mentioning_them_stays_an_approval(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = pathlib.Path(tmp) / "verdict.json"
-            path.write_text(json.dumps({"event": "APPROVE", "body": "1. met\n\nNEEDS-PERSON: " + REASON_817}))
+            path.write_text(json.dumps({"event": "APPROVE", "body": "1. met\n\nNEEDS-PERSON: " + REASON_817, "written_by": "scripts/verdict.py"}))
             self.assertEqual(review_job.read_verdict(path)[0], "APPROVE")
-            path.write_text(json.dumps({"event": "APPROVE", "body": "NEEDS-PERSON: check 3 needs a release"}))
+            path.write_text(json.dumps({"event": "APPROVE", "body": "NEEDS-PERSON: check 3 needs a decision", "written_by": "scripts/verdict.py"}))
             self.assertEqual(review_job.read_verdict(path)[0], "REQUEST_CHANGES")
 
     def test_both_briefs_say_maintainer_steps_are_never_a_reason(self) -> None:

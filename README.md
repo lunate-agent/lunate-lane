@@ -206,11 +206,17 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    description, suggestions — goes under **Non-blocking** in an approval. Test evidence is CI's: the reviewer
    never asks the worker which tests it ran. A **`NEEDS-PERSON:`** line counts only at the start of a line, in a
    review or a worker's report; a mention inside a sentence is not one. One whose first sentence is about the
-   card's **Maintainer steps** is not one either: those are the maintainer's after the merge (both briefs say so;
-   the worker logs and ignores it, a review with it is an ordinary approval or rework, never a park). The worker's brief says a conflict in
+   card's **Maintainer steps**, or a check only evidence after the merge or outside this repository can satisfy
+   (a `merge_group` wall time "before and after", a nightly, the lane's own briefs), is not one either: those are
+   the maintainer's after the merge. Both briefs say so, and the reviewer lists such a check under
+   **Non-blocking** as "maintainer step after merge" and judges the rest; the worker logs and ignores such a
+   line, a review with it is an ordinary approval or rework, never a park (a merge-first reason still waits). The worker's brief says a conflict in
    `openspec/specs/**` is resolved by reverting the archive commit, merging `origin/main` and re-archiving, never
    by hand. The
-   session writes a JSON verdict; the lane re-reads the pull request and, only if it is still open at the same
+   session writes its review as Markdown and hands it in with `scripts/verdict.py --event …` (run with the system
+   python: the lane's venv is outside the reviewer's sandbox), which writes `verdict.json` once and atomically —
+   a temporary file, then a no-clobber link — and refuses a second verdict, logged by the review job as an
+   ERROR; the first stands. A verdict the command did not write is not used. The lane re-reads the pull request and, only if it is still open at the same
    head, posts a real review — `APPROVE` or `REQUEST_CHANGES` with the findings — as `lunate-reviewer`. It then
    reads the review back, and if GitHub names any other author the run exits non-zero. A review run records
    itself in `<state>/reviewing/<pr>.json` with its session's group; if it is `kill -9`ed, the next review or

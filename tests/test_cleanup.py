@@ -303,7 +303,7 @@ class ReviewReapTests(unittest.TestCase):
             seen["model"] = model
             on_start(4242, "review-5-x")
             seen["record"] = json.loads((self.cfg.state / "reviewing" / "5.json").read_text())
-            (scratch / "verdict.json").write_text(json.dumps({"event": "APPROVE", "body": "ok"}))
+            (scratch / "verdict.json").write_text(json.dumps({"event": "APPROVE", "body": "ok", "written_by": "scripts/verdict.py"}))
             log_path.write_text("")
             return harness.Outcome(0, False, 1, False)
 
