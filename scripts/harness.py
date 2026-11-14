@@ -133,8 +133,9 @@ def session_home(cfg: common.Config, scratch: pathlib.Path, real_home: pathlib.P
 
 
 def session_env(cfg: common.Config, scratch: pathlib.Path, extra: dict | None = None,
-                real_home: pathlib.Path | None = None) -> dict:
-    """The whole environment a session gets — nothing inherited beyond PATH, and a HOME of its own."""
+                real_home: pathlib.Path | None = None, fresh_home: bool = True) -> dict:
+    """The whole environment a session gets — nothing inherited beyond PATH, and a HOME of its own. `fresh_home`
+    False keeps the session's HOME as it is (the build gate runs beside a session and must not wipe its home)."""
     real_home = real_home or pathlib.Path.home()
     nogh = scratch / "gh-config"
     try:
@@ -142,7 +143,12 @@ def session_env(cfg: common.Config, scratch: pathlib.Path, extra: dict | None = 
     except OSError as exc:
         raise HarnessError(f"the session's scratch {scratch} could not be prepared: {exc}") from exc
     path = os.environ.get("PATH") or DEFAULT_PATH
-    home = session_home(cfg, scratch, real_home)
+    home = session_home(cfg, scratch, real_home) if fresh_home else scratch / "home"
+    if not fresh_home:
+        try:
+            home.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise HarnessError(f"the session home {home} could not be prepared: {exc}") from exc
     # no git credential helper of any kind (review of #17): Homebrew's system config names osxkeychain and the
     # user's global config names `gh auth git-credential`; the session reads neither, only its own identity
     env = {"PATH": path, "HOME": str(home), "TMPDIR": str(scratch),

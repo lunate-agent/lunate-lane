@@ -19,6 +19,8 @@ import os
 import pathlib
 import re
 import subprocess
+import time
+import tarfile
 import sys
 
 if __package__ in (None, ""):
@@ -320,8 +322,9 @@ def brief(cfg: common.Config, issue: dict, worktree: pathlib.Path, pr: int | Non
 # --- the build before every push: a branch whose projects do not compile is never pushed (#856: CS0103 in a new
 # test file, pushed because the worker built only the project it changed, not the test project) ---
 
+NOT_COMPILE_ERRORS = frozenset({"NETSDK1004", "NETSDK1005", "NU1301"})  # no restore output, no feed: could not run
 BUILD_FIX_ROUNDS = 2  # how often the same session gets its compile errors back before the run ends unpushed
-BUILD_TIMEOUT = 600
+BUILD_TIMEOUT = 300
 BUILD_ERROR = re.compile(r"^\s*(?:/.*?/)?(?P<where>[^\s(:]+\.(?:cs|csproj|props|targets|fs|vb)(?:\([0-9,]+\))?)"
                          r"\s*:\s*error\s+(?P<code>[A-Z]+[0-9]+)\s*:\s*(?P<what>.*?)(?:\s+\[[^\]]*\])?\s*$")
 
@@ -349,12 +352,15 @@ def touched_projects(cfg: common.Config, worktree: pathlib.Path) -> list[str]:
 
 
 def _run_build(cfg: common.Config, worktree: pathlib.Path, scratch: pathlib.Path, project: str) -> tuple[int, str]:
-    """`dotnet build <project> -c Release`, as the session would run it: in the session's sandbox and environment,
-    without the model credential — a build runs the branch's own MSBuild code."""
-    env = harness.session_env(cfg, scratch)
+    """`dotnet build <project> -c Release --no-restore`, as the session would run it: in the session's sandbox and
+    environment (its HOME kept, never reseeded: a session may be running), without the model credential — a build
+    runs the branch's own MSBuild code. No restore: the session restored already, and a restore started by the
+    lane hung for 5 minutes in the sandbox (#856's round 3, 14:49–15:05); a project never restored answers
+    NETSDK1004, which is not a compile error."""
+    env = harness.session_env(cfg, scratch, fresh_home=False)
     env.pop(cfg.harness["credential_env"], None)
-    command = harness.sandboxed(["dotnet", "build", project, "-c", "Release", "-nodeReuse:false", "-nologo",
-                                 "-v:quiet", "-clp:ErrorsOnly"],
+    command = harness.sandboxed(["dotnet", "build", project, "-c", "Release", "--no-restore", "-nodeReuse:false",
+                                 "-nologo", "-v:quiet", "-clp:ErrorsOnly"],
                                 harness.write_profile(cfg, scratch, worktree=worktree, branch=None))
     try:
         done = subprocess.run(command, cwd=str(worktree), env=env, capture_output=True, text=True,
@@ -379,7 +385,7 @@ def build_errors(cfg: common.Config, worktree: pathlib.Path, scratch: pathlib.Pa
         lines = []
         for raw in output.splitlines():
             match = BUILD_ERROR.match(raw.replace(str(worktree) + "/", ""))
-            if match:
+            if match and match["code"] not in NOT_COMPILE_ERRORS:
                 lines.append(f"{match['where']}: error {match['code']}: {match['what']}")
         if not lines:
             tail = " | ".join([line for line in output.strip().splitlines() if line.strip()][-3:])[:300]
@@ -416,9 +422,50 @@ def problems(cfg: common.Config, outcome: harness.Outcome, worktree: pathlib.Pat
     return found
 
 
+def start_at_head(cfg: common.Config, worktree: pathlib.Path, number: int, pr: int, job: str) -> str:
+    """A rework starts from exactly the pull request's head. Uncommitted and untracked changes are archived to
+    `<state>/retired/<card>-<time>.tar.gz`; commits only this worktree has are kept under
+    `refs/lane/retired/issue-<card>-<time>`; then the worktree is reset to the head, and that is logged. Returns
+    what was done ('' when it already was at the head and clean)."""
+    head = github.pull(cfg, pr).head
+    with common.checkout_lock():
+        common.git(cfg.checkout, "fetch", "-q", "origin", head)
+    local = common.wt_git(cfg, worktree, "rev-parse", "HEAD")
+    dirty = common.wt_git(cfg, worktree, "status", "--porcelain", "-z", "--untracked-files=all")
+    if local == head and not dirty:
+        return ""
+    stamp = time.strftime("%Y%m%dT%H%M%S")
+    done = []
+    if dirty:
+        archive = common.state_dir("retired") / f"{number}-{stamp}.tar.gz"
+        listed = (common.wt_git(cfg, worktree, "ls-files", "-z", "--modified", "--others", "--exclude-standard")
+                  + "\0" + common.wt_git(cfg, worktree, "diff", "--cached", "--name-only", "-z"))
+        paths = sorted({name for name in listed.split("\0") if name})
+        try:
+            with tarfile.open(archive, "w:gz") as tar:
+                for name in paths:
+                    if (worktree / name).exists() or (worktree / name).is_symlink():
+                        tar.add(worktree / name, arcname=name, recursive=False)
+        except OSError as exc:
+            raise common.StateError(f"the uncommitted changes of {worktree} could not be archived: {exc}") from exc
+        done.append(f"{len(paths)} uncommitted or untracked path(s) archived to {archive}")
+    if local != head and not is_ancestor(cfg.checkout, local, head):
+        ref = f"refs/lane/retired/issue-{number}-{stamp}"
+        common.git(cfg.checkout, "update-ref", ref, local)
+        done.append(f"its commits not on #{pr} kept at {ref} ({local[:9]})")
+    common.wt_git(cfg, worktree, "reset", "-q", "--hard", head)
+    common.wt_git(cfg, worktree, "clean", "-q", "-fd")
+    what = (f"the worktree was at {local[:9]}" + (" with uncommitted changes" if dirty else "")
+            + f", not #{pr}'s head {head[:9]}: " + "; ".join(done + [f"reset to {head[:9]}"]))
+    common.log(job, what)
+    return what
+
+
 def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
     job = f"worker-{number}"
     worktree = prepare_worktree(cfg, number)
+    if rework_pr:  # exactly the pull request's head: no leftovers of an earlier round, no local-only commits
+        start_at_head(cfg, worktree, number, rework_pr, job)
     issue = dispatch_card.card(cfg.checkout, number)
     findings, resume = rework_brief(cfg, rework_pr, worktree) if rework_pr else ("", False)
     if rework_pr:
