@@ -366,7 +366,7 @@ def _run_build(cfg: common.Config, worktree: pathlib.Path, scratch: pathlib.Path
     env = harness.session_env(cfg, scratch, fresh_home=False)
     env.pop(cfg.harness["credential_env"], None)
     command = harness.sandboxed(["dotnet", "build", project, "-c", "Release", "--no-restore", "-nodeReuse:false",
-                                 "-nologo", "-v:quiet", "-clp:ErrorsOnly"],
+                                 "-p:UseSharedCompilation=false", "-nologo", "-v:quiet", "-clp:ErrorsOnly"],
                                 harness.write_profile(cfg, scratch, worktree=worktree, branch=None))
     try:
         done = subprocess.run(command, cwd=str(worktree), env=env, capture_output=True, text=True,

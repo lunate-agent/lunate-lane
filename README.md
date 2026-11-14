@@ -212,7 +212,10 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    `git fetch --prune`, so a branch deleted on GitHub is not continued from a stale `origin/` ref (#798). The
    review brief puts the card's dated `## Decisions` entries in its verdict rules: a finding that contradicts one
    is non-blocking (#848's ADR renumber, Decision of 2026-11-14 on #809).
-   **Before every push the branch is built.** Every project holding a file the branch changes — the nearest
+   The session sandbox allows MSBuild's node sockets, `/private/tmp/MSBuild<pid>` (regex, nothing else in /tmp):
+   MSBuild puts them in /tmp, not TMPDIR, and with them denied every build waited 5 minutes for nodes that
+   could not connect. `dotnet test`'s own IPC pipe (`/private/tmp/<32 hex>`) is still denied, and crashes it.
+   **Before every push the branch is built** (when `harness.build_gate` is on; it is off). Every project holding a file the branch changes — the nearest
    `.csproj` above it, test projects under `tests/` included — is built with `dotnet build -c Release`, in the
    session's sandbox and environment without the model key. Compile errors (`file(line,col): error CS0103: …`)
    are never pushed: they go back into the same Pi session (`--session-id`) to fix, up to 2 rounds; a run that
