@@ -134,10 +134,11 @@ def _short(text: str, limit: int) -> str:
 
 
 def waiting_on_you(cfg: common.Config, decisions: list, pulls: list, required: frozenset, parked: dict,
-                   merged: list, cards: list, flag_errors: dict | None = None) -> list[str]:
+                   merged: list, cards: list, flag_errors: dict | None = None, codeowners: tuple = ()) -> list[str]:
     """The lines a maintainer acts on, short enough for a phone: open decisions (oldest first, with the cards each
     blocks), every parked card whatever the reason (its reason and a link), a park whose label or assignment
-    failed, pull requests waiting for a maintainer's or code owner's approval, and a merge that left its card
+    failed, pull requests waiting for a maintainer's approval (`code-owner review: #n (paths)` when the bot approved
+    and the paths it changes are code-owned: the feeder enqueues it on the tick after that approval), and a merge that left its card
     open."""
     url = f"https://github.com/{cfg.slug}"
     lines = []
@@ -153,7 +154,13 @@ def waiting_on_you(cfg: common.Config, decisions: list, pulls: list, required: f
         lines.append(f"  card #{number}: {cfg.parked_label} / @{cfg.parked_assignee} FAILED — "
                      f"{_short(error, WAIT_REASON + 40)}")
     for p in sorted(pulls, key=lambda p: p.number):
-        if github.waits_for_approval(p, required, cfg.reviewer_app):
+        if not github.waits_for_approval(p, required, cfg.reviewer_app):
+            continue
+        owned = github.owned_paths(p.files, codeowners) if p.card is not None else ()
+        if owned:  # the bot approved; GitHub wants the code owner's too before it can be enqueued
+            lines.append(f"  code-owner review: #{p.number} ({_short(', '.join(owned), WAIT_REASON - 20)}) "
+                         f"{url}/pull/{p.number}")
+        else:
             lines.append(f"  approve #{p.number} {_short(p.title, WAIT_TITLE)} {url}/pull/{p.number}")
     for m in merged:
         for ref in m.get("closingIssuesReferences") or []:
@@ -165,12 +172,13 @@ def waiting_on_you(cfg: common.Config, decisions: list, pulls: list, required: f
 def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required: frozenset,
             now: datetime.datetime, parked: dict | None = None, running: dict | None = None,
             kept: dict | None = None, decisions: list | None = None, died: dict | None = None,
-            requeued: dict | None = None, queue_events: list | None = None, flag_errors: dict | None = None) -> str:
+            requeued: dict | None = None, queue_events: list | None = None, flag_errors: dict | None = None,
+            codeowners: tuple = ()) -> str:
     running = running or {}
     parked = parked or {}
     flight = in_flight(cfg, pulls, running, frozenset(parked))
     lines = [f"Lunate lane — {now:%Y-%m-%d}",
-             *waiting_on_you(cfg, decisions or [], pulls, required, parked, merged, cards, flag_errors),
+             *waiting_on_you(cfg, decisions or [], pulls, required, parked, merged, cards, flag_errors, codeowners),
              f"{cfg.milestone}: {len(cards)} open issue(s)",
              f"WIP {len(flight)} of {cfg.wip_limit}" + (": " + ", ".join(flight) if flight else "")]
     lines.append(f"Open PRs ({len(pulls)}):" if pulls else "Open PRs: none")
@@ -209,7 +217,8 @@ def tick() -> None:
     message = compose(cfg, cards, pulls, merged, required, now, harness.parked_info(), harness.running_workers(),
                       cleanup.read_held(), decisions, harness.died_info(),
                       {p.number: harness.requeues(p.number, p.head) for p in pulls if p.ejection is not None},
-                      harness.queue_events((now - datetime.timedelta(days=1)).timestamp()), parked.errors())
+                      harness.queue_events((now - datetime.timedelta(days=1)).timestamp()), parked.errors(),
+                      github.codeowners(cfg))
     latest = common.state_dir("digest") / "latest.md"
     try:
         latest.write_text(message + "\n", encoding="utf-8")

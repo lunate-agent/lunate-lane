@@ -407,6 +407,40 @@ def merge_first(reason: str) -> int | None:
     return ref if {int(n) for n in REF.findall(reason)} == {ref} else None
 
 
+CODEOWNERS_PATHS = (".github/CODEOWNERS", "CODEOWNERS", "docs/CODEOWNERS")  # GitHub's order: the first found counts
+
+
+def codeowners(cfg: common.Config) -> tuple:
+    """The path patterns of the base branch's CODEOWNERS (comments and owners dropped); () when there is none."""
+    for path in CODEOWNERS_PATHS:
+        try:
+            raw = common.gh("api", f"repos/{cfg.slug}/contents/{path}?ref={cfg.base}",
+                            "-H", "Accept: application/vnd.github.raw")
+        except GhError as exc:
+            if "404" in str(exc) or "Not Found" in str(exc):
+                continue
+            raise
+        return tuple(line.split()[0] for line in raw.splitlines()
+                     if line.strip() and not line.lstrip().startswith("#"))
+    return ()
+
+
+def _owned(path: str, pattern: str) -> bool:
+    """CODEOWNERS matching, for the patterns a repository like this uses: `/x/` and `x/` a directory, `/x` anchored
+    at the root, a bare name anywhere, `*` and `**` globs."""
+    anchored = pattern.startswith("/") or "/" in pattern.rstrip("/")
+    body = pattern.strip("/")
+    directory = pattern.endswith("/")
+    rx = re.escape(body).replace(r"\*\*", ".*").replace(r"\*", "[^/]*").replace(r"\?", "[^/]")
+    rx = ("^" if anchored else r"(?:^|.*/)") + rx + (r"/.*$" if directory else r"(?:/.*)?$")
+    return re.match(rx, path) is not None
+
+
+def owned_paths(files, patterns) -> tuple:
+    """The changed paths a CODEOWNERS pattern covers, in order."""
+    return tuple(f for f in files or () if any(_owned(f, pattern) for pattern in patterns))
+
+
 def waits_line(blockers) -> str:
     return "waits on " + ", ".join(f"#{n}" for n in blockers)
 
@@ -771,10 +805,14 @@ def needs_enqueue(p: Pull, required: frozenset, reviewer: str) -> bool:
     """A ready, approved, green worker pull request that is not in the merge queue: the feeder enqueues it itself
     (`enqueuePullRequest`) instead of arming auto-merge and trusting GitHub to add it. Not when a person turned
     auto-merge off or took it out of the queue, not while its card waits on an open issue, not when GitHub does not
-    read it MERGEABLE, and not when the queue removed this head: that is an ejection (`Ejection`), handled by kind."""
+    read it MERGEABLE, and not when the queue removed this head: that is an ejection (`Ejection`), handled by kind.
+    Only when GitHub's reviewDecision is APPROVED: the bot's approval alone does not satisfy a code-owner review
+    (GitHub refuses the enqueue with "Waiting on code owner review"), so such a pull request waits for the
+    maintainer's approval — the digest lists it — and the next tick after it enqueues it."""
     return (p.state == "OPEN" and not p.draft and not p.in_queue and not p.disarmed_by and not p.dequeued_by
             and not p.waits_on and p.mergeable == "MERGEABLE" and not p.queue_removal and p.ejection is None
-            and check_state(p, required) == "green" and verdict(p, reviewer) == "APPROVED")
+            and p.review_decision == "APPROVED" and check_state(p, required) == "green"
+            and verdict(p, reviewer) == "APPROVED")
 
 
 def stuck_reason(p: Pull, required: frozenset, reviewer: str, reran: frozenset = frozenset()) -> str | None:
@@ -813,17 +851,35 @@ def orphaned_draft(p: Pull, running, parked) -> bool:
 # "this is a worker-fixable omission, not a `NEEDS-PERSON` item." — is not a request for a person
 NEEDS_PERSON = re.compile(r"^[ \t>*_`-]*NEEDS-PERSON\b[*_`]*[ \t]*[:—–-]?[ \t]*(.*)", re.MULTILINE)
 REASON_LIMIT = 300
+# a card's "## Maintainer steps" are the maintainer's, after the merge: never a reason to stop for a person
+MAINTAINER_STEPS = re.compile(r"\bmaintainer[ -]steps?\b", re.IGNORECASE)
+
+
+def about_maintainer_steps(reason: str) -> bool:
+    """A NEEDS-PERSON reason whose first sentence is about the card's Maintainer steps (#817's: "the two Maintainer
+    steps require consecutive green nightly macOS full-suite runs after merge. …")."""
+    first = re.split(r"(?<=[.;!?])\s", (reason or "").strip(), maxsplit=1)[0]
+    return MAINTAINER_STEPS.search(first) is not None
 
 
 def needs_person(text: str) -> str | None:
     """The reason after the first line that starts with `NEEDS-PERSON:` in a worker's report or a review body, or
     None when there is no such line. A finding nobody can meet inside the card — a maintainer's decision, a failure in code the diff
-    does not touch, evidence only a real release gives — stops the card for a person instead of another round."""
+    does not touch, evidence only a real release gives — stops the card for a person instead of another round.
+    One about the card's Maintainer steps is not one (`about_maintainer_steps`): those are the maintainer's after
+    the merge, so it is read as no NEEDS-PERSON at all."""
+    reason = raw_needs_person(text)
+    if reason is None or about_maintainer_steps(reason):
+        return None
+    return reason[:REASON_LIMIT] or "(no reason given)"
+
+
+def raw_needs_person(text: str) -> str | None:
+    """The NEEDS-PERSON line's reason as written, Maintainer steps or not; None without such a line."""
     match = NEEDS_PERSON.search(text or "")
     if not match:
         return None
-    reason = match.group(1).strip().strip("*_` ").strip()
-    return reason[:REASON_LIMIT] or "(no reason given)"
+    return match.group(1).strip().strip("*_` ").strip()
 
 
 class CiRun(typing.NamedTuple):

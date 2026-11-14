@@ -137,7 +137,10 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      merge queue — armed or not: arming alone does not put it in the queue, and a removal turns auto-merge off —
      is enqueued (`enqueuePullRequest` with its head as the expected head) and its queue entry read back. Not when
      a person turned auto-merge off last or took it out of the queue, not while its card waits on an open issue,
-     and not when the queue removed this head (an ejection, above).
+     and not when the queue removed this head (an ejection, above). Only when GitHub's `reviewDecision` is
+     APPROVED: the bot's approval does not satisfy a code-owner review (the queue refuses it, "Waiting on code
+     owner review"), so such a pull request waits — the digest lists it — and the tick after the maintainer's
+     approval enqueues it. An infra ejection is re-enqueued under the same condition.
    - **tidying, after the launches** (`scripts/cleanup.py`): a card whose lane pull request (`wt/issue-N`) is merged
      or closed, with none open and no worker running, loses its worktree, its local branch and its scratch
      directory (a merged one first has its merge commit's parent count logged — 1 is the squash the queue should
@@ -202,7 +205,9 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    other such test is non-blocking). Everything else — wording, style, the pull request's
    description, suggestions — goes under **Non-blocking** in an approval. Test evidence is CI's: the reviewer
    never asks the worker which tests it ran. A **`NEEDS-PERSON:`** line counts only at the start of a line, in a
-   review or a worker's report; a mention inside a sentence is not one. The worker's brief says a conflict in
+   review or a worker's report; a mention inside a sentence is not one. One whose first sentence is about the
+   card's **Maintainer steps** is not one either: those are the maintainer's after the merge (both briefs say so;
+   the worker logs and ignores it, a review with it is an ordinary approval or rework, never a park). The worker's brief says a conflict in
    `openspec/specs/**` is resolved by reverting the archive commit, merging `origin/main` and re-archiving, never
    by hand. The
    session writes a JSON verdict; the lane re-reads the pull request and, only if it is still open at the same
@@ -218,7 +223,7 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    open cards each blocks), every parked card whatever its reason (the reason and a link), a park whose label or
    assignment failed, pull requests that are ready
    and green but still need a maintainer's or code owner's approval (the bot approved the head, or it carries no
-   card), and a card still open after the pull request closing it merged. Then: open issues in the milestone; WIP against its limit, with what is in flight (as the feeder counts it); every open
+   card) — `code-owner review: #n (paths)` when the paths it changes are in CODEOWNERS — and a card still open after the pull request closing it merged. Then: open issues in the milestone; WIP against its limit, with what is in flight (as the feeder counts it); every open
    pull request with its state; what is stuck and why (a worker pull request that is red, conflicting or out of
    the merge queue for a real failure, "stuck in queue" after two infra re-enqueues at one head, any pull request
    open for more than a day, and a card whose last worker run failed by name before its session could end —

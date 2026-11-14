@@ -87,6 +87,11 @@ The lane then parks the card for a person instead of sending it back for another
 for something the worker can fix, and never APPROVE with it: an approval with a NEEDS-PERSON line is posted as
 a request for changes.
 
+**A card's "## Maintainer steps" are never a reason for REQUEST_CHANGES or NEEDS-PERSON.** They are for the
+maintainer, after the merge, and are not checked by you: do not ask the pull request to evidence them, do not
+count them among the acceptance checks, and do not hold an approval for them. (A NEEDS-PERSON line about them
+is ignored: the lane does not park for it.)
+
 {{DECISIONS}}
 ## The issue (#{{CARD}})
 

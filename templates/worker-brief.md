@@ -71,6 +71,11 @@ line of your final report with this (a mention inside a sentence is not read) an
 
 The lane parks the card at once with that reason and does not send it back to a worker.
 
+**A card's "## Maintainer steps" are never a reason for NEEDS-PERSON.** They are for the maintainer, after the
+merge: evidence only a nightly or a release can give, a setting to flip, a check to watch. Leave them unticked,
+do not try to produce their evidence, and do not report NEEDS-PERSON for them — deliver the acceptance and mark
+the work done. (A NEEDS-PERSON line about them is ignored: the lane does not park for it.)
+
 {{DECISIONS}}
 ## The card (verbatim)
 

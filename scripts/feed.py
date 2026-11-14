@@ -60,7 +60,7 @@ def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[
     disarm = [p for p in worker_pulls if p.state == "OPEN" and p.auto_merge and p.waits_on]
     ejected = [p for p in worker_pulls if p.card not in running and p.card not in parked and p.state == "OPEN"
                and not p.draft and not p.in_queue and not p.waits_on and not p.disarmed_by and not p.dequeued_by
-               and p.ejection is not None and p.ejection.kind == "infra"
+               and p.ejection is not None and p.ejection.kind == "infra" and p.review_decision == "APPROVED"
                and github.verdict(p, cfg.reviewer_app) == "APPROVED"]
     return launches, notes, rerun, enqueue, disarm, ejected
 
