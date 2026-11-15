@@ -45,7 +45,7 @@ class ComposeTests(unittest.TestCase):
         foreign = pull(9, None, author="someone", mergeable="CONFLICTING")
         text = digest.compose(CFG, [card(1), card(2)], [old, fresh, red, dropped, foreign],
                               [{"number": 801, "title": "Fix the loop"}], REQUIRED, NOW)
-        self.assertIn("0.4.0: 2 open issue(s)", text)
+        self.assertIn(f"{CFG.milestone}: 2 open issue(s)", text)
         self.assertIn("Open PRs (5):", text)
         self.assertIn("Stuck (3):", text)
         self.assertIn("  #5 — changes requested — open 2d", text)
