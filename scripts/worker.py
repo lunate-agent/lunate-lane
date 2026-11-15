@@ -418,7 +418,8 @@ def problems(cfg: common.Config, outcome: harness.Outcome, worktree: pathlib.Pat
     may end with no new commit: its work can be complete already."""
     found = []
     if outcome.stalled:
-        found.append(f"the session stalled or passed its time cap and was stopped after {outcome.elapsed}s")
+        found.append(f"the lane stopped the session after {outcome.elapsed}s: "
+                     + (outcome.stop_reason or "it stalled or passed its time cap"))
     elif outcome.rc != 0:
         found.append(f"the session exited with {outcome.rc}")
     if outcome.leaked_markup:
@@ -603,7 +604,7 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
         report = harness.last_text(session_log).strip() or "(the session left no final message)"
     except harness.HarnessError as exc:
         report = f"(the session's final message could not be read: {exc})"
-    person = person_reason(cfg, report)
+    person = None if outcome.stalled else person_reason(cfg, report)
     if person is not None:  # the worker stopped for a person: never armed, and the card parks at once
         found.append(f"the worker says it needs a person: {person}")
     idle, parked_now = harness.note_run(number, common.wt_git(cfg, worktree, "rev-parse", "HEAD") != start_head)
@@ -658,10 +659,15 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
         lines.append(f"**Incomplete — the pull request stays a draft and auto-merge is {result['auto_merge']}:** "
                      + "; ".join(found) + ".")
     report, kinds = secret_scan.redact(report, (harness.read_credential(cfg),))
-    for kind in kinds:  # each span is replaced, the rest is posted; the full message stays in the local log
-        common.log(job, f"the session's final message holds something shaped like a {kind} — redacted before "
-                        f"posting; the full message stays in {session_log}")
-    lines.append("\n" + report)
+    if outcome.stalled:  # the session never wrote a report: its last output is a raw tail, kept out of the comment
+        common.log(job, f"the session was stopped; its last output, not posted (full session log {session_log}):\n"
+                        + report[-STOPPED_TAIL:])
+        lines.append("\n" + stopped_summary(cfg, worktree, outcome))
+    else:
+        for kind in kinds:  # each span is replaced, the rest is posted; the full message stays in the local log
+            common.log(job, f"the session's final message holds something shaped like a {kind} — redacted before "
+                            f"posting; the full message stays in {session_log}")
+        lines.append("\n" + report)
     open_pr.comment(result["number"], "\n".join(lines)[:COMMENT_LIMIT])
     method = (f" (queue {result['queue_method']}, GitHub records {result.get('merge_method') or 'none'})"
               if result.get("queue_method") else "")
@@ -675,6 +681,25 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
     elif parked_now:
         park(cfg, number, result["number"], "idle", idle)
     return 1 if found else 0
+
+
+STOPPED_TAIL = 2000  # how much of a stopped session's last output goes to the worker log
+
+
+def stopped_summary(cfg: common.Config, worktree: pathlib.Path, outcome: harness.Outcome) -> str:
+    """The lane's own report for a session it stopped. Such a session wrote no report, and its last output
+    (a tool result, a traceback, a half-sentence) is no account of the work, so it goes only to the log."""
+    why = outcome.stop_reason or "it stalled or passed its time cap"
+    changed = [line for line in common.wt_git(cfg, worktree, "status", "--porcelain").splitlines() if line.strip()]
+    last = common.wt_git(cfg, worktree, "log", "-1", "--format=%h %s")
+    return "\n".join([
+        f"**Stopped by the lane** after {outcome.elapsed}s: {why}. The session wrote no report; its last output "
+        "is kept in the lane's log, not posted here.",
+        f"- Uncommitted changes: {len(changed)} path(s), kept in the card's worktree; the next run archives them "
+        "under the lane's `retired/` and starts from this pull request's head" if changed
+        else "- Uncommitted changes: none",
+        f"- Last commit: `{last}`",
+    ])
 
 
 def park_for_person(cfg: common.Config, card: int, target: int, reason: str) -> None:

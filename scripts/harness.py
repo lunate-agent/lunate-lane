@@ -56,6 +56,7 @@ class Outcome:
     elapsed: int
     leaked_markup: bool
     session_id: str = ""  # to continue the same session (`run_session(session_id=...)`)
+    stop_reason: str = ""  # why the lane stopped a stalled session: its time cap, or no output for too long
 
 
 def read_credential(cfg: common.Config) -> str:
@@ -336,7 +337,7 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
         pump = threading.Thread(target=_redacting_copy, args=(proc.stdout, out, known), daemon=True)
         pump.start()
         started = last_activity = time.monotonic()
-        size, stalled = -1, False
+        size, stalled, stop_reason = -1, False, ""
         try:
             if on_start is not None:
                 on_start(proc.pid, record_id)
@@ -351,6 +352,8 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
                     size, last_activity = current, now
                 if now - started > timeout or now - last_activity > idle:
                     stalled = True
+                    stop_reason = (f"it passed its time cap of {timeout}s" if now - started > timeout
+                                   else f"it stalled: no output for {idle}s")
                     _kill_group(proc)
                     break
                 if on_tick is not None:
@@ -364,7 +367,8 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
             scrub_dir(scratch / ("lunate-home" if harness == LUNATE else "sessions"), known)
     if harness == LUNATE:
         session_id = lunate_session_id(log_path) or session_id
-    return Outcome(proc.returncode, stalled, int(time.monotonic() - started), leaked_markup(log_path), session_id)
+    return Outcome(proc.returncode, stalled, int(time.monotonic() - started), leaked_markup(log_path), session_id,
+                   stop_reason)
 
 
 def _events(log_path: pathlib.Path):
