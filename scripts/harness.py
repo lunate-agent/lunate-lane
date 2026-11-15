@@ -202,6 +202,10 @@ MSBUILD_SOCKETS = '(regex #"^/private/tmp/MSBuild[0-9]+$")'
 # sandbox's regex dialect has no {n} counts (with one, nothing matched). It matches paths case-insensitively
 # here (APFS), so A-F match too: still only hex names.
 DOTNET_TEST_PIPE = '(regex #"^/private/tmp/' + "[0-9a-f]" * 32 + '$")'
+# `dotnet format`'s MSBuild build host (Roslyn's BuildHostProcessManager → NamedPipeUtil): a socket named by a
+# dashed GUID, ^/private/tmp/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$, spelled out like the
+# test pipe. Denied, the build host died binding it (SocketException 13) and format gave up after 60 s.
+BUILD_HOST_PIPE = ('(regex #"^/private/tmp/' + "-".join("[0-9a-f]" * n for n in (8, 4, 4, 4, 12)) + '$")')
 # container VMs (#888's session made three Podman machines in its scratch, ~9 GB): the hypervisor and network
 # helpers a VM needs are neither run nor read (so not copied under another name) wherever they are installed, and
 # the machine state a `podman machine init` writes its disk image into is not writable under any HOME
@@ -219,9 +223,11 @@ def sandbox_profile(cfg: common.Config, real_home: pathlib.Path | None = None, *
         worker its own branch ref and that ref's log (not other refs: cleanup trusts `refs/remotes/origin`);
         the NuGet package cache the lane points sessions at; /dev/null and /dev/tty;
         (never a container VM's state: `VM_STATE`, and the VM helpers in `VM_TOOLS` are never run)
-        MSBuild's node sockets, `/private/tmp/MSBuild<pid>` and nothing else in /tmp (MSBuild puts them in /tmp,
-        not TMPDIR, on macOS; denied, every build waited 5 minutes for nodes that could not connect — #856), and
-        `dotnet test`'s IPC pipe, `/private/tmp/<32 lowercase hex>` (denied, it crashed with SocketException 13).
+        and in /tmp exactly three socket shapes (.NET puts them in /tmp, not TMPDIR, on macOS): MSBuild's node
+        sockets, `/private/tmp/MSBuild<pid>` (denied, every build waited 5 minutes for nodes that could not connect
+        — #856); `dotnet test`'s IPC pipe, `/private/tmp/<32 lowercase hex>` (denied, it crashed with
+        SocketException 13); and `dotnet format`'s build-host pipe, `/private/tmp/<dashed GUID>` (denied, the
+        build host died with SocketException 13).
 
     Inside those, the worktree's `.git` pointer and the admin directory's `gitdir`, `commondir` and
     `config.worktree` stay denied. Reads of the lane's and the user's secrets are denied; process-info only on
@@ -238,7 +244,7 @@ def sandbox_profile(cfg: common.Config, real_home: pathlib.Path | None = None, *
     packages = real_home / ".nuget" / "packages"
     if packages.is_dir():
         allowed += [f"(subpath {_sbpl(p)})" for p in _forms([packages])]
-    allowed += ['(literal "/dev/null")', '(literal "/dev/tty")', MSBUILD_SOCKETS, DOTNET_TEST_PIPE]
+    allowed += ['(literal "/dev/null")', '(literal "/dev/tty")', MSBUILD_SOCKETS, DOTNET_TEST_PIPE, BUILD_HOST_PIPE]
     pinned = [_rx(form, r"(\.lock)?") for form in _forms([worktree / ".git", admin / "gitdir", admin / "commondir",
                                                             admin / "config.worktree"])]
     deny = " ".join(f"(subpath {_sbpl(p)})" for p in denied_paths(cfg, real_home))
