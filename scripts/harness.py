@@ -202,6 +202,12 @@ MSBUILD_SOCKETS = '(regex #"^/private/tmp/MSBuild[0-9]+$")'
 # sandbox's regex dialect has no {n} counts (with one, nothing matched). It matches paths case-insensitively
 # here (APFS), so A-F match too: still only hex names.
 DOTNET_TEST_PIPE = '(regex #"^/private/tmp/' + "[0-9a-f]" * 32 + '$")'
+# container VMs (#888's session made three Podman machines in its scratch, ~9 GB): the hypervisor and network
+# helpers a VM needs are neither run nor read (so not copied under another name) wherever they are installed, and
+# the machine state a `podman machine init` writes its disk image into is not writable under any HOME
+VM_TOOLS = '(regex #"/(vfkit|krunkit|gvproxy|hyperkit|limactl|colima|docker-machine|qemu-system-[^/]+)$")'
+VM_STATE = ('(regex #"/containers/podman/machine(/|$)")', '(regex #"/\\.docker/machine(/|$)")',
+            '(regex #"/\\.lima(/|$)")', '(regex #"/\\.colima(/|$)")')
 
 
 def sandbox_profile(cfg: common.Config, real_home: pathlib.Path | None = None, *, scratch: pathlib.Path,
@@ -212,6 +218,7 @@ def sandbox_profile(cfg: common.Config, real_home: pathlib.Path | None = None, *
         what git needs to commit there — `.git/objects`, the worktree's own `.git/worktrees/<name>`, and for a
         worker its own branch ref and that ref's log (not other refs: cleanup trusts `refs/remotes/origin`);
         the NuGet package cache the lane points sessions at; /dev/null and /dev/tty;
+        (never a container VM's state: `VM_STATE`, and the VM helpers in `VM_TOOLS` are never run)
         MSBuild's node sockets, `/private/tmp/MSBuild<pid>` and nothing else in /tmp (MSBuild puts them in /tmp,
         not TMPDIR, on macOS; denied, every build waited 5 minutes for nodes that could not connect — #856), and
         `dotnet test`'s IPC pipe, `/private/tmp/<32 lowercase hex>` (denied, it crashed with SocketException 13).
@@ -241,10 +248,46 @@ def sandbox_profile(cfg: common.Config, real_home: pathlib.Path | None = None, *
             f"(deny file-write* {' '.join(pinned)})\n"
             f"(deny file-read* file-write* {deny})\n"
             f"(deny process-exec* file-read-data {' '.join(f'(literal {_sbpl(b)})' for b in NO_EXEC)})\n"
+            f"(deny process-exec* file-read-data {VM_TOOLS})\n"
+            f"(deny file-write* {' '.join(VM_STATE)})\n"
             # deny, then allow the session's own sandbox: `(target others)` alone is not enforced on this macOS
             # (a probe still read the lane's pids); this form is, and it keeps a session's own children readable
             # (dotnet's test host watches them)
             "(deny process-info*)\n(allow process-info* (target same-sandbox))\n")
+
+
+SCRATCH_WARN = 2 * 1024 ** 3  # the digest warns about a card's scratch above this many bytes on disk
+
+
+def disk_usage(path: pathlib.Path) -> int:
+    """Bytes `path` really occupies (allocated blocks, so a sparse VM disk counts what it holds, not its size),
+    without following symlinks. Unreadable entries count as nothing."""
+    total = 0
+    for root, dirs, files in os.walk(path, followlinks=False):
+        for name in dirs + files:
+            try:
+                total += os.lstat(os.path.join(root, name)).st_blocks * 512
+            except OSError:
+                continue
+    return total
+
+
+def large_scratch(cfg: common.Config, limit: int = SCRATCH_WARN) -> list[tuple[str, int, list]]:
+    """Each scratch directory above `limit`: (name, bytes, its three largest entries as (name, bytes)), largest
+    first."""
+    root = cfg.state / "scratch"
+    found = []
+    try:
+        entries = sorted(p for p in root.iterdir() if p.is_dir() and not p.is_symlink())
+    except OSError:
+        return []
+    for entry in entries:
+        size = disk_usage(entry)
+        if size > limit:
+            parts = sorted(((c.name, disk_usage(c) if c.is_dir() and not c.is_symlink() else
+                             os.lstat(c).st_blocks * 512) for c in entry.iterdir()), key=lambda x: -x[1])[:3]
+            found.append((entry.name, size, parts))
+    return sorted(found, key=lambda x: -x[1])
 
 
 def sandboxed(command: list, profile: pathlib.Path) -> list:
