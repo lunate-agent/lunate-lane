@@ -520,12 +520,18 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
             common.log(job, f"could not open the pull request at the first commit — {exc}")
 
     session_log = common.state_dir("sessions") / f"issue-{number}-{os.getpid()}.jsonl"
-    common.log(job, f"session on {cfg.worker_model}" + (f", rework of #{rework_pr}" if rework_pr else ""))
+    use = harness_for(cfg, number, issue, job)
+    common.log(job, f"session on {cfg.worker_model} via {use}" + (f", rework of #{rework_pr}" if rework_pr else ""))
     driver = os.getpid()
     session = dict(cfg=cfg, model=cfg.worker_model, worktree=worktree, scratch=scratch, log_path=session_log,
                    extra_env={"LANE_PR_FILE": str(pr_file)}, on_tick=open_early, branch=f"wt/issue-{number}",
-                   on_start=lambda pgid, sid: harness.note_session(number, driver, pgid, sid))
-    outcome = harness.run_session(prompt=text, **session)
+                   on_start=lambda pgid, sid: harness.note_session(number, driver, pgid, sid), harness=use)
+    try:
+        outcome = harness.run_session(prompt=text, **session)
+    except harness.HarnessError as exc:
+        if use == harness.LUNATE:  # failed in setup: the next attempt runs on Pi
+            harness.note_fallback(number, f"Lunate failed in setup: {exc}")
+        raise
     failing: list = []
     for round_no in range(1, BUILD_FIX_ROUNDS + 2):
         if not rework_pr and common.wt_git(cfg, worktree, "rev-parse", "HEAD") == start_head:
@@ -538,7 +544,33 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
                         f"back to the same session to fix it (round {round_no} of {BUILD_FIX_ROUNDS})")
         outcome = harness.run_session(prompt=build_fix_prompt(failing), session_id=outcome.session_id or None,
                                       **session)
+    new_commit = common.wt_git(cfg, worktree, "rev-parse", "HEAD") != start_head
+    if use == harness.LUNATE and not new_commit:
+        harness.note_fallback(number, f"the Lunate session ended without a commit (rc {outcome.rc}"
+                                      + (", stalled" if outcome.stalled else "") + ")")
+    kind = ("send-back" if "### The reviewer requested changes" in findings else "rework") if rework_pr else "new"
+    try:
+        spend = harness.session_spend(session_log)
+    except harness.HarnessError:
+        spend = None
+    harness.note_session_stat(harness=use, card=number, pr=rework_pr or opened["pr"], kind=kind,
+                              new_commit=new_commit, spend=spend, rc=outcome.rc, stalled=outcome.stalled)
     return finish(cfg, number, worktree, outcome, start_head, session_log, resume, failing)
+
+
+def harness_for(cfg: common.Config, number: int, issue: dict, job: str) -> str:
+    """Pi, unless the card carries the Lunate label (`harness.lunate_label`, lane/harness-lunate). A Lunate session
+    that failed in setup or ended without a commit sends the card's next attempt to Pi, once: logged
+    `fallback to pi: <reason>`; the attempt after that is on Lunate again."""
+    label = cfg.harness.get("lunate_label", "lane/harness-lunate")
+    labels = {str(l.get("name") if isinstance(l, dict) else l) for l in issue.get("labels") or []}
+    if label not in labels:
+        return harness.PI
+    reason = harness.take_fallback(number)
+    if reason:
+        common.log(job, f"fallback to pi: {reason}")
+        return harness.PI
+    return harness.LUNATE
 
 
 def person_reason(cfg: common.Config, report: str) -> str | None:

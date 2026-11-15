@@ -169,11 +169,43 @@ def waiting_on_you(cfg: common.Config, decisions: list, pulls: list, required: f
     return [f"Waiting on you ({len(lines)}):", *lines] if lines else ["Waiting on you: nothing"]
 
 
+def harness_lines(stats: list, stats_all: list, merged: list) -> list[str]:
+    """One line per harness for the sessions since yesterday (`harness.session_stats`): sessions, merges (a merged
+    pull request counts for the harness of its card's last session), rework rounds per merge (that card's rework
+    and send-back sessions, all time), idle runs (sessions with no new commit), the send-back rate (sessions the
+    reviewer's request for changes started, over the sessions that pushed a commit) and spend (n/a when the
+    harness priced nothing)."""
+    last_harness = {}
+    for row in sorted(stats_all, key=lambda r: r.get("at") or 0):
+        last_harness[row.get("card")] = row.get("harness")
+    merged_cards = [ref.get("number") for m in merged for ref in (m.get("closingIssuesReferences") or [])[:1]]
+    names = sorted({r.get("harness") for r in stats} | {last_harness.get(c) for c in merged_cards if c in last_harness},
+                   key=lambda n: (n != "pi", str(n)))
+    if not names:
+        return ["Harnesses since yesterday: no sessions"]
+    lines = ["Harnesses since yesterday:"]
+    for name in names:
+        rows = [r for r in stats if r.get("harness") == name]
+        merges = [c for c in merged_cards if last_harness.get(c) == name]
+        reworks = sum(1 for r in stats_all if r.get("card") in merges and r.get("kind") in ("rework", "send-back"))
+        pushed = sum(1 for r in rows if r.get("new_commit"))
+        sendbacks = sum(1 for r in rows if r.get("kind") == "send-back")
+        spends = [r.get("spend") for r in rows]
+        priced = [s for s in spends if isinstance(s, (int, float))]
+        spend = ("n/a" if not priced else f"${sum(priced):.2f}"
+                 + (f" (+{len(spends) - len(priced)} unpriced)" if len(priced) < len(spends) else ""))
+        per_merge = f"{reworks / len(merges):.1f}" if merges else "–"
+        rate = f"{sendbacks / pushed:.0%}" if pushed else "–"
+        lines.append(f"  {name}: {len(rows)} session(s), {len(merges)} merge(s), {per_merge} rework rounds/merge, "
+                     f"{sum(1 for r in rows if not r.get('new_commit'))} idle, send-back {rate}, {spend}")
+    return lines
+
+
 def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required: frozenset,
             now: datetime.datetime, parked: dict | None = None, running: dict | None = None,
             kept: dict | None = None, decisions: list | None = None, died: dict | None = None,
             requeued: dict | None = None, queue_events: list | None = None, flag_errors: dict | None = None,
-            codeowners: tuple = ()) -> str:
+            codeowners: tuple = (), stats: list | None = None, stats_all: list | None = None) -> str:
     running = running or {}
     parked = parked or {}
     flight = in_flight(cfg, pulls, running, frozenset(parked))
@@ -201,6 +233,7 @@ def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required
     lines.append(f"Kept by cleanup ({len(kept)}) — its PR is closed, but removing it would lose work:" if kept
                  else "Kept by cleanup: none")
     lines += [f"  card #{number} — {kept[number]}" for number in sorted(kept)]
+    lines += harness_lines(stats or [], stats_all if stats_all is not None else (stats or []), merged)
     lines.append(f"Merged since yesterday ({len(merged)}):" if merged else "Merged since yesterday: none")
     lines += [f"  #{m['number']} {str(m.get('title') or '')[:60]}" for m in merged]
     return "\n".join(lines)
@@ -218,7 +251,8 @@ def tick() -> None:
                       cleanup.read_held(), decisions, harness.died_info(),
                       {p.number: harness.requeues(p.number, p.head) for p in pulls if p.ejection is not None},
                       harness.queue_events((now - datetime.timedelta(days=1)).timestamp()), parked.errors(),
-                      github.codeowners(cfg))
+                      github.codeowners(cfg), harness.session_stats((now - datetime.timedelta(days=1)).timestamp()),
+                      harness.session_stats())
     latest = common.state_dir("digest") / "latest.md"
     try:
         latest.write_text(message + "\n", encoding="utf-8")
