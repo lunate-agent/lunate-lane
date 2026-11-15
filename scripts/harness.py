@@ -17,6 +17,7 @@ runs as the lane's macOS user (README, "Known limitations").
 from __future__ import annotations
 
 import dataclasses
+import hashlib
 import json
 import os
 import pathlib
@@ -263,20 +264,52 @@ def write_profile(cfg: common.Config, scratch: pathlib.Path, real_home: pathlib.
 
 PI, LUNATE = "pi", "lunate"
 HARNESSES = (PI, LUNATE)
+LUNATE_MAX_STEPS = 2000
 LUNATE_MARK = "lunate:"  # a Lunate session's record: it takes no lane-chosen id, so it is told apart by its worktree
 
 
 def lunate_argv(cfg: common.Config, model: str, resume: str | None, prompt: str) -> list:
-    """Lunate 0.4.0's unattended mode, flag for flag with Pi's (`argv`): print mode with the JSON event stream
+    """Lunate's unattended mode — the pinned build of main lane.json names (`verify_lunate`) — flag for flag with
+    Pi's (`argv`): print mode with the JSON event stream
     (`-p --json`, docs/print.md, docs/json-events.md), the same model id, every tool approved (`--yolo` ↔ `--approve`),
     no extensions (`--no-extensions`; no user `mcp.json` exists in its fresh LUNATE_HOME and an unattended run never
     loads project MCP servers, ↔ `--no-mcp`), no update check. Its state — sessions included — lives under the
     session's own LUNATE_HOME (↔ `--session-dir`); a later round continues with `--session <id>`, the id its first
     run reported (↔ `--session-id`: Lunate cannot be given an id up front). No `--`: Lunate 0.4.0 refuses it, and a
-    brief never starts with `-`."""
+    brief never starts with `-`. `--max-steps` (lunate#875, #883): Pi has no step limit — a session is bounded by
+    the lane's time cap and stall timer — so the ceiling is set well above what the time cap allows (the first
+    real sessions ran at up to ~12 steps a minute; 5400 s is ~1100 steps), and the time cap stays what stops it."""
     return [str(pathlib.Path(cfg.harness.get("lunate_binary", "lunate")).expanduser()), "-p", "--json",
             "--model", model, "--yolo", "--no-extensions", "--offline",
+            "--max-steps", str(int(cfg.harness.get("lunate_max_steps", LUNATE_MAX_STEPS))),
             *(["--session", resume] if resume else []), prompt]
+
+
+def file_sha256(path: pathlib.Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1 << 20), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def verify_lunate(cfg: common.Config) -> pathlib.Path:
+    """The Lunate binary lane.json pins, or a HarnessError: a session never starts on a binary whose sha256 is not
+    the one recorded beside its commit (`lane.py lunate-pin`). A refusal is a setup failure, so the card's next
+    attempt runs on Pi."""
+    binary = pathlib.Path(cfg.harness.get("lunate_binary", "")).expanduser()
+    want, commit = cfg.harness.get("lunate_sha256", ""), cfg.harness.get("lunate_commit", "")
+    if not want or not commit:
+        raise HarnessError("lane.json pins no Lunate build (lunate_commit and lunate_sha256) — "
+                           "pin one with `lane.py lunate-pin <commit>`")
+    try:
+        got = file_sha256(binary)
+    except OSError as exc:
+        raise HarnessError(f"the pinned Lunate binary {binary} could not be read: {exc}") from exc
+    if got != want:
+        raise HarnessError(f"refused: the Lunate binary {binary} has sha256 {got}, lane.json pins {want} "
+                           f"(commit {commit[:12]})")
+    return binary
 
 
 def argv(cfg: common.Config, model: str, session_dir: pathlib.Path, session_id: str, prompt: str) -> list:
@@ -305,6 +338,7 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
         raise HarnessError(f"unknown harness {harness!r}; known: {', '.join(HARNESSES)}")
     env = session_env(cfg, scratch, extra_env)
     if harness == LUNATE:
+        verify_lunate(cfg)
         lunate_home = scratch / "lunate-home"
         try:
             lunate_home.mkdir(parents=True, exist_ok=True)

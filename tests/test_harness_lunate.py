@@ -41,6 +41,8 @@ class LunateSessionTests(HarnessCase):
                 'mkdir -p "$LUNATE_HOME/sessions" && env > "$LUNATE_HOME/sessions/own.jsonl"\n' + extra)
         self.fake.write_text("#!/bin/sh\n" + body)
         self.fake.chmod(0o755)
+        self.cfg.harness.update(lunate_commit="16f9e25e914a9bc74da028ad0337666137ad0279",
+                                lunate_sha256=harness.file_sha256(self.fake))  # the pinned build is this fake
 
     def run_lunate(self, **kw):
         return harness.run_session(self.cfg, model="opencode-go/deepseek-v4.1-flash", worktree=self.worktree,
@@ -54,8 +56,9 @@ class LunateSessionTests(HarnessCase):
         outcome = self.run_lunate(on_start=lambda pgid, sid: seen.append(sid))
         home = self.state.root / "scratch" / "lunate-home"
         argv = (home / "argv").read_text().splitlines()
-        self.assertEqual(argv[:8], ["-p", "--json", "--model", "opencode-go/deepseek-v4.1-flash", "--yolo",
-                                    "--no-extensions", "--offline", f"You are in a git worktree at {self.worktree}"])
+        self.assertEqual(argv[:10], ["-p", "--json", "--model", "opencode-go/deepseek-v4.1-flash", "--yolo",
+                                     "--no-extensions", "--offline", "--max-steps", "2000",
+                                     f"You are in a git worktree at {self.worktree}"])
         self.assertNotIn("--", argv, "Lunate 0.4.0 refuses the end-of-options marker")
         self.assertEqual((outcome.rc, outcome.stalled, outcome.session_id), (0, False, "s_20261115-033849-e698921a"))
         self.assertEqual(harness.last_text(self.state.root / "s.jsonl"), "done")
@@ -70,7 +73,7 @@ class LunateSessionTests(HarnessCase):
         self.fake_lunate()
         self.run_lunate(session_id="s_20261115-033849-e698921a")
         argv = (self.state.root / "scratch" / "lunate-home" / "argv").read_text().splitlines()
-        self.assertEqual(argv[7:9], ["--session", "s_20261115-033849-e698921a"])
+        self.assertEqual(argv[9:11], ["--session", "s_20261115-033849-e698921a"])
 
     def test_the_reaper_tells_a_lunate_session_apart_by_its_worktree(self) -> None:
         cmd = f"/x/tools/lunate-0.4.0/lunate -p --json --model m --yolo You are in a git worktree at {self.worktree}"
