@@ -101,12 +101,13 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    - **limits**: total WIP ≤ `wip_limit`, where WIP is the cards in flight — each open worker pull request plus
      each running worker, a worker and its own pull request counted once, leaving out parked cards with no worker
      running (they wait on a person, not on the lane) — and at most one card in flight per `area/*` label, where a
-     parked card's open pull request still holds its areas. A card without an area label has no area limit. A
+     parked card with no worker running holds no area either (a conflict it meets later is its rework's to
+     resolve by merging main). A card without an area label has no area limit. A
      `kind/bug` card skips the area limit; it still counts toward WIP and still waits on its blocked-by.
    - **parked cards**: a card is parked when its worker runs ended with no new commit three times in a row (new
      card or rework), or when one pull request has gone back to a worker three times, whatever the causes — the
      feeder parks it instead of starting a fourth rework. The feeder no longer starts or reworks a parked card, its
-     open pull request no longer counts toward WIP but keeps its areas occupied, the run that parked it says so once in a comment on the pull
+     open pull request no longer counts toward WIP or holds its areas, the run that parked it says so once in a comment on the pull
      request (on the issue if there is none), and the digest lists it. A new commit resets the idle-run count (and
      lifts an idle park) but not the rework rounds. Both counts are taken when the feeder launches a run, before
      anything that can fail, so a run whose setup keeps failing (a held worktree, a closed issue, a broken
