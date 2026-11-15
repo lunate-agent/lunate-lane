@@ -580,6 +580,46 @@ class DriveTests(DriveCase):
         self.assertEqual(self.dispatched[-1], False)
         self.assertIn("stalled", self.comments[0][1])
 
+    def test_a_stopped_session_posts_the_lanes_summary_not_its_raw_tail(self) -> None:
+        # the #884 shape: stopped mid-work, its last output a Python traceback, changes left uncommitted
+        tail = "Traceback (most recent call last): FileNotFoundError: No such file or directory: 'testdata/x.txt'"
+        with self.fake_session(stalled=True, dirty=True, text=tail):
+            self.assertEqual(worker.drive(self.cfg, 3, None), 1)
+        body = self.comments[-1][1]
+        self.assertNotIn("Traceback", body)
+        self.assertNotIn("FileNotFoundError", body)
+        self.assertIn("**Stopped by the lane** after 60s: it stalled or passed its time cap.", body)
+        self.assertIn("- Uncommitted changes: 1 path(s), kept in the card's worktree", body)
+        last = git(self.cfg.state / "worktrees" / "issue-3", "log", "-1", "--format=%h %s").strip()
+        self.assertIn(f"- Last commit: `{last}`", body)
+        self.assertIn("auto-merge is not armed", body)
+        log = (self.cfg.state / "logs" / "worker-3.log").read_text()
+        self.assertIn("its last output, not posted", log)
+        self.assertIn(tail, log)
+
+    def test_a_stopped_session_names_its_stop_reason_and_a_clean_worktree(self) -> None:
+        def run(cfg, *, worktree, log_path, **_):
+            git(worktree, "config", "user.email", "w@example.invalid")
+            git(worktree, "config", "user.name", "w")
+            (worktree / "fix.cs").write_text("fixed\n")
+            git(worktree, "add", "fix.cs")
+            git(worktree, "commit", "-q", "-m", "half done")
+            log_path.write_text('{"type":"message_end","message":{"content":[{"type":"text","text":"ls -la"}]}}\n')
+            return harness.Outcome(None, True, 2400, False, stop_reason="it passed its time cap of 2400s")
+
+        with mock.patch.object(harness, "run_session", side_effect=run):
+            self.assertEqual(worker.drive(self.cfg, 3, None), 1)
+        body = self.comments[-1][1]
+        self.assertIn("the lane stopped the session after 2400s: it passed its time cap of 2400s", body)
+        self.assertIn("- Uncommitted changes: none", body)
+        self.assertIn("half done`", body)
+        self.assertNotIn("ls -la", body)
+
+    def test_a_stopped_sessions_tail_never_parks_it_for_a_person(self) -> None:
+        with self.fake_session(stalled=True, text="NEEDS-PERSON: cat says so"):
+            worker.drive(self.cfg, 3, None)
+        self.assertNotIn("needs a person", self.comments[-1][1])
+
     def test_a_failed_early_open_does_not_stop_the_session_and_the_end_tries_again(self) -> None:
         """The real exception types dispatch raises: none of them may escape on_tick and kill the session."""
         for error in (open_pr.OpenPrError("GitHub refused POST /pulls (502)"),

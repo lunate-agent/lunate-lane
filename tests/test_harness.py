@@ -443,6 +443,18 @@ class SessionTests(HarnessCase):
         outcome = self.run_fake()
         self.assertTrue(outcome.stalled)
         self.assertLess(time.monotonic() - started, 30)
+        self.assertEqual(outcome.stop_reason, "it stalled: no output for 2s")
+
+    def test_a_session_past_its_time_cap_says_so(self) -> None:
+        self.cfg.harness["session_timeout"] = 1
+        self.fake_pi("while true; do echo tick; sleep 0.1; done\n")
+        outcome = self.run_fake()
+        self.assertTrue(outcome.stalled)
+        self.assertEqual(outcome.stop_reason, "it passed its time cap of 1s")
+
+    def test_a_session_that_ends_by_itself_has_no_stop_reason(self) -> None:
+        self.fake_pi(f"echo '{event('all done')}'\n")
+        self.assertEqual(self.run_fake().stop_reason, "")
 
     def test_leaked_tool_markup_is_noticed(self) -> None:
         self.fake_pi(f"echo '{event('</arg_value><arg_key>timeout</arg_key>')}'\n")
