@@ -260,6 +260,24 @@ def write_profile(cfg: common.Config, scratch: pathlib.Path, real_home: pathlib.
     return path
 
 
+PI, LUNATE = "pi", "lunate"
+HARNESSES = (PI, LUNATE)
+LUNATE_MARK = "lunate:"  # a Lunate session's record: it takes no lane-chosen id, so it is told apart by its worktree
+
+
+def lunate_argv(cfg: common.Config, model: str, resume: str | None, prompt: str) -> list:
+    """Lunate 0.4.0's unattended mode, flag for flag with Pi's (`argv`): print mode with the JSON event stream
+    (`-p --json`, docs/print.md, docs/json-events.md), the same model id, every tool approved (`--yolo` ↔ `--approve`),
+    no extensions (`--no-extensions`; no user `mcp.json` exists in its fresh LUNATE_HOME and an unattended run never
+    loads project MCP servers, ↔ `--no-mcp`), no update check. Its state — sessions included — lives under the
+    session's own LUNATE_HOME (↔ `--session-dir`); a later round continues with `--session <id>`, the id its first
+    run reported (↔ `--session-id`: Lunate cannot be given an id up front). No `--`: Lunate 0.4.0 refuses it, and a
+    brief never starts with `-`."""
+    return [str(pathlib.Path(cfg.harness.get("lunate_binary", "lunate")).expanduser()), "-p", "--json",
+            "--model", model, "--yolo", "--no-extensions", "--offline",
+            *(["--session", resume] if resume else []), prompt]
+
+
 def argv(cfg: common.Config, model: str, session_dir: pathlib.Path, session_id: str, prompt: str) -> list:
     provider, slash, model_id = model.partition("/")
     if not slash:
@@ -273,7 +291,7 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
                 log_path: pathlib.Path, extra_env: dict | None = None, on_tick: Callable[[], None] | None = None,
                 branch: str | None = None,
                 on_start: Callable[[int, str], None] | None = None, tick: float = 30.0,
-                session_id: str | None = None) -> Outcome:
+                session_id: str | None = None, harness: str = PI) -> Outcome:
     """Run Pi to completion in `worktree`, killing it when its event stream stalls or it passes the hard cap.
 
     Pi runs in a process group of its own; `on_start` gets that group and the session id, so a record can name
@@ -282,11 +300,25 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
     SIGTERM — kills that group before it propagates.
     """
     timeout, idle = int(cfg.harness["session_timeout"]), int(cfg.harness["stall_idle"])
-    # a given id continues that session (Pi's --session-id, same --session-dir): the build gate's fix round
-    session_id = session_id or f"{worktree.name}-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
+    if harness not in HARNESSES:
+        raise HarnessError(f"unknown harness {harness!r}; known: {', '.join(HARNESSES)}")
     env = session_env(cfg, scratch, extra_env)
-    command = sandboxed(argv(cfg, model, scratch / "sessions", session_id, prompt),
-                        write_profile(cfg, scratch, worktree=worktree, branch=branch))
+    if harness == LUNATE:
+        lunate_home = scratch / "lunate-home"
+        try:
+            lunate_home.mkdir(parents=True, exist_ok=True)
+        except OSError as exc:
+            raise HarnessError(f"the session's LUNATE_HOME {lunate_home} could not be prepared: {exc}") from exc
+        env["LUNATE_HOME"] = str(lunate_home)
+        record_id = LUNATE_MARK + str(worktree)  # what the reaper matches, with the binary, on the command line
+        command = sandboxed(lunate_argv(cfg, model, session_id, prompt),
+                            write_profile(cfg, scratch, worktree=worktree, branch=branch))
+    else:
+        # a given id continues that session (Pi's --session-id, same --session-dir): the build gate's fix round
+        session_id = session_id or f"{worktree.name}-{time.strftime('%Y%m%d-%H%M%S')}-{os.getpid()}"
+        record_id = session_id
+        command = sandboxed(argv(cfg, model, scratch / "sessions", session_id, prompt),
+                            write_profile(cfg, scratch, worktree=worktree, branch=branch))
     try:
         log_path.parent.mkdir(parents=True, exist_ok=True)
         out_file = log_path.open("ab")
@@ -307,7 +339,7 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
         size, stalled = -1, False
         try:
             if on_start is not None:
-                on_start(proc.pid, session_id)
+                on_start(proc.pid, record_id)
             while proc.poll() is None:
                 time.sleep(tick)
                 now = time.monotonic()
@@ -328,8 +360,50 @@ def run_session(cfg: common.Config, *, model: str, worktree: pathlib.Path, promp
             raise
         finally:
             pump.join(timeout=30)
-            scrub_dir(scratch / "sessions", known)  # Pi's own session files, which it writes itself
+            # the harness's own session files, which it writes itself: Pi's session dir, Lunate's whole state root
+            scrub_dir(scratch / ("lunate-home" if harness == LUNATE else "sessions"), known)
+    if harness == LUNATE:
+        session_id = lunate_session_id(log_path) or session_id
     return Outcome(proc.returncode, stalled, int(time.monotonic() - started), leaked_markup(log_path), session_id)
+
+
+def _events(log_path: pathlib.Path):
+    try:
+        lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError as exc:
+        raise HarnessError(f"the session log {log_path} could not be read: {exc}") from exc
+    for line in lines:
+        try:
+            event = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(event, dict):
+            yield event
+
+
+def lunate_session_id(log_path: pathlib.Path) -> str:
+    """The session id Lunate reported (`run_started`/`run_finished`), to continue it with `--session`; '' if none."""
+    found = ""
+    for event in _events(log_path):
+        if event.get("type") in ("run_started", "run_finished") and event.get("sessionId"):
+            found = str(event["sessionId"])
+    return found
+
+
+def session_spend(log_path: pathlib.Path) -> float | None:
+    """What a session cost in USD, from its transcript: Pi's assistant `message_end` usage cost, Lunate's
+    `usage_updated.costUsd`. None when the transcript prices nothing (Lunate 0.4.0 omits `costUsd` for some
+    catalog-priced models)."""
+    total, seen = 0.0, False
+    for event in _events(log_path):
+        if event.get("type") == "usage_updated" and isinstance(event.get("costUsd"), (int, float)):
+            total, seen = total + float(event["costUsd"]), True
+        elif event.get("type") == "message_end":
+            message = event.get("message") or {}
+            cost = ((message.get("usage") or {}).get("cost") or {}).get("total")
+            if message.get("role") == "assistant" and isinstance(cost, (int, float)):
+                total, seen = total + float(cost), True
+    return round(total, 6) if seen else None
 
 
 def _redacting_copy(source, out, known: tuple) -> None:
@@ -391,7 +465,7 @@ def _kill_group(proc: subprocess.Popen) -> None:
 
 
 def last_text(log_path: pathlib.Path) -> str:
-    """The last assistant text in a Pi JSON event log. An unreadable log raises; no message is ''."""
+    """The last assistant text in a Pi or Lunate JSON event log. An unreadable log raises; no message is ''."""
     try:
         lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError as exc:
@@ -402,10 +476,20 @@ def last_text(log_path: pathlib.Path) -> str:
             event = json.loads(line)
         except json.JSONDecodeError:
             continue
-        if isinstance(event, dict) and event.get("type") == "message_end":
+        if not isinstance(event, dict):
+            continue
+        if event.get("type") == "message_end":  # Pi
             for part in (event.get("message") or {}).get("content") or []:
                 if isinstance(part, dict) and part.get("type") == "text":
                     last = part.get("text") or ""
+        elif event.get("type") == "text_message_start":  # Lunate: a message's text arrives in content pieces
+            lunate_id, lunate_parts = event.get("messageId"), []
+        elif event.get("type") == "text_message_content":
+            if "lunate_parts" not in locals() or event.get("messageId") != lunate_id:
+                lunate_id, lunate_parts = event.get("messageId"), []
+            lunate_parts.append(str(event.get("text") or ""))
+            if "".join(lunate_parts).strip():
+                last = "".join(lunate_parts)
     return last
 
 
@@ -473,7 +557,13 @@ def reap_session(card: int, session: tuple | None, grace: float = 10.0) -> bool:
         return False
     session_pgid, session_id = session
     command = _command(session_pgid)
-    if command is None or not re.search(rf"--session-id {re.escape(session_id)}(\s|$)", command):
+    if command is None:
+        return False
+    if session_id.startswith(LUNATE_MARK):  # a Lunate session: its binary, in print mode, briefed with this worktree
+        worktree = session_id[len(LUNATE_MARK):]
+        if not (worktree and "lunate" in command and " -p " in f" {command} " and worktree in command):
+            return False
+    elif not re.search(rf"--session-id {re.escape(session_id)}(\s|$)", command):
         return False
     try:
         for sig, wait in ((signal.SIGTERM, grace), (signal.SIGKILL, grace)):
@@ -774,19 +864,20 @@ def _attempts(card: int) -> pathlib.Path:
 
 def _read_attempts(path: pathlib.Path) -> dict:
     if not path.exists():
-        return {"idle_runs": 0, "parked": False, "reason": "", "detail": "", "reworks": {}, "died": ""}
+        return {"idle_runs": 0, "parked": False, "reason": "", "detail": "", "reworks": {}, "died": "", "fallback": ""}
     try:
         data = json.loads(path.read_text())
         return {"idle_runs": int(data["idle_runs"]), "parked": bool(data["parked"]),
                 "reason": str(data.get("reason") or ""), "detail": str(data.get("detail") or ""),
                 "reworks": {str(int(k)): int(v) for k, v in (data.get("reworks") or {}).items()},
-                "died": str(data.get("died") or "")}
+                "died": str(data.get("died") or ""), "fallback": str(data.get("fallback") or "")}
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise StateError(f"the attempts record {path} could not be read: {exc}") from exc
 
 
 def _write_attempts(path: pathlib.Path, data: dict) -> None:
-    if not data["idle_runs"] and not data["parked"] and not data["reworks"] and not data["died"]:
+    if not data["idle_runs"] and not data["parked"] and not data["reworks"] and not data["died"] \
+            and not data.get("fallback"):
         try:
             path.unlink(missing_ok=True)
         except OSError as exc:
@@ -897,6 +988,51 @@ def parked_details() -> dict:
 def attempts(card: int) -> dict:
     """The card's attempts record as read: idle runs, rework rounds per pull request, parked, reason, detail."""
     return _read_attempts(_attempts(card))
+
+
+def note_fallback(card: int, reason: str) -> None:
+    """A Lunate session failed in setup or ended without a commit: the card's next attempt runs on Pi."""
+    path = _attempts(card)
+    data = _read_attempts(path)
+    data["fallback"] = str(reason)[:300]
+    _write_attempts(path, data)
+
+
+def take_fallback(card: int) -> str:
+    """The pending fallback reason, cleared as it is taken (one attempt on Pi), or ''."""
+    path = _attempts(card)
+    data = _read_attempts(path)
+    reason = data.get("fallback") or ""
+    if reason:
+        data["fallback"] = ""
+        _write_attempts(path, data)
+    return reason
+
+
+def _session_stats_path() -> pathlib.Path:
+    return common.state_dir() / "session-stats.jsonl"
+
+
+def note_session_stat(**record) -> None:
+    """One worker session, for the digest's per-harness line: harness, card, pull request, kind (new / rework /
+    review send-back), new commit or not, spend, exit code."""
+    line = json.dumps({"at": time.time(), **record}, sort_keys=True)
+    try:
+        with _session_stats_path().open("a", encoding="utf-8") as out:
+            out.write(line + "\n")
+    except OSError as exc:
+        raise StateError(f"the session statistics {_session_stats_path()} could not be written: {exc}") from exc
+
+
+def session_stats(since: float = 0.0) -> list[dict]:
+    path = _session_stats_path()
+    if not path.exists():
+        return []
+    try:
+        rows = [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except (OSError, ValueError) as exc:
+        raise StateError(f"the session statistics {path} could not be read: {exc}") from exc
+    return [row for row in rows if float(row.get("at") or 0) >= since]
 
 
 def unpark(card: int) -> bool:

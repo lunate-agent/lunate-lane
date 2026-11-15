@@ -35,7 +35,8 @@
     "credential_key": "OPENCODE_GO_API_KEY",
     "credential_env": "OPENCODE_API_KEY",
     "session_timeout": 5400,
-    "stall_idle": 1200, "build_gate": true
+    "stall_idle": 1200, "build_gate": true,
+    "lunate_binary": "~/.local/state/lunate-lane/tools/lunate-0.4.0/lunate", "lunate_label": "lane/harness-lunate"
   },
   "paths": {
     "checkout": "~/dev/lunate",
