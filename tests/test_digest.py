@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from scripts import common, digest, github  # noqa: E402
+from scripts import common, digest, github, harness  # noqa: E402
 from scripts.common import GhError  # noqa: E402
 from tests.helpers import REQUIRED, TempState, card, pull, review  # noqa: E402
 
@@ -73,6 +73,36 @@ class ComposeTests(unittest.TestCase):
         text = digest.compose(CFG, [], [], [], REQUIRED, NOW)
         for line in ("WIP 0 of 5", "Open PRs: none", "Stuck: none", "Parked cards: none", "Merged since yesterday: none"):
             self.assertIn(line, text)
+
+
+class ScratchTests(unittest.TestCase):
+    """#888: a session pulled three Podman machines into its scratch (~9 GB); the digest warns above 2 GB."""
+
+    def test_a_scratch_over_2_gb_is_a_warning_with_its_largest_parts(self) -> None:
+        large = [("issue-888", int(7.4 * 1024 ** 3), [("pd", int(2.8 * 1024 ** 3)), ("podhome", int(2.8 * 1024 ** 3)),
+                                                     ("h2", int(1.9 * 1024 ** 3))])]
+        text = digest.compose(CFG, [], [], [], REQUIRED, NOW, scratch=large)
+        self.assertIn("Scratch over 2.0 GB (1) — look before the disk fills:\n"
+                      "  WARNING issue-888: 7.4 GB on disk (largest: pd 2.8 GB, podhome 2.8 GB, h2 1.9 GB)", text)
+
+    def test_no_warning_when_every_scratch_is_small(self) -> None:
+        self.assertNotIn("Scratch over", digest.compose(CFG, [], [], [], REQUIRED, NOW, scratch=[]))
+
+    def test_the_size_is_what_is_on_disk_not_the_apparent_size(self) -> None:
+        state = TempState()
+        self.addCleanup(state.close)
+        big = state.cfg.state / "scratch" / "issue-1" / "pd" / "disk.raw"
+        big.parent.mkdir(parents=True)
+        with big.open("wb") as handle:  # a 100 GB sparse VM disk with 3 MB in it
+            handle.truncate(100 * 1024 ** 3)
+            handle.write(b"x" * 3 * 1024 ** 2)
+        (state.cfg.state / "scratch" / "issue-2").mkdir()
+        (state.cfg.state / "scratch" / "issue-2" / "f").write_bytes(b"y" * 4 * 1024 ** 2)
+        found = harness.large_scratch(state.cfg, limit=5 * 1024 ** 2)
+        self.assertEqual(found, [], "neither is over 5 MB on disk, whatever the sparse file's length")
+        found = harness.large_scratch(state.cfg, limit=2 * 1024 ** 2)
+        self.assertEqual([name for name, _, _ in found], ["issue-2", "issue-1"])
+        self.assertEqual(found[1][2][0][0], "pd")
 
 
 class ReadTests(unittest.TestCase):

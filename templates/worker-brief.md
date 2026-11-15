@@ -14,6 +14,9 @@ uses and say so in your final report.
   mistake with a new commit.
 - **The pull request number.** {{PR_LINE}}
 - Work only inside this worktree. Write temporary files under `$TMPDIR`, never `/tmp`.
+- **Never create a container VM**: no `podman machine`, `docker machine`, colima or lima. The sandbox refuses
+  them, and a VM image is gigabytes. A check that needs a container runtime is a maintainer step: say so in your
+  report and go on with the rest.
 - Stay inside the issue's acceptance. An unrelated improvement is a new issue, not a commit here.
 - No new NuGet packages. `CultureInfo.InvariantCulture` for anything formatted. Read `AGENTS.md` first.
 

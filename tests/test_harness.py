@@ -366,6 +366,34 @@ class WriteSandboxTests(HarnessCase):
         self.assertFalse((self.scratch / "lc").exists())
         self.assertFalse(marker.exists())
 
+    def test_no_container_vm_can_be_started_or_given_a_disk(self) -> None:
+        """#888's session made three Podman machines in its scratch (~9 GB). Run for real: a VM helper cannot be run
+        or copied under another name wherever it lies, and no machine state can be written under any HOME."""
+        for name in ("vfkit", "krunkit", "gvproxy", "qemu-system-aarch64", "limactl", "colima", "docker-machine"):
+            tool = self.scratch / "Cellar" / "podman" / "9.9" / "libexec" / name
+            tool.parent.mkdir(parents=True, exist_ok=True)
+            tool.write_bytes(pathlib.Path("/bin/echo").read_bytes())
+            tool.chmod(0o755)
+            with self.subTest(run=name):
+                done = subprocess.run(harness.sandboxed([str(tool), "ran"], self.sb), capture_output=True, text=True,
+                                      timeout=60)
+                self.assertNotEqual(done.stdout, "ran\n")
+            with self.subTest(copy=name):
+                copy = self.scratch / f"renamed-{name}"
+                subprocess.run(harness.sandboxed(["/bin/cp", str(tool), str(copy)], self.sb), capture_output=True,
+                               timeout=60)
+                self.assertFalse(copy.exists(), "a VM helper copied under another name could be run")
+        for home in (self.scratch / "pd", self.scratch / "podhome", self.wt):
+            for state in (".local/share/containers/podman/machine/applehv/disk.raw",
+                          ".config/containers/podman/machine/applehv/m.json", ".docker/machine/machines/x",
+                          ".lima/default/disk", ".colima/default/disk"):
+                with self.subTest(home=home.name, state=state):
+                    self.assertEqual(self.probe(home / state), "DENIED", state)
+        self.assertEqual(self.probe(self.scratch / "pd" / ".local/share/containers/storage/ok"), "WROTE",
+                         "only a VM's state is refused, not the rest of the session's HOME")
+        brief = (harness.common.ROOT / "templates" / "worker-brief.md").read_text()
+        self.assertIn("**Never create a container VM**: no `podman machine`, `docker machine`, colima or lima.", brief)
+
     def test_dotnet_build_and_test_and_pi_still_work_under_the_profile(self) -> None:
         import shutil
 

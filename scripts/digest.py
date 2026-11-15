@@ -201,11 +201,28 @@ def harness_lines(stats: list, stats_all: list, merged: list) -> list[str]:
     return lines
 
 
+def _gb(size: int) -> str:
+    return f"{size / 1024 ** 3:.1f} GB"
+
+
+def scratch_lines(large: list) -> list[str]:
+    """A warning per scratch directory above 2 GB on disk — a session that pulled a VM image or a toolchain into its
+    scratch (#888: three Podman machines, ~9 GB)."""
+    if not large:
+        return []
+    lines = [f"Scratch over {_gb(harness.SCRATCH_WARN)} ({len(large)}) — look before the disk fills:"]
+    for name, size, parts in large:
+        top = ", ".join(f"{part} {_gb(part_size)}" for part, part_size in parts)
+        lines.append(f"  WARNING {name}: {_gb(size)} on disk" + (f" (largest: {top})" if top else ""))
+    return lines
+
+
 def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required: frozenset,
             now: datetime.datetime, parked: dict | None = None, running: dict | None = None,
             kept: dict | None = None, decisions: list | None = None, died: dict | None = None,
             requeued: dict | None = None, queue_events: list | None = None, flag_errors: dict | None = None,
-            codeowners: tuple = (), stats: list | None = None, stats_all: list | None = None) -> str:
+            codeowners: tuple = (), stats: list | None = None, stats_all: list | None = None,
+            scratch: list | None = None) -> str:
     running = running or {}
     parked = parked or {}
     flight = in_flight(cfg, pulls, running, frozenset(parked))
@@ -222,6 +239,7 @@ def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required
     lines.append(f"Stuck ({len(held) + len(dead)}):" if held or dead else "Stuck: none")
     lines += [f"  #{number} — {why}" for number, why in held]
     lines += [f"  card #{card} — worker died: {_short(why, WAIT_REASON + 40)}" for card, why in dead]
+    lines += scratch_lines(scratch or [])
     lines.append(f"Parked cards ({len(parked)}) — `scripts/lane.py unpark <card> --reason '...'` to unpark:" if parked
                  else "Parked cards: none")
     for number in sorted(parked):
@@ -252,7 +270,7 @@ def tick() -> None:
                       {p.number: harness.requeues(p.number, p.head) for p in pulls if p.ejection is not None},
                       harness.queue_events((now - datetime.timedelta(days=1)).timestamp()), parked.errors(),
                       github.codeowners(cfg), harness.session_stats((now - datetime.timedelta(days=1)).timestamp()),
-                      harness.session_stats())
+                      harness.session_stats(), harness.large_scratch(cfg))
     latest = common.state_dir("digest") / "latest.md"
     try:
         latest.write_text(message + "\n", encoding="utf-8")
