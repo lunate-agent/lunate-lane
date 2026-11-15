@@ -176,23 +176,29 @@ class SandboxTests(HarnessCase):
         import os
         name = f"/private/tmp/MSBuild{os.getpid()}9"
         hexname = f"/private/tmp/{os.getpid():08x}" + "0123456789abcdef01234567"[:24]  # dotnet test's pipe shape
+        guid = f"/private/tmp/{os.getpid():08x}-2e57-474c-be42-4babf1bb8ac5"  # dotnet format's build-host pipe
         others = ["/private/tmp/other-file", f"/private/tmp/MSBuild{os.getpid()}x", "/private/tmp/MSBuild",
                   f"/private/tmp/xMSBuild{os.getpid()}", f"/private/tmp/MSBuild{os.getpid()}/inside",
                   "/private/tmp/" + "g" * 32, "/private/tmp/" + "Z" * 32,  # (A-F would match: paths compare case-insensitively) hexname + "0", hexname[:-1],
-                  hexname + "/inside"]
-        for path in [name, *others]:
+                  hexname + "/inside",
+                  guid + "0", guid[:-1], guid.replace("-", "_"), guid.replace("-2e57-", "-2e5g-"), guid + "/inside",
+                  f"/private/tmp/x{os.getpid():07x}-2e57-474c-be42-4babf1bb8ac5"]
+        for path in [name, guid, *others]:
             self.addCleanup(lambda p=path: os.path.exists(p) and os.unlink(p))
         script = ("import os, sys\nfor p in sys.argv[1:]:\n"
                   "    try:\n        open(p, 'w').close(); os.unlink(p); print('ok', p)\n"
                   "    except OSError as e:\n        print('denied', p, e.errno)\n")
         self.addCleanup(lambda: os.path.exists(hexname) and os.unlink(hexname))
-        done = self.run_in(["/usr/bin/python3", "-c", script, name, hexname, *others])
+        done = self.run_in(["/usr/bin/python3", "-c", script, name, hexname, guid, *others])
         lines = done.stdout.splitlines()
-        self.assertEqual(lines[:2], [f"ok {name}", f"ok {hexname}"])
-        for path, line in zip(others, lines[2:]):
+        self.assertEqual(lines[:3], [f"ok {name}", f"ok {hexname}", f"ok {guid}"])
+        self.assertEqual(len(lines), 3 + len(others))
+        for path, line in zip(others, lines[3:]):
             self.assertTrue(line.startswith(f"denied {path}"), line)
         self.assertIn('(regex #"^/private/tmp/MSBuild[0-9]+$")', self.profile().read_text())
         self.assertIn('(regex #"^/private/tmp/' + "[0-9a-f]" * 32 + '$")', self.profile().read_text())
+        self.assertIn('(regex #"^/private/tmp/' + "[0-9a-f]" * 8 + "-" + "[0-9a-f]" * 4 + "-" + "[0-9a-f]" * 4 + "-"
+                      + "[0-9a-f]" * 4 + "-" + "[0-9a-f]" * 12 + '$")', self.profile().read_text())
 
     def test_a_sandboxed_child_cannot_read_or_write_any_denied_directory(self) -> None:
         allowed = self.state.root / "allowed.txt"
