@@ -5,9 +5,10 @@ be tested without a network.
 
     order:  pins first, then `kind/bug`, then cards other open issues wait on, then oldest first
     room:   total WIP (cards with an open worker PR or a running worker, less parked cards with no worker
-            running) below the limit, and no other card of the same area in flight — a parked card still holds
-            its area. A `kind/bug` card skips the area rule (it still counts toward WIP, still waits on its
-            blocked-by, and still holds its area for the cards after it)
+            running) below the limit, and no other card of the same area in flight — a parked card with no worker
+            running holds neither a WIP slot nor its area: it waits on a person, and a conflict it meets later is
+            handled by its rework merging main. A `kind/bug` card skips the area rule (it still counts toward WIP,
+            still waits on its blocked-by, and still holds its area for the cards after it)
     skip:   an issue labelled `kind/decision` is a question for a maintainer, not work: never started. Blocking is
             GitHub's native blocked-by and nothing else
     rework: a worker PR whose reviewer requested changes on its current head goes back to a worker on its own
@@ -110,8 +111,9 @@ def plan(*, cards: list[Card], open_pulls: list[Pull], worker_pulls: list[Pull],
 
     `open_pulls` is every open pull request (any author): a card one of them carries or closes is never started.
     `worker_pulls` are the worker identity's open pull requests, in full. `running` maps the card of each
-    running worker to its areas. A `parked` card is neither reworked nor started; it does not count toward WIP
-    (unless its worker still runs), but its open pull request keeps its areas occupied.
+    running worker to its areas. A `parked` card is neither reworked nor started; unless its worker still runs, it
+    counts toward neither WIP nor the area rule — otherwise a parked card waiting on another card of its own area
+    would hold that card back for good.
     """
     by_number = {card.number: card for card in cards}
 
@@ -120,11 +122,11 @@ def plan(*, cards: list[Card], open_pulls: list[Pull], worker_pulls: list[Pull],
         return areas_of(p.labels | own, rules.area_prefix)
 
     notes: list[str] = []
-    # a parked card waits on a person, not on the lane: it frees its WIP slot, but its area stays occupied
-    in_flight = {("card", p.card) if p.card is not None else ("pr", p.number) for p in worker_pulls
-                 if p.card not in parked or p.card in running}
+    # a parked card waits on a person, not on the lane: it frees its WIP slot and its areas
+    active = [p for p in worker_pulls if p.card not in parked or p.card in running]
+    in_flight = {("card", p.card) if p.card is not None else ("pr", p.number) for p in active}
     in_flight |= {("card", card) for card in running}
-    occupied = frozenset().union(*(pull_areas(p) for p in worker_pulls), *running.values())
+    occupied = frozenset().union(*(pull_areas(p) for p in active), *running.values())
     taken = {n for p in open_pulls for n in (p.card, *p.cards) if n is not None} | set(running)
 
     reasons = {p.number: rework_reason(p, rules.reviewer_app, required, reran) for p in worker_pulls}

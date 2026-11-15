@@ -245,10 +245,27 @@ class ParkedTests(unittest.TestCase):
         self.assertEqual(started(launches), [(5, None)], "a parked card waits on a person, not on the lane")
         self.assertIn("#101 needs rework (changes requested) but card #1 is parked — left for a person", notes)
 
-    def test_a_parked_card_keeps_its_area_occupied(self) -> None:
+    def test_a_parked_card_frees_its_area(self) -> None:
         held = pull(101, 1, labels=["area/cli"])
         launches, notes = plan([card(5, "area/cli"), card(6, "area/tui")], worker_pulls=[held], parked={1})
-        self.assertEqual(started(launches), [(6, None)])
+        self.assertEqual(started(launches), [(5, None), (6, None)])
+        self.assertFalse([n for n in notes if "already in flight" in n])
+
+    def test_a_parked_card_waiting_on_a_card_of_its_own_area_does_not_hold_it_back(self) -> None:
+        # the #875/#627 shape: #627 is parked in area/core with its pull request #861 open, and is to be
+        # unparked once #875 lands; #875 is pinned and in area/core too. Before, #875 was skipped every tick.
+        parked_pr = pull(861, 627, labels=["lane/parked"])
+        backlog = [card(627, "area/core", "kind/feature", "lane/parked"), card(875, "area/core", "kind/feature"),
+                   card(869, "area/core", "kind/feature")]
+        launches, notes = plan(backlog, worker_pulls=[parked_pr], pins=(875,), parked={627})
+        self.assertEqual(started(launches), [(875, None)], "#875 starts; #869 then waits on #875, not on #627")
+        self.assertIn("#869 skipped — area/core already in flight", notes)
+
+    def test_a_parked_card_whose_worker_still_runs_keeps_its_area(self) -> None:
+        held = pull(101, 1, labels=["area/cli"])
+        launches, notes = plan([card(5, "area/cli")], worker_pulls=[held], parked={1},
+                               running={1: frozenset({"area/cli"})})
+        self.assertEqual(started(launches), [])
         self.assertIn("#5 skipped — area/cli already in flight", notes)
 
     def test_a_parked_card_whose_worker_still_runs_counts(self) -> None:
