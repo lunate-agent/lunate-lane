@@ -35,8 +35,13 @@
     "credential_key": "OPENCODE_GO_API_KEY",
     "credential_env": "OPENCODE_API_KEY",
     "session_timeout": 5400,
-    "stall_idle": 1200, "build_gate": true,
-    "lunate_binary": "~/.local/state/lunate-lane/tools/lunate-0.4.0/lunate", "lunate_label": "lane/harness-lunate"
+    "stall_idle": 1200,
+    "build_gate": true,
+    "lunate_binary": "~/.local/state/lunate-lane/tools/lunate-main-16f9e25e914a/lunate",
+    "lunate_label": "lane/harness-lunate",
+    "lunate_commit": "16f9e25e914a9bc74da028ad0337666137ad0279",
+    "lunate_sha256": "045cbc329075431251f96c6cc34879f5c35cde50ccf33f6a4cd7e248c0f30581",
+    "lunate_max_steps": 2000
   },
   "paths": {
     "checkout": "~/dev/lunate",

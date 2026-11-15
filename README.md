@@ -221,10 +221,12 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    MSBuild puts them in /tmp, not TMPDIR, and with them denied every build waited 5 minutes for nodes that
    could not connect. `dotnet test`'s IPC pipe, `/private/tmp/<32 hex>`, is allowed the same way (denied, it
    crashed). Nothing else in /tmp is writable.
-   **Two harnesses.** Pi is the default; a card labelled `lane/harness-lunate` runs on Lunate 0.4.0
-   (`harness.lunate_binary`), in its unattended mode, mapped flag for flag: `-p --json` (↔ `--print --mode json`),
+   **Two harnesses.** Pi is the default; a card labelled `lane/harness-lunate` runs on Lunate — a
+   pinned build of a main commit (`harness.lunate_binary`, `lunate_commit`, `lunate_sha256`; a session never
+   starts on a binary whose sha256 differs, and that refusal is a setup failure) — in its unattended mode, mapped flag for flag: `-p --json` (↔ `--print --mode json`),
    the same model id, `--yolo` (↔ `--approve`), `--no-extensions` (no user `mcp.json` exists in its fresh state
-   root and unattended runs never load project MCP servers, ↔ `--no-mcp`), `--offline`; its state root
+   root and unattended runs never load project MCP servers, ↔ `--no-mcp`), `--offline`, `--max-steps 2000` (`harness.lunate_max_steps`; Pi has no step limit, so
+   the ceiling sits above what the 5400 s time cap allows and the time cap stays what stops a session); its state root
    `LUNATE_HOME` in the session's scratch (↔ `--session-dir`), continued with `--session <id>` as reported in
    `run_started` (↔ `--session-id`). Same sandbox, same environment, the key only as `OPENCODE_API_KEY`, the
    same line-by-line transcript redaction and a scrub of `LUNATE_HOME` when it stops. A Lunate session that fails
@@ -234,6 +236,11 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    `GIT_CONFIG_KEY_<n>` (#871), `costUsd` for this model (#872), the bash guard inside a sandbox (#873). Every
    session is recorded (`<state>/session-stats.jsonl`), and the digest has a line per harness: sessions,
    merges, rework rounds per merge, idle runs, send-back rate, spend.
+   **Updating the Lunate build is a deliberate step**, never automatic: `lane.py lunate-pin <commit>` refuses a
+   commit that is not on `origin/main`, checks it out detached under `<state>/tools/src/`, runs the release
+   workflow's `dotnet publish` (osx-arm64, single file) there under the session sandbox with no model key, checks
+   that the built binary's `--version` names the commit, copies it to `<state>/tools/lunate-main-<sha12>/lunate`
+   and writes the three keys into lane.json — which lands through a lane pull request like any other change.
    **Before every push the branch is built** (`harness.build_gate`, on). Every project holding a file the branch changes — the nearest
    `.csproj` above it, test projects under `tests/` included — is built with `dotnet build -c Release`, in the
    session's sandbox and environment without the model key. Compile errors (`file(line,col): error CS0103: …`)

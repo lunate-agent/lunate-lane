@@ -5,6 +5,7 @@
     .venv/bin/python scripts/lane.py unpark 794 --reason "decided in #820"   # unparked, both counts cleared
     .venv/bin/python scripts/lane.py rereview 820                   # review again at its head, under today's brief
     .venv/bin/python scripts/lane.py rereview --all-open            # every open worker pull request, in turn
+    .venv/bin/python scripts/lane.py lunate-pin 16f9e25e9           # publish that main commit for the Lunate harness
 
 Park and unpark take the feeder's lock, so they never interleave with a tick (a busy lock is a refusal: try again
 in a minute). Unpark refuses while a worker runs the card. Both need a --reason, and both write a line to
@@ -26,7 +27,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from scripts import common, github, harness, parked, review  # noqa: E402
+from scripts import common, github, harness, lunate_pin, parked, review  # noqa: E402
 from scripts.common import LaneError, LockBusy  # noqa: E402
 
 JOB = "lane"
@@ -171,6 +172,8 @@ def main(argv=None) -> int:
     again = sub.add_parser("rereview")
     again.add_argument("pr", type=int, nargs="*")
     again.add_argument("--all-open", action="store_true")
+    sub.add_parser("lunate-pin", help="publish a main commit of lunate in the sandbox and pin it in lane.json"
+                   ).add_argument("commit")
     args = parser.parse_args(argv)
     if args.command == "rereview" and bool(args.pr) == args.all_open:
         parser.error("rereview takes pull request numbers or --all-open, not both or neither")
@@ -179,6 +182,10 @@ def main(argv=None) -> int:
             print(status(args.card))
         elif args.command == "rereview":
             print(rereview(args.pr, args.all_open))
+        elif args.command == "lunate-pin":
+            done = lunate_pin.pin(common.config(), args.commit)
+            print(f"pinned {done['version']} ({done['commit'][:12]}) at {done['binary']}, sha256 {done['sha256']}\n"
+                  f"lane.json at {common.CONFIG_PATH} is updated — land it through a lane pull request")
         elif args.command == "park":
             print(park(args.card, args.reason))
         else:
