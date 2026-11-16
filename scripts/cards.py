@@ -9,7 +9,9 @@ be tested without a network.
             running holds neither a WIP slot nor its area: it waits on a person, and a conflict it meets later is
             handled by its rework merging main. A `kind/bug` card skips the area rule (it still counts toward WIP,
             still waits on its blocked-by, and still holds its area for the cards after it)
-    skip:   an issue labelled `kind/decision` is a question for a maintainer, not work: never started. Blocking is
+    skip:   an issue labelled `kind/decision` is a question for a maintainer, not work: never started; an issue
+            labelled `kind/umbrella` only groups other cards: never started, and a pull request that carries it is
+            never reworked (#192 started the moment its last blocker closed, and its PR #917 collided with #910). Blocking is
             GitHub's native blocked-by and nothing else
     rework: a worker PR whose reviewer requested changes on its current head goes back to a worker on its own
             branch, before any new card, and does not add to WIP — its card is already in flight; so does a
@@ -52,6 +54,7 @@ class Rules:
     bug_label: str
     area_prefix: str
     decision_label: str = "kind/decision"
+    umbrella_label: str = "kind/umbrella"
 
 
 def load_pins(path: pathlib.Path) -> tuple:
@@ -134,9 +137,15 @@ def plan(*, cards: list[Card], open_pulls: list[Pull], worker_pulls: list[Pull],
         if reasons[p.number] == ORPHANED and p.waits_on and p.card not in running and p.card not in parked:
             reasons[p.number] = None
             notes.append(f"#{p.number} is a draft and card #{p.card} {waits_line(p.waits_on)} — resumes when they close")
+    umbrellas = {card.number for card in cards if rules.umbrella_label in card.labels}
+    for p in worker_pulls:
+        if p.card in umbrellas and reasons[p.number] and p.card not in parked:
+            notes.append(f"#{p.number} needs rework ({reasons[p.number]}) but card #{p.card} is an umbrella — "
+                         "never reworked, left for a person")
     launches = [Launch(p.card, p.number, pull_areas(p), reasons[p.number])
                 for p in sorted(worker_pulls, key=lambda p: p.number)
-                if p.card is not None and p.card not in running and p.card not in parked and reasons[p.number]]
+                if p.card is not None and p.card not in running and p.card not in parked
+                and p.card not in umbrellas and reasons[p.number]]
     for p in worker_pulls:
         if p.card is None and reasons[p.number]:
             notes.append(f"#{p.number} needs rework ({reasons[p.number]}) but carries no card — left for the orchestrator")
@@ -149,7 +158,7 @@ def plan(*, cards: list[Card], open_pulls: list[Pull], worker_pulls: list[Pull],
             notes.append(f"WIP {wip} of {rules.wip_limit} — no new card")
             break
         areas = areas_of(card.labels, rules.area_prefix)
-        if card.number in taken or rules.decision_label in card.labels:
+        if card.number in taken or rules.decision_label in card.labels or rules.umbrella_label in card.labels:
             continue
         if card.number in parked:
             notes.append(f"#{card.number} is parked — left for a person")

@@ -27,6 +27,7 @@
   "labels": {
     "bug": "kind/bug",
     "decision": "kind/decision",
+    "umbrella": "kind/umbrella",
     "area_prefix": "area/"
   },
   "harness": {

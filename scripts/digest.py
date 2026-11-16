@@ -217,6 +217,21 @@ def scratch_lines(large: list) -> list[str]:
     return lines
 
 
+def umbrella_lines(cfg: common.Config, cards: list) -> list[str]:
+    """The milestone's umbrella cards, which the feeder never starts, each with its linked cards still open (open
+    blockers and open sub-issues): an umbrella is done by hand once that count is zero."""
+    umbrellas = sorted((c for c in cards if cfg.umbrella_label in c.labels), key=lambda c: c.number)
+    if not umbrellas:
+        return []
+    lines = [f"Umbrellas ({len(umbrellas)}) — never started by the lane:"]
+    for c in umbrellas:
+        linked = sorted(set(c.blocked_by) | set(c.sub_issues))
+        what = (f"{len(linked)} linked card(s) open: " + ", ".join(f"#{n}" for n in linked)) if linked \
+            else "no linked card open — ready to close by hand"
+        lines.append(f"  #{c.number} {c.title[:50]} — {what}")
+    return lines
+
+
 def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required: frozenset,
             now: datetime.datetime, parked: dict | None = None, running: dict | None = None,
             kept: dict | None = None, decisions: list | None = None, died: dict | None = None,
@@ -244,6 +259,7 @@ def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required
                  else "Parked cards: none")
     for number in sorted(parked):
         lines.append(f"  #{number} — {parked_line(parked[number])}")
+    lines += umbrella_lines(cfg, cards)
     events = queue_events or []
     lines.append(f"Merge queue since yesterday ({len(events)}):" if events else "Merge queue since yesterday: nothing")
     lines += [f"  {line}" for line in events]

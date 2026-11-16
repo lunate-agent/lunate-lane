@@ -92,6 +92,10 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      GitHub's native blocked-by is the only blocking mechanism, there is no blocking label; so is a card any open
      pull request (any author) already carries or closes. An issue labelled **`kind/decision`** (`labels.decision`)
      is a question for a maintainer, not work: it is never started, and the digest lists it under "Waiting on you".
+     An issue labelled **`kind/umbrella`** (`labels.umbrella`) only groups other cards (by blocked-by or as
+     sub-issues): it is never started, even once its last blocker closes, and a worker pull request that carries it
+     is never reworked (#192 started the moment its last blocker closed; its PR #917 collided with #910). The digest
+     lists each with its linked cards still open.
      A pull request whose card has an open blocked-by issue (a slice started before its predecessor — S3 #820 and
      S4 #825 before S1 #818) is **not reviewed, not armed and not enqueued**: the worker leaves it unarmed at its
      finish, the feeder turns auto-merge off on one already armed, and the digest shows it as "waits on #n". Once the
@@ -307,7 +311,8 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    pull request with its state; what is stuck and why (a worker pull request that is red, conflicting or out of
    the merge queue for a real failure, "stuck in queue" after two infra re-enqueues at one head, any pull request
    open for more than a day, and a card whose last worker run failed by name before its session could end —
-   "worker died: <reason>", also in `lane.py status`); the parked cards and why; **Merge queue since yesterday**
+   "worker died: <reason>", also in `lane.py status`); the parked cards and why; the umbrella cards, each with how
+   many linked cards (open blockers and open sub-issues) are still open; **Merge queue since yesterday**
    ("re-enqueued #n (infra)", "rework #n (queue conflict)", "rework #n (queue failure: <job>)", from
    `<state>/queue/events.jsonl`); and what merged since yesterday, with titles.
 
