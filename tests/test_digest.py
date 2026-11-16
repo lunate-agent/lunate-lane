@@ -75,6 +75,25 @@ class ComposeTests(unittest.TestCase):
             self.assertIn(line, text)
 
 
+class UmbrellaDigestTests(unittest.TestCase):
+    def test_umbrellas_are_listed_with_their_open_linked_cards(self) -> None:
+        umbrellas = [card(378, "kind/umbrella", title="TUI customization", sub_issues=(424, 423)),
+                     card(192, "kind/umbrella", title=".NET 11 and the latest C# language version", blocked_by=(919,),
+                          sub_issues=(919,)),
+                     card(500, "kind/umbrella", title="Done already")]
+        text = digest.compose(CFG, [*umbrellas, card(7)], [], [], REQUIRED, NOW)
+        self.assertIn("Umbrellas (3) — never started by the lane:\n"
+                      "  #192 .NET 11 and the latest C# language version — 1 linked card(s) open: #919\n"
+                      "  #378 TUI customization — 2 linked card(s) open: #423, #424\n"
+                      "  #500 Done already — no linked card open — ready to close by hand", text)
+
+    def test_no_umbrella_line_without_umbrellas(self) -> None:
+        self.assertNotIn("Umbrellas", digest.compose(CFG, [card(7)], [], [], REQUIRED, NOW))
+
+    def test_the_lane_config_names_the_umbrella_label(self) -> None:
+        self.assertEqual(common.load_config().umbrella_label, "kind/umbrella")
+
+
 class ScratchTests(unittest.TestCase):
     """#888: a session pulled three Podman machines into its scratch (~9 GB); the digest warns above 2 GB."""
 

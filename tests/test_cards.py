@@ -283,6 +283,30 @@ class ParkedTests(unittest.TestCase):
         self.assertIn("WIP 2 of 2 — no new card", notes)
 
 
+class UmbrellaTests(unittest.TestCase):
+    """A `kind/umbrella` issue only groups other cards; the lane never starts or reworks it."""
+
+    def test_an_umbrella_whose_blockers_all_closed_is_not_started(self) -> None:
+        # #192's shape: the .NET 11 umbrella, in area/core, its last blocker just closed (blocked_by is empty), and
+        # a plain card behind it in the same area — which starts instead
+        umbrella = card(192, "kind/umbrella", "enhancement", "area/core", created="2026-01-01T00:00:00Z")
+        launches, notes = plan([umbrella, card(910, "area/core")])
+        self.assertEqual(started(launches), [(910, None)], "#192 never starts, and holds no area or WIP")
+        self.assertFalse([n for n in notes if "#192" in n], notes)
+
+    def test_a_pinned_bug_umbrella_with_sub_issues_is_still_skipped(self) -> None:
+        launches, _ = plan([card(378, "kind/umbrella", "kind/bug", sub_issues=(423,))], pins=(378,))
+        self.assertEqual(started(launches), [])
+
+    def test_a_pull_request_carrying_an_umbrella_is_never_reworked(self) -> None:
+        # #917, opened for #192: even sent back by the reviewer it stays with a person
+        sent_back = pull(917, 192, reviews=[review("CHANGES_REQUESTED")])
+        launches, notes = plan([card(192, "kind/umbrella")], worker_pulls=[sent_back])
+        self.assertEqual(started(launches), [])
+        self.assertIn("#917 needs rework (changes requested) but card #192 is an umbrella — never reworked, left "
+                      "for a person", notes)
+
+
 class DecisionTests(unittest.TestCase):
     """A `kind/decision` issue asks a maintainer to decide; it is not work, whatever its order."""
 

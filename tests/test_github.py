@@ -906,3 +906,33 @@ class NewerDecisionTests(unittest.TestCase):
         with mock.patch.object(common, "graphql", return_value=self.answer(body, [], more=True)):
             with self.assertRaises(GhError):
                 github.decision_times(CFG, 9)
+
+
+class MilestoneCardsTests(unittest.TestCase):
+    """The card query reads open sub-issues too: an umbrella links its cards that way as well as by blocked-by."""
+
+    def node(self, **over):
+        empty = {"pageInfo": {"hasNextPage": False}, "nodes": []}
+        node = {"number": 378, "title": "TUI customization", "createdAt": "2026-01-01T00:00:00Z",
+                "labels": {"pageInfo": {"hasNextPage": False}, "nodes": [{"name": "kind/umbrella"}]},
+                "blockedBy": empty, "blocking": empty,
+                "subIssues": {"pageInfo": {"hasNextPage": False},
+                              "nodes": [{"number": 423, "state": "CLOSED"}, {"number": 424, "state": "OPEN"}]}}
+        node.update(over)
+        return node
+
+    def cards(self, node):
+        cfg = common.config()
+        milestones = {"repository": {"milestones": {"nodes": [{"title": cfg.milestone, "number": 7}]}}}
+        with mock.patch.object(common, "graphql", return_value=milestones), \
+                mock.patch.object(github, "_paged", return_value=[node]):
+            return github.milestone_cards(cfg)
+
+    def test_open_sub_issues_are_read(self) -> None:
+        (umbrella,) = self.cards(self.node())
+        self.assertEqual(umbrella.sub_issues, (424,))
+        self.assertIn("kind/umbrella", umbrella.labels)
+
+    def test_more_sub_issues_than_a_page_is_refused(self) -> None:
+        with self.assertRaisesRegex(GhError, "sub-issues has more entries than one page"):
+            self.cards(self.node(subIssues={"pageInfo": {"hasNextPage": True}, "nodes": []}))

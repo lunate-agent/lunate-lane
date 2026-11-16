@@ -41,6 +41,7 @@ class Card:
     created: str
     blocked_by: tuple = ()  # open issues this one waits on
     blocking: tuple = ()  # open issues waiting on this one
+    sub_issues: tuple = ()  # open sub-issues (an umbrella's other way of linking its cards)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -183,7 +184,8 @@ milestones(first:20,query:$q){nodes{title number}}}}"""
 ISSUES = """query($owner:String!,$name:String!,$m:String!,$cursor:String){repository(owner:$owner,name:$name){
 issues(first:50,after:$cursor,states:OPEN,filterBy:{milestoneNumber:$m},orderBy:{field:CREATED_AT,direction:ASC}){
 pageInfo{hasNextPage endCursor} nodes{number title createdAt labels(first:50){pageInfo{hasNextPage} nodes{name}}
-blockedBy(first:50){pageInfo{hasNextPage} nodes{number state}} blocking(first:50){pageInfo{hasNextPage} nodes{number state}}}}}}"""
+blockedBy(first:50){pageInfo{hasNextPage} nodes{number state}} blocking(first:50){pageInfo{hasNextPage} nodes{number state}}
+subIssues(first:50){pageInfo{hasNextPage} nodes{number state}}}}}}"""
 
 
 def milestone_cards(cfg: common.Config) -> list[Card]:
@@ -204,6 +206,8 @@ def milestone_cards(cfg: common.Config) -> list[Card]:
                              if i.get("state") == "OPEN"),
             blocking=tuple(i["number"] for i in _complete(node["blocking"], f"{what}'s dependents")
                            if i.get("state") == "OPEN"),
+            sub_issues=tuple(i["number"] for i in _complete(node.get("subIssues") or {}, f"{what}'s sub-issues")
+                             if i.get("state") == "OPEN"),
         ))
     return cards
 

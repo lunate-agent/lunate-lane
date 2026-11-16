@@ -143,10 +143,11 @@ class TempState:
         shutil.rmtree(self.root, ignore_errors=True)
 
 
-def card(number: int, *labels: str, created: str | None = None, blocked_by=(), blocking=()) -> github.Card:
-    return github.Card(number=number, title=f"card {number}", labels=frozenset(labels),
+def card(number: int, *labels: str, created: str | None = None, blocked_by=(), blocking=(), sub_issues=(),
+         title: str | None = None) -> github.Card:
+    return github.Card(number=number, title=title or f"card {number}", labels=frozenset(labels),
                        created=created or f"2026-11-{number % 28 + 1:02d}T00:00:00Z",
-                       blocked_by=tuple(blocked_by), blocking=tuple(blocking))
+                       blocked_by=tuple(blocked_by), blocking=tuple(blocking), sub_issues=tuple(sub_issues))
 
 
 def pull(number: int, card_number: int | None = None, *, author: str = "lunate-worker", head: str = "h1",
