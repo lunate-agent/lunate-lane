@@ -16,7 +16,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from scripts import cleanup, common, github, harness, parked  # noqa: E402
+from scripts import cleanup, common, github, harness, parked, release  # noqa: E402
 from scripts.common import GhError  # noqa: E402
 
 JOB = "digest"
@@ -238,11 +238,12 @@ def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required
             kept: dict | None = None, decisions: list | None = None, died: dict | None = None,
             requeued: dict | None = None, queue_events: list | None = None, flag_errors: dict | None = None,
             codeowners: tuple = (), stats: list | None = None, stats_all: list | None = None,
-            scratch: list | None = None) -> str:
+            scratch: list | None = None, releasing: str = "") -> str:
     running = running or {}
     parked = parked or {}
     flight = in_flight(cfg, pulls, running, frozenset(parked))
     lines = [f"Lunate lane — {now:%Y-%m-%d}",
+             *([f"Release: {releasing}"] if releasing else []),  # an open `lane.py release`: where it stands
              *waiting_on_you(cfg, decisions or [], pulls, required, parked, merged, cards, flag_errors, codeowners),
              f"{cfg.milestone}: {len(cards)} open issue(s)",
              f"WIP {len(flight)} of {cfg.wip_limit}" + (": " + ", ".join(flight) if flight else "")]
@@ -287,7 +288,8 @@ def tick() -> None:
                       {p.number: harness.requeues(p.number, p.head) for p in pulls if p.ejection is not None},
                       harness.queue_events((now - datetime.timedelta(days=1)).timestamp()), parked.errors(),
                       github.codeowners(cfg), harness.session_stats((now - datetime.timedelta(days=1)).timestamp()),
-                      harness.session_stats(), harness.large_scratch(cfg))
+                      harness.session_stats(), harness.large_scratch(cfg),
+                      release.status() if release.intent() else "")
     latest = common.state_dir("digest") / "latest.md"
     try:
         latest.write_text(message + "\n", encoding="utf-8")

@@ -18,7 +18,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from scripts import cards, cleanup, common, github, harness, identity, open_pr, parked, worker  # noqa: E402
+from scripts import cards, cleanup, common, github, harness, identity, open_pr, parked, release, worker  # noqa: E402
 from scripts.common import LaneError  # noqa: E402
 
 JOB = "feed"
@@ -60,9 +60,11 @@ def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[
              and p.card not in parked and (p.number, p.head) not in reran
              and github.failure_kind(p, required) == "infra"]
     enqueue = [p for p in worker_pulls if p.card not in running and p.card not in parked
+               and not github.release_owned(p.branch)  # the release job lands those, after its own gate
                and github.needs_enqueue(p, required, cfg.reviewer_app)]
     disarm = [p for p in worker_pulls if p.state == "OPEN" and p.auto_merge and (p.waits_on or p.decided_after)]
     ejected = [p for p in worker_pulls if p.card not in running and p.card not in parked and p.state == "OPEN"
+               and not github.release_owned(p.branch)
                and not p.draft and not p.in_queue and not p.waits_on and not p.disarmed_by and not p.dequeued_by
                and p.ejection is not None and p.ejection.kind == "infra" and p.review_decision == "APPROVED"
                and github.verdict(p, cfg.reviewer_app) == "APPROVED"]
@@ -311,6 +313,8 @@ def tick(dry_run: bool = False) -> None:
                            "it is reworked first, then reviewed and enqueued again"))
     # after the launches, so a cleanup that fails never holds work back — it still fails the tick, by name
     cleanup.tidy(cfg, JOB, github.open_pulls(cfg), harness.running_workers(), dry_run)
+    if not dry_run:  # last: a release that is blocked fails the tick by name, after everything else ran
+        release.tick(cfg, JOB)
 
 
 def main() -> int:

@@ -532,16 +532,20 @@ def hold(token: str, number: int, node_id: str | None) -> None:
                           f"{'on' if after['armed'] else 'off'} — nothing was pushed")
 
 
-def _settle(token: str, number: int, node_id: str | None, arm: bool, base: str, head: str | None = None) -> dict:
+def _settle(token: str, number: int, node_id: str | None, arm: bool, base: str, head: str | None = None,
+            ready_only: bool = False) -> dict:
     """After the push: a clean finish is marked ready, then armed with the queue's method; anything else stays a
-    draft with auto-merge off. Then report what GitHub says — never the intent (#5, #6).
+    draft with auto-merge off. `ready_only` marks it ready (with a ready CI run) but never arms it: a release pull
+    request waits for the maintainer's approval, and the release job enqueues it (lunate-lane#21). Then report what
+    GitHub says — never the intent (#5, #6).
 
     The method GitHub records is reported but not required to match: with a merge queue required, GitHub has
     recorded MERGE on a pull request armed with SQUASH (#813), while the queue landed every merge as one squash
     commit. What lands is checked on the merged commit instead (`github.landed_parents`).
     """
     queue, ready = None, ""
-    if arm:
+    arm = arm and not ready_only
+    if arm or ready_only:
         if head:
             wait_for_head(token, number, node_id, head)  # ready_for_review must carry the pushed head
         if pr_state(token, node_id)["draft"]:
@@ -551,13 +555,15 @@ def _settle(token: str, number: int, node_id: str | None, arm: bool, base: str, 
             mark_ready(token, node_id)  # type: ignore[arg-type]
             if head:
                 ready = ensure_ready_run(token, number, node_id, head, draft_runs)  # type: ignore[arg-type]
-        queue = queue_method(token, base)
-        arm_auto_merge(token, node_id, queue)
+        if arm:
+            queue = queue_method(token, base)
+            arm_auto_merge(token, node_id, queue)
     else:
         hold(token, number, node_id)
     state = pr_state(token, node_id)
-    if state["armed"] != arm or state["draft"] == arm:
-        raise OpenPrError(f"#{number} should be {'ready and armed' if arm else 'a draft, not armed'} but GitHub reads "
+    wanted = "ready and armed" if arm else "ready, not armed" if ready_only else "a draft, not armed"
+    if state["armed"] != arm or state["draft"] == (arm or ready_only):
+        raise OpenPrError(f"#{number} should be {wanted} but GitHub reads "
                           f"it as {'a draft' if state['draft'] else 'ready'}, auto-merge "
                           f"{'on' if state['armed'] else 'off'}")
     return {"auto_merge": "armed" if state["armed"] else "not armed", "draft": state["draft"],
@@ -589,7 +595,7 @@ def _owned(existing: dict, branch: str) -> tuple[int, str]:
 
 
 def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = "main", arm: bool = True,
-            known: tuple = ()) -> dict:
+            known: tuple = (), ready_only: bool = False) -> dict:
     """Open or reuse the pull request for `branch`, as the worker identity — always opened as a draft (#5).
 
     `arm=True` is a clean finish: push, mark ready, then arm auto-merge. `arm=False` keeps it a draft with
@@ -614,12 +620,12 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
     existing = find_open_pr(branch, token)
     if existing:
         number, author = _owned(existing, branch)
-        if not arm:
+        if not arm and not ready_only:
             hold(token, number, existing.get("node_id"))
         # a re-dispatch usually carries new commits, and reuse must deliver them
         push(repo, branch, token)
         return {"number": number, "url": existing.get("html_url"), "author": author,
-                **_settle(token, number, existing.get("node_id"), arm, base, head), "reused": True}
+                **_settle(token, number, existing.get("node_id"), arm, base, head, ready_only), "reused": True}
 
     push(repo, branch, token)
     try:
@@ -631,7 +637,7 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
         if raced:
             number, author = _owned(raced, branch)
             return {"number": number, "url": raced.get("html_url"), "author": author,
-                    **_settle(token, number, raced.get("node_id"), arm, base, head), "reused": True}
+                    **_settle(token, number, raced.get("node_id"), arm, base, head, ready_only), "reused": True}
         raise
 
     number = pull.get("number")
@@ -648,7 +654,7 @@ def open_pr(repo: pathlib.Path, branch: str, title: str, body: str, base: str = 
         raise OpenPrError(f"the pull request came back authored by {author!r}, not {WORKER_LOGIN}{closed}")
 
     return {"number": number, "url": pull.get("html_url"), "author": author,
-            **_settle(token, number, pull.get("node_id"), arm, base, head), "reused": False}
+            **_settle(token, number, pull.get("node_id"), arm, base, head, ready_only), "reused": False}
 
 
 def disarm(number: int, node_id: str) -> None:
