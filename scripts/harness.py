@@ -33,6 +33,10 @@ from typing import Callable
 from scripts import common, secret_scan
 from scripts.common import LaneError, StateError
 
+# every session's PATH, whoever started the lane (`harness.path` in lane.json overrides it): never the caller's own.
+# #59: `lane.py rereview` run by an orchestrator whose PATH put a bundled node v22 first gave Pi's
+# `#!/usr/bin/env node` that node, which dies by SIGSEGV setting `process.title` under the session sandbox; cron's
+# PATH resolves Homebrew's node, which does not
 DEFAULT_PATH = "/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 TOOL_MARKUP = ("</arg_value>", "</arg_key>", "<arg_value>", "<arg_key>")
 # What Pi needs from the real home, copied into the session's own. Not auth.json: the credential is in the env.
@@ -134,9 +138,26 @@ def session_home(cfg: common.Config, scratch: pathlib.Path, real_home: pathlib.P
     return home
 
 
+def session_path(cfg: common.Config) -> str:
+    """The PATH every session runs with: the same from cron, a terminal or an orchestrator (#59)."""
+    return str(cfg.harness.get("path") or DEFAULT_PATH)
+
+
+def describe_rc(rc: int | None) -> str:
+    """A session's exit, readable: `rc 1`, or `killed by SIGSEGV (rc -11)` for a death by signal."""
+    if rc is not None and rc < 0:
+        try:
+            name = signal.Signals(-rc).name
+        except ValueError:
+            name = f"signal {-rc}"
+        return f"killed by {name} (rc {rc})"
+    return f"rc {rc}"
+
+
 def session_env(cfg: common.Config, scratch: pathlib.Path, extra: dict | None = None,
                 real_home: pathlib.Path | None = None, fresh_home: bool = True) -> dict:
-    """The whole environment a session gets — nothing inherited beyond PATH, and a HOME of its own. `fresh_home`
+    """The whole environment a session gets — nothing inherited, not even PATH (the lane's own, #59), and a HOME of
+    its own. `fresh_home`
     False keeps the session's HOME as it is (the build gate runs beside a session and must not wipe its home)."""
     real_home = real_home or pathlib.Path.home()
     nogh = scratch / "gh-config"
@@ -144,7 +165,7 @@ def session_env(cfg: common.Config, scratch: pathlib.Path, extra: dict | None = 
         nogh.mkdir(parents=True, exist_ok=True)
     except OSError as exc:
         raise HarnessError(f"the session's scratch {scratch} could not be prepared: {exc}") from exc
-    path = os.environ.get("PATH") or DEFAULT_PATH
+    path = session_path(cfg)
     home = session_home(cfg, scratch, real_home) if fresh_home else scratch / "home"
     if not fresh_home:
         try:
@@ -936,13 +957,18 @@ def note_queue_event(line: str) -> None:
         raise StateError(f"the queue events {path} could not be written: {exc}") from exc
 
 
-# --- attempts: a card is parked after IDLE_RUN_LIMIT runs with no new commit, or after REWORK_LIMIT rework rounds
-#     on one pull request (#9). `scripts/lane.py unpark <card> --reason ...` unparks it and clears both counts.
+# --- attempts: a card is parked after IDLE_RUN_LIMIT runs with no new commit, after REWORK_LIMIT rework rounds
+#     on one pull request (#9) — a round is one the reviewer asked for, a request for changes at the head (#58) —
+#     or after FIX_LIMIT reworks for anything else (a conflict, a red check, a queue failure, an orphaned draft, a
+#     Decision): those a worker resolves unaided, so they do not spend the review budget, but they are still capped
+#     so a branch that keeps pushing red commits is not relaunched forever. `scripts/lane.py unpark <card>
+#     --reason ...` unparks it and clears every count.
 #     The feeder keeps last tick's parked set (`<state>/parked-seen.json`) and the cards the lane itself unparked
 #     since (`<state>/unparked.json`): a park that vanished any other way was lifted by hand, and is logged.
 
 IDLE_RUN_LIMIT = 3
 REWORK_LIMIT = 3
+FIX_LIMIT = 6
 
 
 def _attempts(card: int) -> pathlib.Path:
@@ -951,20 +977,22 @@ def _attempts(card: int) -> pathlib.Path:
 
 def _read_attempts(path: pathlib.Path) -> dict:
     if not path.exists():
-        return {"idle_runs": 0, "parked": False, "reason": "", "detail": "", "reworks": {}, "died": "", "fallback": ""}
+        return {"idle_runs": 0, "parked": False, "reason": "", "detail": "", "reworks": {}, "fixes": {}, "died": "",
+                "fallback": ""}
     try:
         data = json.loads(path.read_text())
         return {"idle_runs": int(data["idle_runs"]), "parked": bool(data["parked"]),
                 "reason": str(data.get("reason") or ""), "detail": str(data.get("detail") or ""),
                 "reworks": {str(int(k)): int(v) for k, v in (data.get("reworks") or {}).items()},
+                "fixes": {str(int(k)): int(v) for k, v in (data.get("fixes") or {}).items()},
                 "died": str(data.get("died") or ""), "fallback": str(data.get("fallback") or "")}
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise StateError(f"the attempts record {path} could not be read: {exc}") from exc
 
 
 def _write_attempts(path: pathlib.Path, data: dict) -> None:
-    if not data["idle_runs"] and not data["parked"] and not data["reworks"] and not data["died"] \
-            and not data.get("fallback"):
+    if not data["idle_runs"] and not data["parked"] and not data["reworks"] and not data.get("fixes") \
+            and not data["died"] and not data.get("fallback"):
         try:
             path.unlink(missing_ok=True)
         except OSError as exc:
@@ -1014,17 +1042,23 @@ def note_run(card: int, new_commit: bool) -> tuple[int, bool]:
     return data["idle_runs"], parked_now
 
 
-def note_rework(card: int, pr: int) -> int:
-    """Count one rework round started on this pull request; returns the rounds so far, this one included."""
+def note_rework(card: int, pr: int, review: bool = True) -> int:
+    """Count one rework started on this pull request — a review round when the reviewer asked for changes
+    (`review`), a fix otherwise; returns that count so far, this one included."""
     path = _attempts(card)
     data = _read_attempts(path)
-    data["reworks"][str(int(pr))] = data["reworks"].get(str(int(pr)), 0) + 1
+    kind = "reworks" if review else "fixes"
+    data[kind][str(int(pr))] = data[kind].get(str(int(pr)), 0) + 1
     _write_attempts(path, data)
-    return data["reworks"][str(int(pr))]
+    return data[kind][str(int(pr))]
 
 
 def rework_rounds(card: int, pr: int) -> int:
     return _read_attempts(_attempts(card))["reworks"].get(str(int(pr)), 0)
+
+
+def fix_rounds(card: int, pr: int) -> int:
+    return _read_attempts(_attempts(card))["fixes"].get(str(int(pr)), 0)
 
 
 DIED_LIMIT = 160
@@ -1051,8 +1085,8 @@ def died_info() -> dict:
 
 
 def park(card: int, reason: str, detail: str = "") -> bool:
-    """Park the card for `reason` ('idle', 'reworks', 'secret', 'person', 'ready'), with the words a person reads
-    in the digest (`detail`, for 'person' and 'ready'). Returns whether it was parked just now."""
+    """Park the card for `reason` ('idle', 'reworks', 'fixes', 'secret', 'person', 'ready'), with the words a person
+    reads in the digest (`detail`, for 'person' and 'ready'). Returns whether it was parked just now."""
     path = _attempts(card)
     data = _read_attempts(path)
     if data["parked"]:

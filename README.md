@@ -79,7 +79,7 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      pull request that is a draft, with no worker running its card and the card not parked — what an unclean
      finish leaves, which nothing else would ever touch (#816). Its brief quotes the last run's reason; if the
      branch's work is already complete the run may end with no new commit and the pull request is marked ready.
-     It counts an idle run and a rework round at launch like any rework, so it is parked, with a comment, at
+     It counts an idle run and a fix rework at launch like any rework, so it is parked, with a comment, at
      either cap. The running workers are read before the pull requests, so a worker finishing between the reads
      never makes its own pull request look orphaned. A request for changes whose body says **`NEEDS-PERSON:
      <reason>`** is not reworked: the card is parked at once with that reason, and the comment and the digest
@@ -109,16 +109,19 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
      resolve by merging main). A card without an area label has no area limit. A
      `kind/bug` card skips the area limit; it still counts toward WIP and still waits on its blocked-by.
    - **parked cards**: a card is parked when its worker runs ended with no new commit three times in a row (new
-     card or rework), or when one pull request has gone back to a worker three times, whatever the causes — the
-     feeder parks it instead of starting a fourth rework. The feeder no longer starts or reworks a parked card, its
+     card or rework), when the reviewer has requested changes on one pull request's head three times (rework
+     rounds), or when one pull request has gone back to a worker six times for anything else — a conflict with
+     main, a red required check, a queue conflict or failure, an orphaned draft, a newer Decision (fix reworks, #58:
+     a worker resolves those unaided, so they do not spend the review budget, but a branch that keeps pushing red
+     commits is still stopped). The feeder parks it instead of starting the next one. The feeder no longer starts or reworks a parked card, its
      open pull request no longer counts toward WIP or holds its areas, the run that parked it says so once in a comment on the pull
      request (on the issue if there is none), and the digest lists it. A new commit resets the idle-run count (and
-     lifts an idle park) but not the rework rounds. Both counts are taken when the feeder launches a run, before
+     lifts an idle park) but not the rework rounds or fix reworks. Every count is taken when the feeder launches a run, before
      anything that can fail, so a run whose setup keeps failing (a held worktree, a closed issue, a broken
      checkout) still reaches its cap and is parked on the next tick instead of relaunching forever. Use
      `scripts/lane.py` rather than touching `<state>/attempts/` by hand:
 
-         .venv/bin/python scripts/lane.py status 794                  # worker, idle runs, rework rounds, parked and why
+         .venv/bin/python scripts/lane.py status 794                  # worker, idle runs, rework rounds, fix reworks, parked and why
          .venv/bin/python scripts/lane.py park 794 --reason "waits on the API decision"
          .venv/bin/python scripts/lane.py unpark 794 --reason "decided in #820"   # unparked, both counts cleared
          .venv/bin/python scripts/lane.py rereview 820                # review again at its head, today's brief
@@ -350,13 +353,18 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
   session does not start. It is exported to the session as `harness.credential_env` and never logged or put in
   argv. (The old lane's `~/.hermes/.env` is no longer read.)
 - State: `~/.local/state/lunate-lane/`: `locks/`, `logs/`, `workers/` (one pid file per running worker, with
-  its session's process group), `attempts/` (idle-run and rework counts, and parks — read and changed with `scripts/lane.py`),
+  its session's process group), `attempts/` (idle-run, rework and fix counts, and parks — read and changed with `scripts/lane.py`),
   `worktrees/`, `reviews/`, `reviewing/` (one record per running review), `scratch/` (each session's TMPDIR and its own `home/`), `sessions/` (Pi event logs),
   `digest/`.
 - The session's HOME: `<scratch>/home`, wiped and reseeded before every session. It gets copies of
   `~/.pi/agent/settings.json`, `models-store.json` and `bin/fd` (not `auth.json`; the credential is passed in the
   environment), and a `.gitconfig` holding only the checkout's `user.name` and `user.email`. `NUGET_PACKAGES`
   points at the real `~/.nuget/packages` cache.
+- The session's PATH: the lane's own, `/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin` (with
+  `~/.dotnet` first when it exists), or `harness.path` in `lane.json` — never the caller's. A session must run the
+  same `pi` and `node` from cron, a terminal or an orchestrator: `lane.py rereview 927`, run by an orchestrator whose
+  PATH put a bundled node v22 first, died twice by SIGSEGV (`process.title` under the sandbox, #59). A session that
+  dies by a signal is reported by name (`killed by SIGSEGV (rc -11)`), and `rereview` then exits non-zero.
 
 ## Tests
 
@@ -383,7 +391,7 @@ the orchestrating user's crontab (`crontab -e`):
     5-59/10 * * * * cd $LANE && .venv/bin/python scripts/review.py >> $HOME/.local/state/lunate-lane/logs/cron.out 2>&1
     0 7 * * *     cd $LANE && .venv/bin/python scripts/digest.py
 
-`PATH` must reach `gh`, `git` and `pi`. The digest prints its message on stdout, so whatever runs that line
+`PATH` must reach `gh` and `git`; sessions get their own PATH, see above. The digest prints its message on stdout, so whatever runs that line
 delivers it (cron mail, or the orchestrator's own scheduler capturing stdout). Before the first real tick, run
 `feed.py --dry-run` and `review.py --dry-run` by hand and read what they would do.
 

@@ -248,14 +248,21 @@ def tick(dry_run: bool = False) -> None:
             common.log(JOB, f"parked card #{launch.card} — the review of #{launch.rework_pr} says NEEDS-PERSON: "
                             f"{launch.person}")
             continue
-        rounds = harness.rework_rounds(launch.card, launch.rework_pr) if launch.rework_pr else 0
-        if rounds >= harness.REWORK_LIMIT:  # the cap holds whatever the cause (#9)
+        # only the reviewer's request for changes spends a review round (#58); a conflict, a red check, a queue
+        # failure, an orphaned draft or a Decision is a fix, with its own larger cap
+        review = launch.reason == "changes requested"
+        kind, limit, words = (("reworks", harness.REWORK_LIMIT, "rework rounds") if review else
+                              ("fixes", harness.FIX_LIMIT, "fix reworks (conflicts, red checks, unfinished drafts)"))
+        rounds = 0
+        if launch.rework_pr:
+            rounds = (harness.rework_rounds if review else harness.fix_rounds)(launch.card, launch.rework_pr)
+        if rounds >= limit:
             if dry_run:
-                common.log(JOB, f"would park card #{launch.card} instead of a {what} — {rounds} rework rounds")
+                common.log(JOB, f"would park card #{launch.card} instead of a {what} — {rounds} {words}")
                 continue
-            if harness.park(launch.card, "reworks"):
-                worker.park(cfg, launch.card, launch.rework_pr, "reworks", rounds)
-            common.log(JOB, f"parked card #{launch.card} after {rounds} rework rounds on #{launch.rework_pr}")
+            if harness.park(launch.card, kind):
+                worker.park(cfg, launch.card, launch.rework_pr, kind, rounds)
+            common.log(JOB, f"parked card #{launch.card} after {rounds} {words} on #{launch.rework_pr}")
             continue
         idle = harness.idle_runs(launch.card)
         if idle >= harness.IDLE_RUN_LIMIT:  # runs that never got far enough to finish count too
@@ -273,7 +280,7 @@ def tick(dry_run: bool = False) -> None:
         if launch.rework_pr:
             # counted before anything that can fail — the worker's own setup included — so a rework that keeps
             # failing early still reaches the cap and is parked, instead of relaunching every tick
-            harness.note_rework(launch.card, launch.rework_pr)
+            harness.note_rework(launch.card, launch.rework_pr, review)
         pid = start(cfg, launch)
         common.log(JOB, f"started {what} (pid {pid})")
         if launch.rework_pr and (launch.reason == github.QUEUE_CONFLICT or launch.reason.startswith(github.QUEUE_FAILURE)):

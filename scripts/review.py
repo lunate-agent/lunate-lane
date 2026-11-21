@@ -296,7 +296,12 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str, str]:
                                       on_start=lambda pgid, sid: harness.note_review_session(p.number, driver, pgid, sid))
         log_refused(p.number, refused)
         if outcome.stalled or outcome.rc != 0:
-            raise ReviewError(f"the review session did not finish cleanly (rc {outcome.rc}, stalled {outcome.stalled})")
+            if outcome.stalled:
+                raise ReviewError(f"the review session did not finish cleanly ({harness.describe_rc(outcome.rc)}, "
+                                  f"{outcome.stop_reason or 'stalled'})")
+            crashed = (f" — the session's own process crashed (its PATH: {harness.session_path(cfg)}; a crash "
+                       "report is in ~/Library/Logs/DiagnosticReports)") if (outcome.rc or 0) < 0 else ""
+            raise ReviewError(f"the review session did not finish cleanly ({harness.describe_rc(outcome.rc)}){crashed}")
         return (*read_verdict(verdict_file), model)
     finally:
         remove_review_worktree(cfg, p.number)

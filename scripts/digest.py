@@ -63,6 +63,7 @@ def age_days(created: str, now: datetime.datetime) -> float:
 
 
 PARKED_WHY = {"idle": "runs with no new commit", "reworks": "rework rounds used up",
+              "fixes": "fix reworks used up",
               "secret": "secret-shaped text in a push", "person": "needs a person",
               "ready": "CI never ran it as ready", "manual": "parked by hand"}
 
