@@ -936,3 +936,47 @@ class MilestoneCardsTests(unittest.TestCase):
     def test_more_sub_issues_than_a_page_is_refused(self) -> None:
         with self.assertRaisesRegex(GhError, "sub-issues has more entries than one page"):
             self.cards(self.node(subIssues={"pageInfo": {"hasNextPage": True}, "nodes": []}))
+
+
+class ClosedBlockerTests(unittest.TestCase):
+    """#60: a blocked-by edge to a closed issue stays on GitHub until someone removes it; it gates nothing. Card A
+    waits on card B; B closes with the edge still there; A is startable, its pull request is no longer waiting, and
+    the NEEDS-PERSON merge-first check reads no open blocker."""
+
+    def node(self, state):
+        empty = {"pageInfo": {"hasNextPage": False}, "nodes": []}
+        return {"number": 860, "title": "A", "createdAt": "2026-11-14T00:00:00Z",
+                "labels": empty, "blocking": empty, "subIssues": empty,
+                "blockedBy": {"pageInfo": {"hasNextPage": False}, "nodes": [{"number": 624, "state": state}]}}
+
+    def plan(self, state):
+        from scripts import cards
+
+        cfg = common.config()
+        milestones = {"repository": {"milestones": {"nodes": [{"title": cfg.milestone, "number": 7}]}}}
+        with mock.patch.object(common, "graphql", return_value=milestones), \
+                mock.patch.object(github, "_paged", return_value=[self.node(state)]):
+            read = github.milestone_cards(cfg)
+        rules = cards.Rules(wip_limit=5, worker_app="lunate-worker", reviewer_app="lunate-reviewer",
+                            bug_label="kind/bug", area_prefix="area/")
+        return cards.plan(cards=read, open_pulls=[], worker_pulls=[], running={}, rules=rules)
+
+    def test_a_card_whose_only_blocker_closed_is_started(self) -> None:
+        launches, notes = self.plan("OPEN")
+        self.assertEqual((launches, notes), ([], ["#860 waits on #624"]))
+        launches, notes = self.plan("CLOSED")
+        self.assertEqual([launch.card for launch in launches], [860])
+        self.assertFalse(any("waits on" in note for note in notes))
+
+    def test_its_pull_request_no_longer_waits(self) -> None:
+        issue = {"number": 860, "blockedBy": {"pageInfo": {"hasNextPage": False},
+                                              "nodes": [{"number": 624, "state": "CLOSED"}]}}
+        self.assertEqual(github._waits_on({"headRefName": "wt/issue-860"}, [issue], 961), ())
+        issue["blockedBy"]["nodes"].append({"number": 625, "state": "OPEN"})
+        self.assertEqual(github._waits_on({"headRefName": "wt/issue-860"}, [issue], 961), (625,))
+
+    def test_open_blockers_leaves_out_a_closed_one(self) -> None:
+        answer = {"repository": {"issue": {"blockedBy": {"pageInfo": {"hasNextPage": False},
+                                                         "nodes": [{"number": 624, "state": "CLOSED"}]}}}}
+        with mock.patch.object(common, "graphql", return_value=answer):
+            self.assertEqual(github.open_blockers(CFG, 860), ())
