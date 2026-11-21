@@ -6,6 +6,8 @@
     .venv/bin/python scripts/lane.py rereview 820                   # review again at its head, under today's brief
     .venv/bin/python scripts/lane.py rereview --all-open            # every open worker pull request, in turn
     .venv/bin/python scripts/lane.py lunate-pin 16f9e25e9           # publish that main commit for the Lunate harness
+    .venv/bin/python scripts/lane.py release 0.5.0                  # release it: one deterministic sequence (#21)
+    .venv/bin/python scripts/lane.py release --status               # where the open release is, what it waits on
 
 Park and unpark take the feeder's lock, so they never interleave with a tick (a busy lock is a refusal: try again
 in a minute). Unpark refuses while a worker runs the card. Both need a --reason, and both write a line to
@@ -27,7 +29,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from scripts import common, github, harness, lunate_pin, parked, review  # noqa: E402
+from scripts import common, github, harness, lunate_pin, parked, release, review  # noqa: E402
 from scripts.common import LaneError, LockBusy  # noqa: E402
 
 JOB = "lane"
@@ -167,6 +169,35 @@ def rereview(numbers: list[int], all_open: bool) -> str:
     return "\n".join(out) or "no open worker pull requests"
 
 
+def ship_release(args) -> int:
+    """`lane.py release`: record the intent (or read it), then advance it under the release lock. Exits 1 when it is
+    blocked on something a person must fix, and says what."""
+    if args.status:
+        print(release.status())
+        return 0
+    who = actor()
+    if args.abandon:
+        if not args.abandon.strip():
+            raise LaneError("--abandon needs a reason")
+        common.log(JOB, f"release abandoned — by {who} — reason: {args.abandon}")
+        print(release.abandon(args.abandon))
+        return 0
+    cfg = common.config()
+    harness.exit_on_signals()
+    with common.job_lock(release.JOB):
+        data = release.start(args.version, who, args.allow_open)
+        if args.resmoke:
+            data.pop("smoke_dispatched", None)
+            release._write(data)
+        common.log(JOB, f"release {data['version']} — by {who}" + (" (allow open)" if data.get("allow_open") else ""))
+        try:
+            print(release.advance(cfg))
+        except release.Blocked as exc:
+            print(f"release {data['version']}{FAILED}{exc}")
+            return 1
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="lane.py", description=__doc__.splitlines()[0])
     sub = parser.add_subparsers(dest="command", required=True)
@@ -180,7 +211,16 @@ def main(argv=None) -> int:
     again.add_argument("--all-open", action="store_true")
     sub.add_parser("lunate-pin", help="publish a main commit of lunate in the sandbox and pin it in lane.json"
                    ).add_argument("commit")
+    ship = sub.add_parser("release", help="release a version: preflight, release PR, the maintainer's approval, "
+                                          "merge, tag, publish, channels, smoke, milestone")
+    ship.add_argument("version", nargs="?")
+    ship.add_argument("--status", action="store_true")
+    ship.add_argument("--allow-open", action="store_true", help="release though the milestone has open issues")
+    ship.add_argument("--resmoke", action="store_true", help="dispatch the smoke again on the next advance")
+    ship.add_argument("--abandon", metavar="REASON", help="drop the open release record (nothing on GitHub is undone)")
     args = parser.parse_args(argv)
+    if args.command == "release" and not (args.version or args.status or args.abandon):
+        parser.error("release takes a version, --status or --abandon REASON")
     if args.command == "rereview" and bool(args.pr) == args.all_open:
         parser.error("rereview takes pull request numbers or --all-open, not both or neither")
     try:
@@ -195,12 +235,14 @@ def main(argv=None) -> int:
             done = lunate_pin.pin(common.config(), args.commit)
             print(f"pinned {done['version']} ({done['commit'][:12]}) at {done['binary']}, sha256 {done['sha256']}\n"
                   f"lane.json at {common.CONFIG_PATH} is updated — land it through a lane pull request")
+        elif args.command == "release":
+            return ship_release(args)
         elif args.command == "park":
             print(park(args.card, args.reason))
         else:
             print(unpark(args.card, args.reason))
     except LockBusy as exc:
-        job = "a review run" if args.command == "rereview" else "a feeder tick"
+        job = {"rereview": "a review run", "release": "a release run"}.get(args.command, "a feeder tick")
         print(f"refused — {job} is running ({exc}); try again in a minute", file=sys.stderr)
         return 1
     except LaneError as exc:

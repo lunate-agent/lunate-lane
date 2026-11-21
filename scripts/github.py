@@ -1020,11 +1020,18 @@ def ready_run(r: CiRun, draft_runs: frozenset) -> bool:
 
 
 RELEASE_BRANCH = re.compile(r"^release/[^/]+$")
+CHANNELS_BRANCH = re.compile(r"^chore/[^/]+-channels$")
+
+
+def release_owned(branch: str) -> bool:
+    """A pull request the release job opens and lands itself (`scripts/release.py`): the release pull request,
+    which waits for the maintainer's approval, and its channels pull request. The feeder never enqueues either."""
+    return bool(RELEASE_BRANCH.match(branch or "") or CHANNELS_BRANCH.match(branch or ""))
 RELEASE_TITLE = "chore(release)"
 
 
 def is_release(branch: str, title: str) -> bool:
     """A release pull request — branch `release/<version>`, or a title starting with `chore(release)` — may edit
-    CHANGELOG.md (it collects the fragments) and needs no `changes/<n>.md` of its own. Who opens and merges
-    release pull requests is not decided yet; this is only the exception in both briefs."""
+    CHANGELOG.md (it collects the fragments) and needs no `changes/<n>.md` of its own. The release job opens and
+    lands it (`scripts/release.py`, lunate-lane#21); this is also the exception in both briefs."""
     return bool(RELEASE_BRANCH.match(branch or "")) or (title or "").strip().startswith(RELEASE_TITLE)

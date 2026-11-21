@@ -327,6 +327,7 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
 | `scripts/common.py` | Config loading, the named errors, `gh`/`git`/GraphQL/REST calls that raise instead of returning empty, templates, logs, locks, the cron job wrapper. |
 | `scripts/github.py` | Reads of GitHub's state: milestone cards with dependency edges, open pull requests, one pull request in full, required checks; the check and review verdicts. Each check is judged by its newest check run on the head (a rerun attempt or a newer workflow run wins), and stays pending while a run or attempt of its workflow that will produce it again is queued or in progress — so the draft run's deliberate `ci-ok` failure stops counting once the pull request is ready. |
 | `scripts/cards.py` | The feeder's pure decisions: order, pins, WIP and area limits, rework before new work. |
+| `scripts/release.py` | `lane.py release`: preflight, release pull request, the maintainer's approval, merge, tag, published release, channels, mirror, smoke, milestone (#21). |
 | `scripts/harness.py` | Runs one headless Pi session under `sandbox-exec` with a minimal environment, its own HOME and a stall watchdog; the running-worker records, orphan clean-up, idle-run and rework counts. |
 | `scripts/secret_scan.py` | The secret shapes, shared by the report scan and the scan before every push. |
 | `scripts/feed.py` | Cron entry point: the feeder. |
@@ -365,6 +366,45 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
   same `pi` and `node` from cron, a terminal or an orchestrator: `lane.py rereview 927`, run by an orchestrator whose
   PATH put a bundled node v22 first, died twice by SIGSEGV (`process.title` under the sandbox, #59). A session that
   dies by a signal is reported by name (`killed by SIGSEGV (rc -11)`), and `rereview` then exits non-zero.
+
+## Releases
+
+A release is one deterministic command (`scripts/release.py`, lunate-lane#21). A maintainer decides that a version
+ships; the orchestrator relays it:
+
+    .venv/bin/python scripts/lane.py release 0.5.0             # record the intent, advance as far as it can
+    .venv/bin/python scripts/lane.py release --status          # where it is and what it waits on
+    .venv/bin/python scripts/lane.py release 0.5.0 --allow-open   # though the milestone still has open issues
+    .venv/bin/python scripts/lane.py release 0.5.0 --resmoke   # dispatch the smoke again after a fix
+    .venv/bin/python scripts/lane.py release --abandon "wrong version"   # drop the record; GitHub is left as it is
+
+No model session decides or edits anything on this path. Each step reads GitHub, does one thing and reads it back;
+a step that is done is skipped, so running it again is always safe, and the feeder tick advances an open release
+every 10 minutes. A step that needs a person stops by name (`blocked — …`): the command exits 1, the feeder tick
+fails with it, and the digest's first line says it.
+
+1. **preflight**: the milestone named by the version has no open issues, main's `ci-ok` is green, the version is
+   newer than `<Version>` on main, and main's `scripts/changelog-assemble` has `--release`.
+2. **pr**: `release/<version>`, `chore(release): <version>`, by `lunate-worker`. `changelog-assemble --release
+   <version>` and `--check` run in the session sandbox on a fresh worktree. The result may change only
+   `CHANGELOG.md` and `Directory.Build.props` and delete fragments. The pull request is ready, not armed, and its
+   body carries the changelog as it ships and the pre-release checks as tick boxes.
+3. **merge**: the one human gate. Only the maintainer's (`parked.assignee`) latest review at the head being an
+   approval lets the release job enqueue it. The feeder never enqueues a release-owned branch
+   (`github.release_owned`), and the reviewer bot skips it (no card).
+4. **tag**: `v<version>` on the merged commit, as `lunate-worker`, read back. `release.yml` publishes it.
+5. **published**: the tag's Release workflow succeeded, and the release reads back published with six assets
+   including `SHA256SUMS`.
+6. **channels** (stable only): `chore/<version>-channels`, filled by `scripts/fill-release-hashes` and `docs-sync`
+   in the sandbox, ready and not armed. Once it is green and its files are only the channel manifests and the
+   README, the reviewer identity approves it (a check of the diff's shape) and the release job enqueues it.
+7. **mirror** (stable only): the Homebrew tap's formula and the Scoop bucket's manifest get main's copies, through
+   the contents API as `lunate-worker`. The App must be installed on both repositories.
+8. **smoke**: `smoke.yml -f tag=v<version>`, dispatched once and waited for.
+9. **close** (stable only): the milestone is closed, the next minor one created, and the feeder pointed at it
+   through `<state>/milestone.json`, which overrides `lane.json`'s `milestone`.
+
+The intent is `<state>/release.json`; a finished or abandoned one moves to `<state>/releases/<version>.json`.
 
 ## Tests
 

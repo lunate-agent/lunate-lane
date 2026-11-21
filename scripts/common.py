@@ -144,8 +144,43 @@ _CONFIG: Config | None = None
 def config() -> Config:
     global _CONFIG
     if _CONFIG is None:
-        _CONFIG = load_config()
+        _CONFIG = with_milestone(load_config())
     return _CONFIG
+
+
+def _milestone_path(cfg: Config) -> pathlib.Path:
+    return cfg.state / "milestone.json"
+
+
+def with_milestone(cfg: Config) -> Config:
+    """The feeder's milestone: `<state>/milestone.json` once a release has moved it on (lunate-lane#21), else the
+    one in lane.json. Unreadable is a named failure, never the old milestone."""
+    path = _milestone_path(cfg)
+    if not path.exists():
+        return cfg
+    try:
+        title = str(json.loads(path.read_text(encoding="utf-8"))["milestone"]).strip()
+    except (OSError, ValueError, KeyError, TypeError) as exc:
+        raise ConfigError(f"the milestone record {path} could not be read: {exc}") from exc
+    if not title:
+        raise ConfigError(f"the milestone record {path} names no milestone")
+    return dataclasses.replace(cfg, milestone=title)
+
+
+def set_milestone(title: str) -> None:
+    """Point the feeder at `title` from the next read of the config on: written to lane state, not lane.json, so a
+    release needs no lane pull request."""
+    global _CONFIG
+    cfg = config()
+    path = _milestone_path(cfg)
+    tmp = path.with_suffix(".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps({"milestone": title, "set": time.time()}), encoding="utf-8")
+        tmp.replace(path)
+    except OSError as exc:
+        raise StateError(f"the milestone record {path} could not be written: {exc}") from exc
+    _CONFIG = dataclasses.replace(cfg, milestone=title)
 
 
 def run(argv: list[str], *, error: type[LaneError] = LaneError, cwd: pathlib.Path | None = None,

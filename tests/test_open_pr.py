@@ -576,6 +576,16 @@ class FailurePathTests(OpenPrCase):
         self.assertEqual((result["draft"], result["auto_merge"]), (False, "armed"))
         self.assertEqual(self.events[-1], ("read", "N42"), "the result is GitHub's read, not the intent")
 
+    def test_a_ready_only_open_is_marked_ready_but_never_armed(self) -> None:
+        """lunate-lane#21: a release pull request is ready (CI runs it as ready) and waits, unarmed, for the
+        maintainer's approval; the release job enqueues it."""
+        self.reuse()
+        self.drafts["N42"] = True
+        result = open_pr.open_pr(self.repo, "lane/x", "t", "b", arm=False, ready_only=True)
+        order = [e for e in self.events if e[0] in ("push", "ready", "arm", "disarm", "draft")]
+        self.assertEqual(order, [("push", "lane/x"), ("ready", "N42")])
+        self.assertEqual((result["draft"], result["auto_merge"]), (False, "not armed"))
+
     def test_ready_waits_until_github_shows_the_pushed_head(self) -> None:
         """#813: marked ready a second after the push, before GitHub had moved the head — ready_for_review went
         out with the old head, and the new head's only CI run still saw a draft."""
