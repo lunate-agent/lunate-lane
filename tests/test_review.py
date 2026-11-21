@@ -456,3 +456,93 @@ class CardDecisionsTests(unittest.TestCase):
         self.assertEqual(review.card_decisions("## Decisions\n\n- maybe later\n"), "")
         two = review.card_decisions("## Decisions\n- 2026-11-12: one\n  continued\n- **2026-11-13**: two\n## Next\n- 2026-11-14: not\n")
         self.assertEqual(two.strip().splitlines()[2:], ["- 2026-11-12: one", "  continued", "- **2026-11-13**: two"])
+
+
+class RereviewAfterUnparkTests(unittest.TestCase):
+    """#59: #927's card #695 was parked, unparked by hand, and `lane.py rereview 927` died twice with rc -11. The
+    session had inherited the caller's PATH, whose first node segfaulted setting `process.title` under the sandbox.
+    Now the session runs on the lane's own PATH; a session that still dies by signal is a named failure."""
+
+    def setUp(self) -> None:
+        self.state = TempState()
+        self.cfg = self.state.cfg
+        standing = a_review("CHANGES_REQUESTED", commit="63ed3623")
+        self.p = pull(927, 695, head="63ed3623", reviews=[standing])
+        self.sessions = []
+        self.outcome = harness.Outcome(0, False, 1, False)
+
+        def run_session(cfg, **kw):
+            self.sessions.append(harness.session_env(cfg, kw["scratch"]))
+            (kw["scratch"] / "verdict.json").write_text(json.dumps({"event": "APPROVE", "body": "decided: ok"}))
+            return self.outcome
+
+        self.patches = [
+            mock.patch.object(github, "required_checks", return_value=REQUIRED),
+            mock.patch.object(github, "open_pulls", return_value=[self.p]),
+            mock.patch.object(github, "pull", return_value=self.p),
+            mock.patch.object(github, "worker_report", return_value=""),
+            mock.patch.object(github, "decisions_for", return_value=[]),
+            mock.patch.object(harness, "running_workers", return_value={}),
+            mock.patch.object(harness, "read_credential", return_value="sk-test"),
+            mock.patch.object(harness, "_git_identity", return_value={}),
+            mock.patch.object(harness, "run_session", side_effect=run_session),
+            mock.patch.object(dispatch_card, "card", return_value={"body": "the card"}),
+            mock.patch.object(common, "git", return_value=""),
+            mock.patch.object(review, "remove_review_worktree"),
+            mock.patch.object(review, "read_verdict", return_value=("APPROVE", "decided: ok")),
+            mock.patch.object(review, "dismiss_standing", return_value=[5891654079]),
+            mock.patch.object(review, "post", return_value=True),
+            mock.patch.object(identity, "installation_token", return_value="ghs_reviewer"),
+            mock.patch("sys.stdout", new=io.StringIO()),
+        ]
+        for patch in self.patches:
+            patch.start()
+
+    def tearDown(self) -> None:
+        for patch in reversed(self.patches):
+            patch.stop()
+        self.state.close()
+
+    def park_and_unpark(self) -> None:
+        harness.park(695, "person", "decision model home")
+        self.assertEqual(review.rereview(self.cfg, 927)[0], "SKIPPED", "parked: not re-reviewed")
+        harness.unpark(695)
+
+    def test_review_park_unpark_then_rereview_posts_a_fresh_verdict_at_the_head(self) -> None:
+        self.park_and_unpark()
+        with mock.patch.dict("os.environ", {"PATH": "/Users/x/.hermes/node/bin:/opt/homebrew/bin:/usr/bin"}):
+            self.assertEqual(review.rereview(self.cfg, 927, "eve"), ("APPROVE", "decided: ok"))
+        review.dismiss_standing.assert_called_once_with(self.cfg, 927, "63ed3623", "ghs_reviewer")
+        review.post.assert_called_once()
+        path = self.sessions[-1]["PATH"]
+        self.assertNotIn(".hermes", path, "the session never runs on the caller's PATH")
+        self.assertTrue(path.endswith(harness.DEFAULT_PATH))
+
+    def test_a_session_killed_by_a_signal_is_a_readable_failure(self) -> None:
+        from scripts import lane
+
+        self.park_and_unpark()
+        self.outcome = harness.Outcome(-11, False, 1, False)
+        with self.assertRaises(review.ReviewError) as caught:
+            review.rereview(self.cfg, 927)
+        self.assertIn("did not finish cleanly (killed by SIGSEGV (rc -11))", str(caught.exception))
+        self.assertIn("DiagnosticReports", str(caught.exception))
+        review.post.assert_not_called()
+        review.dismiss_standing.assert_not_called()
+        out = io.StringIO()
+        with mock.patch.object(harness, "exit_on_signals"), mock.patch("sys.stdout", new=out):
+            self.assertEqual(lane.main(["rereview", "927"]), 1, "a failed re-review exits non-zero")
+        self.assertIn("#927: FAILED — the review session did not finish cleanly (killed by SIGSEGV", out.getvalue())
+
+
+class SessionPathTests(unittest.TestCase):
+    def test_describe_rc(self) -> None:
+        self.assertEqual(harness.describe_rc(1), "rc 1")
+        self.assertEqual(harness.describe_rc(-11), "killed by SIGSEGV (rc -11)")
+        self.assertEqual(harness.describe_rc(-9), "killed by SIGKILL (rc -9)")
+
+    def test_the_config_can_name_the_session_path(self) -> None:
+        cfg = common.load_config()
+        self.assertEqual(harness.session_path(cfg), harness.DEFAULT_PATH)
+        with mock.patch.dict(cfg.harness, {"path": "/opt/x/bin:/usr/bin"}):
+            self.assertEqual(harness.session_path(cfg), "/opt/x/bin:/usr/bin")

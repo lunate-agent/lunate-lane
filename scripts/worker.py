@@ -547,7 +547,7 @@ def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
                                       **session)
     new_commit = common.wt_git(cfg, worktree, "rev-parse", "HEAD") != start_head
     if use == harness.LUNATE and not new_commit:
-        harness.note_fallback(number, f"the Lunate session ended without a commit (rc {outcome.rc}"
+        harness.note_fallback(number, f"the Lunate session ended without a commit ({harness.describe_rc(outcome.rc)}"
                                       + (", stalled" if outcome.stalled else "") + ")")
     kind = ("send-back" if "### The reviewer requested changes" in findings else "rework") if rework_pr else "new"
     try:
@@ -715,6 +715,8 @@ def park_for_person(cfg: common.Config, card: int, target: int, reason: str) -> 
 PARK_WHY = {
     "idle": "{n} worker runs in a row ended with no new commit (cap: {cap})",
     "reworks": "it went back to a worker {n} times (cap: {cap}) and is still not ready",
+    "fixes": "it went back to a worker {n} times for a conflict, a red check or an unfinished draft (cap: {cap}) "
+             "and is still not ready",
 }
 
 
@@ -738,13 +740,14 @@ def rework_pr_of(cfg: common.Config, card: int) -> int | None:
 
 def park(cfg: common.Config, card: int, target: int, why: str, n: int = 0, detail: str = "") -> None:
     """Say, once, on the pull request (or the issue when there is none), that the lane stops working this card."""
-    cap = harness.IDLE_RUN_LIMIT if why == "idle" else harness.REWORK_LIMIT
+    cap = {"idle": harness.IDLE_RUN_LIMIT, "fixes": harness.FIX_LIMIT}.get(why, harness.REWORK_LIMIT)
     reason = PARK_WHY[why].format(n=n, cap=cap) if why in PARK_WHY else detail
     open_pr.comment(target, (
         f"**Lane: card #{card} is parked.** {reason[:1].upper() + reason[1:].rstrip('.')}. The feeder will not start "
         f"or rework it again. It needs a person: {PARK_ADVICE.get(why, PARK_ADVICE['default'])}. To let the lane "
         f"pick it up again, run `scripts/lane.py unpark {card} --reason '...'` on the lane host."))
-    label = {"idle": f"after {n} idle runs", "reworks": f"after {n} rework rounds"}.get(why, f"({why})")
+    label = {"idle": f"after {n} idle runs", "reworks": f"after {n} rework rounds",
+             "fixes": f"after {n} fix reworks"}.get(why, f"({why})")
     common.log(f"worker-{card}", f"parked {label} — commented on #{target}")
     parked.flag(cfg, card, target if target != card else None, job=f"worker-{card}")
 

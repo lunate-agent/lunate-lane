@@ -43,7 +43,7 @@ class FeedTests(unittest.TestCase):
         self.assertIn("FAILED — the logs in /x could not be rotated", (self.state.cfg.state / "logs" / "feed.log").read_text())
 
     def test_a_fourth_rework_parks_the_card_with_one_comment_instead(self) -> None:
-        """#9: three rework rounds on #50, whatever their cause; the fourth is a park, said once."""
+        """#9: three rework rounds on #50 (the reviewer asked for changes each time); the fourth is a park, said once."""
         from scripts import open_pr
 
         for _ in range(3):
@@ -66,35 +66,83 @@ class FeedTests(unittest.TestCase):
         feed.main()
         self.assertIn(50, [l.rework_pr for l in self.started])
 
-    def test_809s_three_rounds_run_and_the_fourth_due_parks_while_status_says_so_in_between(self) -> None:
+    def test_809s_review_rounds_run_and_the_fourth_due_parks_while_status_says_so_in_between(self) -> None:
         """Card #809 on #848, 2026-11-14: rounds at 08:40 (changes requested), 08:50 (checks red), 09:10 (changes
-        requested); its status read "#848: 3 of 3, parked: no" while round 3 ran; at 09:20 its head was red again and
-        the card was parked instead of a fourth round. The cap counts a round when it starts, so round 3 runs."""
+        requested). Since #58 only the reviewer's requests count toward the cap; the red head is a fix rework. A third
+        request for changes is the last round — status says it is at the cap while it runs — and the fourth parks."""
         from scripts import lane
 
         github.milestone_cards.return_value = []
         github.open_pulls.return_value = [pull(848, 809)]
         red = (("ci-ok", "COMPLETED", "FAILURE"),)
-        shapes = [pull(848, 809, head="1e3745a0", reviews=[review("CHANGES_REQUESTED", commit="1e3745a0")]),
-                  pull(848, 809, head="b4f8c482", checks=red),
-                  pull(848, 809, head="3a0b97ab", reviews=[review("CHANGES_REQUESTED", commit="3a0b97ab")])]
-        for n, shape in enumerate(shapes, 1):
+        rejected = lambda head: pull(848, 809, head=head, reviews=[review("CHANGES_REQUESTED", commit=head)])  # noqa: E731
+        shapes = [(rejected("1e3745a0"), (1, 0)), (pull(848, 809, head="b4f8c482", checks=red), (1, 1)),
+                  (rejected("3a0b97ab"), (2, 1)), (pull(848, 809, head="88d76f93", checks=red), (2, 2)),
+                  (rejected("5c1d22e0"), (3, 2))]
+        for n, (shape, counts) in enumerate(shapes, 1):
             github.pull.return_value = shape
             self.assertEqual(feed.main(), 0)
-            self.assertEqual((len(self.started), harness.rework_rounds(809, 848)), (n, n))
+            harness.note_run(809, True)  # each round pushed a new commit
+            self.assertEqual((len(self.started), (harness.rework_rounds(809, 848), harness.fix_rounds(809, 848))),
+                             (n, counts))
             self.assertEqual(harness.parked_details(), {})
         with mock.patch.object(harness, "live_pid", return_value=2304):  # round 3 running
             text = lane.status(809)
         self.assertIn("rework rounds: #848: 3 of 3", text)
+        self.assertIn("fix reworks (conflict, red check, orphaned draft): #848: 2 of 6", text)
         self.assertIn("parked: no — #848 is at the cap: its last rework round is running; the next tick that finds "
                       "it due for another parks the card instead", text)
-        github.pull.return_value = pull(848, 809, head="88d76f93", checks=red)  # round 3 pushed; red again
+        github.pull.return_value = rejected("9e0f11aa")  # round 3 pushed; changes requested again
         self.assertEqual(feed.main(), 0)
-        self.assertEqual(len(self.started), 3, "no fourth round")
+        self.assertEqual(len(self.started), 5, "no fourth review round")
         self.assertEqual(harness.parked_details(), {809: "reworks"})
         self.assertIn("parked: yes — reworks", lane.status(809))
         self.assertIn("parked card #809 after 3 rework rounds on #848",
                       (self.state.cfg.state / "logs" / "feed.log").read_text())
+
+    def test_58_conflicts_red_checks_and_orphaned_drafts_spend_no_review_round(self) -> None:
+        """#58: #695 (conflicting after approval), #903 (a real queue-shard failure) and #938 (an orphaned draft)
+        were each parked at 3 of 3 though no reviewer had asked for changes. Those are fix reworks: they still go
+        back to a worker, more than three times, and spend none of the review budget."""
+        github.milestone_cards.return_value = []
+        github.open_pulls.return_value = [pull(927, 695)]
+        failure = github.Ejection("real", "failed_checks", "2026-11-16T10:00:00Z", "w", 4347, "verify (ubuntu-latest, 2/4)",
+                                  1320, ("Verify (bash)",))
+        shapes = [pull(927, 695, mergeable="CONFLICTING"),
+                  pull(927, 695, reviews=[review("APPROVED")], queue_removal="failed_checks",
+                       queue_removed_at="2026-11-16T10:00:00Z", ejection=failure),
+                  pull(927, 695, draft=True),
+                  pull(927, 695, checks=(("ci-ok", "COMPLETED", "FAILURE"),)),
+                  pull(927, 695, mergeable="CONFLICTING")]
+        for n, shape in enumerate(shapes, 1):
+            github.pull.return_value = shape
+            self.assertEqual(feed.main(), 0)
+            harness.note_run(695, True)  # each fix pushed a new commit
+            self.assertEqual([l.rework_pr for l in self.started], [927] * n, self.started[-1].reason)
+            self.assertEqual((harness.rework_rounds(695, 927), harness.fix_rounds(695, 927)), (0, n))
+        self.assertEqual(harness.parked_details(), {})
+        self.assertEqual([l.reason for l in self.started][:3],
+                         ["conflicts with the base branch", "queue failure: verify (ubuntu-latest, 2/4)", "orphaned draft"])
+
+    def test_58_fix_reworks_are_still_capped(self) -> None:
+        """A branch that keeps pushing red commits is not relaunched forever: the seventh fix parks it, said once."""
+        from scripts import lane, open_pr
+
+        github.milestone_cards.return_value = []
+        github.pull.return_value = pull(50, 9, mergeable="CONFLICTING")
+        comments = []
+        with mock.patch.object(open_pr, "comment", side_effect=lambda n, body: comments.append((n, body))):
+            for _ in range(harness.FIX_LIMIT + 2):
+                self.assertEqual(feed.main(), 0)
+                harness.note_run(9, True)  # each fix pushed a new commit, and the head is red again
+        self.assertEqual(len(self.started), harness.FIX_LIMIT)
+        self.assertEqual(harness.parked_details(), {9: "fixes"})
+        self.assertEqual(harness.rework_rounds(9, 50), 0)
+        self.assertEqual(len(comments), 1)
+        self.assertIn("went back to a worker 6 times for a conflict, a red check or an unfinished draft (cap: 6)",
+                      comments[0][1])
+        self.assertIn("parked card #9 after 6 fix reworks", (self.state.cfg.state / "logs" / "feed.log").read_text())
+        self.assertIn("parked: yes — fixes", lane.status(9))
 
     def test_a_dry_run_only_says_it_would_park(self) -> None:
         for _ in range(3):

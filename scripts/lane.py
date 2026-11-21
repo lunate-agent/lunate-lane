@@ -66,12 +66,15 @@ def status(card: int) -> str:
     lines.append(f"  idle runs: {data['idle_runs']} of {harness.IDLE_RUN_LIMIT}")
     rounds = ", ".join(f"#{pr}: {n} of {harness.REWORK_LIMIT}" for pr, n in sorted(data["reworks"].items()))
     lines.append(f"  rework rounds: {rounds or 'none'}")
+    fixes = ", ".join(f"#{pr}: {n} of {harness.FIX_LIMIT}" for pr, n in sorted(data["fixes"].items()))
+    lines.append(f"  fix reworks (conflict, red check, orphaned draft): {fixes or 'none'}")
     if data["parked"]:
         lines.append(f"  parked: yes — {data['reason'] or 'idle'}" + (f": {data['detail']}" if data["detail"] else ""))
     else:
-        at_cap = [pr for pr, n in sorted(data["reworks"].items()) if n >= harness.REWORK_LIMIT]
+        at_cap = [(pr, "rework round") for pr, n in sorted(data["reworks"].items()) if n >= harness.REWORK_LIMIT]
+        at_cap += [(pr, "fix rework") for pr, n in sorted(data["fixes"].items()) if n >= harness.FIX_LIMIT]
         if at_cap:  # the cap counts a round when it starts: the last one runs, the next one due parks instead
-            lines.append(f"  parked: no — #{at_cap[0]} is at the cap: its last rework round "
+            lines.append(f"  parked: no — #{at_cap[0][0]} is at the cap: its last {at_cap[0][1]} "
                          + ("is running" if live else "has run")
                          + "; the next tick that finds it due for another parks the card instead")
         else:
@@ -136,6 +139,9 @@ def blocking(body: str) -> list[str]:
     return found[:FINDINGS]
 
 
+FAILED = ": FAILED — "
+
+
 def rereview(numbers: list[int], all_open: bool) -> str:
     cfg = common.config()
     harness.exit_on_signals()  # a killed run still kills its session and removes its worktree
@@ -149,7 +155,7 @@ def rereview(numbers: list[int], all_open: bool) -> str:
             try:
                 event, body = review.rereview(cfg, number, who)
             except LaneError as exc:
-                out.append(f"#{number}: FAILED — {exc}")
+                out.append(f"#{number}{FAILED}{exc}")
                 continue
             if event == "SKIPPED":
                 out.append(f"#{number}: not re-reviewed — {body}")
@@ -181,7 +187,10 @@ def main(argv=None) -> int:
         if args.command == "status":
             print(status(args.card))
         elif args.command == "rereview":
-            print(rereview(args.pr, args.all_open))
+            text = rereview(args.pr, args.all_open)
+            print(text)
+            if FAILED in text:  # a review that could not run is a failure, by name, not a quiet exit 0 (#59)
+                return 1
         elif args.command == "lunate-pin":
             done = lunate_pin.pin(common.config(), args.commit)
             print(f"pinned {done['version']} ({done['commit'][:12]}) at {done['binary']}, sha256 {done['sha256']}\n"
