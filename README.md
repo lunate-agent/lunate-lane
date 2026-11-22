@@ -386,6 +386,7 @@ rides the next one: open cards never hold a release back, they move to the next 
     .venv/bin/python scripts/lane.py release --status          # where it is and what it waits on
     .venv/bin/python scripts/lane.py release 0.5.0 --resmoke   # dispatch the smoke again after a fix
     .venv/bin/python scripts/lane.py release --abandon "wrong version"   # drop the record; GitHub is left as it is
+    .venv/bin/python scripts/lane.py release --fix-pr 1012     # tag the open release on a merged release fix
 
 No model session decides or edits anything on this path. Each step reads GitHub, does one thing and reads it back;
 a step that is done is skipped, so running it again is always safe, and the feeder tick advances an open release
@@ -399,11 +400,22 @@ fails with it, and the digest's first line says it.
 2. **pr**: `release/<version>`, `chore(release): <version>`, by `lunate-worker`. `changelog-assemble --release
    <version>` and `--check` run in the session sandbox on a fresh worktree. The result may change only
    `CHANGELOG.md` and `Directory.Build.props` and delete fragments. The pull request is ready, not armed, and its
-   body carries the changelog as it ships and the pre-release checks as tick boxes.
+   body carries the changelog as it ships and the pre-release checks as tick boxes. It is cut only once no pull
+   request in the merge queue adds a changelog fragment (`changes/<its number>.md`). **The fragment hold**: from
+   the release's start until its pull request merges, the feeder enqueues no pull request that adds one, and says
+   so in its log. A fragment that lands in between would ship in neither changelog, because the release's squash
+   deletes only the fragments it saw (lunate#1003 after #1006 broke v0.6.0's gate).
 3. **merge**: the one human gate. Only the maintainer's (`parked.assignee`) latest review at the head being an
    approval lets the release job enqueue it. The feeder never enqueues a release-owned branch
-   (`github.release_owned`), and the reviewer bot skips it (no card).
-4. **tag**: `v<version>` on the merged commit, as `lunate-worker`, read back. `release.yml` publishes it.
+   (`github.release_owned`), and the reviewer bot skips it (no card). A fragment that reached main after the cut
+   some other way (a person's merge) blocks the enqueue by name: close the release pull request and delete its
+   branch, and the next advance cuts it again from main.
+4. **tag**: `v<version>` on the merged commit, as `lunate-worker`, read back. `release.yml` publishes it. First,
+   `changelog-assemble --check --tag v<version>` runs on that commit in the sandbox, the check `release.yml`'s gate
+   runs, so a commit the gate would refuse is never tagged. A release fixed after its merge is tagged on the fix:
+   a merged `chore(release)` pull request recorded with `lane.py release --fix-pr N`. A tag already on the old
+   commit is deleted by a person first, and only when nothing was published from it. `published` reads only the
+   Release runs on the tag's own commit.
 5. **forward** (stable only), the cut: every open issue and pull request of the milestone moves to the next minor
    one (created if missing), as `lunate-worker`, and the feeder is pointed at it through `<state>/milestone.json`,
    which overrides `lane.json`'s `milestone`. The milestone's description moves too: the next one is created with

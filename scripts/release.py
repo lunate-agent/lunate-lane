@@ -13,10 +13,15 @@ The feeder tick advances an open release every 10 minutes, so nothing waits in a
     preflight  main is green, the version is newer, the repository has what a release needs (open cards do not hold it),
                and every helper in HELPERS runs once (`--help`, the way the release runs it: the self-test)
     pr         `release/<version>`, `chore(release): <version>`, by lunate-worker: `changelog-assemble --release`
-               in the session sandbox, ready and NOT armed
+               in the session sandbox, ready and NOT armed — cut only once no pull request in the merge queue adds a
+               changelog fragment. From the cut until it merges, the feeder enqueues no pull request that adds one
+               (`holding_fragments`): a fragment that lands in between ships outside the changelog (lunate#1006)
     approval   the one human gate: the maintainer approves the release pull request at its head
-    merge      the release job enqueues it (the feeder never does: `github.release_owned`)
-    tag        `v<version>` on the merged commit, as lunate-worker; release.yml publishes it
+    merge      the release job enqueues it (the feeder never does: `github.release_owned`) — refused while a fragment
+               reached main after the cut some other way (a person's merge): close it, and the next tick cuts again
+    tag        `v<version>` on the merged commit, as lunate-worker, once `changelog-assemble --check --tag` passes on
+               it, the check release.yml's gate runs; release.yml publishes it. A release fixed after its merge
+               (`lane.py release --fix-pr N`: a merged `chore(release)` pull request) is tagged on that one's commit
     forward    stable only, the cut: every open issue and pull request of the milestone moves to the next one (created
                if missing), and the feeder is pointed at it — what merges from here on ships next time
     published  the Release workflow on the tag succeeded and the release carries its assets and SHA256SUMS
@@ -53,6 +58,8 @@ JOB = "release"
 VERSION = re.compile(r"^(\d+)\.(\d+)\.(\d+)(?:-rc\.(\d+))?$")
 PROPS_VERSION = re.compile(r"<Version>\s*([^<\s]+)\s*</Version>")
 RELEASE_FILES = ("CHANGELOG.md", "Directory.Build.props", "changes/*.md")
+FRAGMENT = re.compile(r"^changes/[0-9]+\.md$")  # a pull request's release note; changes/README.md is not one
+TAG_TREE = ("CHANGELOG.md", "Directory.Build.props", "changes", "scripts")  # what the tag-time check reads
 CHANNEL_FILES = ("packaging/homebrew/lunate.rb", "packaging/scoop/lunate.json", "packaging/winget/*.yaml", "README.md")
 ASSETS = ("SHA256SUMS",)  # the release is read back with these at least, and ASSET_COUNT in all
 ASSET_COUNT = 6
@@ -162,6 +169,17 @@ def train_version(cfg: common.Config) -> tuple[str | None, str]:
     if not fragments:
         return None, f"nothing to ship: {cfg.base} has no changelog fragment since the last tag"
     return v.text, f"{len(fragments)} changelog fragment(s) on {cfg.base}"
+
+
+def fix(number: int) -> dict:
+    """Record that the open release is tagged on `number`'s merge: a `chore(release)` pull request that fixed the
+    release after its own pull request merged (lunate#1012 for 0.6.0). The tag step checks the rest."""
+    data = intent()
+    if not data:
+        raise LaneError("no release is open to fix")
+    data["fix_pr"] = int(number)
+    _write(data)
+    return data
 
 
 def abandon(reason: str) -> str:
@@ -298,6 +316,25 @@ def _helper(cfg: common.Config, worktree: pathlib.Path, scratch: pathlib.Path, b
     return _sandboxed_run(cfg, worktree, scratch, branch, [PYTHON, "-I", script, *args])
 
 
+def _archive(cfg: common.Config, ref: str, paths: tuple, tree: pathlib.Path) -> None:
+    """`paths` at `ref`, written into `tree` by `git archive`: a tree to run a helper in, with nothing in the checkout
+    to remove afterwards."""
+    shutil.rmtree(tree, ignore_errors=True)
+    tree.mkdir(parents=True)
+    with common.checkout_lock():
+        # only the paths `ref` has: an empty changes/ is no directory to git, and a missing path fails the archive
+        listed = subprocess.run(["git", "-C", str(cfg.checkout), "ls-tree", "--name-only", ref, "--", *paths],
+                                capture_output=True, text=True, timeout=60)
+        present = [line for line in listed.stdout.splitlines() if line] if listed.returncode == 0 else list(paths)
+        archive = subprocess.run(["git", "-C", str(cfg.checkout), "archive", "--format=tar", ref, *present],
+                                 capture_output=True, timeout=120)
+    if archive.returncode != 0:
+        raise LaneError(f"{', '.join(paths)} at {ref} could not be read: "
+                        f"{archive.stderr.decode(errors='replace').strip()}")
+    with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+        tar.extractall(tree, filter="data")
+
+
 def self_test(cfg: common.Config, ref: str) -> None:
     """Every helper in HELPERS, run once with `--help` on `ref`'s scripts/, exactly as a step runs it. A helper that is
     missing, does not import, or does not parse its arguments blocks by name. The tree is `git archive` of scripts/
@@ -305,16 +342,8 @@ def self_test(cfg: common.Config, ref: str) -> None:
     failed."""
     scratch = common.state_dir("scratch", "release-self-test")
     tree = scratch / "tree"
-    shutil.rmtree(tree, ignore_errors=True)
-    tree.mkdir()
     try:
-        with common.checkout_lock():
-            archive = subprocess.run(["git", "-C", str(cfg.checkout), "archive", "--format=tar", ref, "scripts"],
-                                     capture_output=True, timeout=120)
-        if archive.returncode != 0:
-            raise LaneError(f"scripts/ at {ref} could not be read: {archive.stderr.decode(errors='replace').strip()}")
-        with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
-            tar.extractall(tree, filter="data")
+        _archive(cfg, ref, ("scripts",), tree)
         missing = [script for script in HELPERS if not (tree / script).is_file()]
         if missing:
             raise Blocked(f"{ref} has no {', '.join(missing)} — the release path runs it")
@@ -325,6 +354,68 @@ def self_test(cfg: common.Config, ref: str) -> None:
                 raise Blocked(f"the self-test of {script} on {ref} failed — {exc}") from exc
     finally:
         shutil.rmtree(tree, ignore_errors=True)
+
+
+def tag_check(cfg: common.Config, v: Version, sha: str) -> None:
+    """`changelog-assemble --check --tag v<version>` on the commit about to be tagged — the check release.yml's gate
+    runs on the tag — so a commit whose changelog misses a fragment is never tagged (lunate#1006's v0.6.0 was, and
+    published nothing)."""
+    scratch = common.state_dir("scratch", f"release-tag-{v.text}")
+    tree = scratch / "tree"
+    try:
+        _archive(cfg, sha, TAG_TREE, tree)
+        try:
+            _helper(cfg, tree, scratch, None, "scripts/changelog-assemble", "--check", "--tag", v.tag)
+        except Blocked as exc:
+            raise Blocked(f"{v.tag} is not tagged: the changelog at {sha[:9]} fails the tag's gate — {exc}. Open a "
+                          f"`chore(release): {v.text}` pull request that assembles what is missing into the {v.text} "
+                          f"section, and once it has merged, `lane.py release --fix-pr <number>`") from exc
+    finally:
+        shutil.rmtree(tree, ignore_errors=True)
+
+
+# --- the fragment hold: nothing adds a changelog fragment between the cut and the release's merge -------------------
+
+def adds_fragment(p: github.Pull) -> str | None:
+    """The changelog fragment `p` adds — `changes/<its own number>.md`, the name a pull request writes its release
+    note under — or None. A release pull request only deletes fragments; it never adds one."""
+    own = f"changes/{p.number}.md"
+    return own if own in (p.files or ()) and not github.is_release(p.branch, p.title) else None
+
+
+def holding_fragments(cfg: common.Config) -> str | None:
+    """Why the feeder must not enqueue a pull request that adds a changelog fragment right now, or None. From the
+    release's start until its pull request has merged, a fragment that lands is in neither the assembled section nor
+    the next one: the release's squash deletes only the fragments it saw (lunate#1003 after #1006)."""
+    data = intent()
+    if data is None:
+        return None
+    v = parse(data["version"])
+    pull = _pull_for(cfg, f"release/{v.text}")
+    if pull and pull.get("merged_at"):
+        return None
+    return (f"release {v.text}'s pull request #{pull['number']} is open" if pull else
+            f"release {v.text} is about to cut its pull request")
+
+
+def _queued_fragments(cfg: common.Config) -> list[str]:
+    """'#N (changes/N.md)' for every pull request in the merge queue that adds a fragment: each lands ahead of a
+    release pull request cut now, outside the changelog it assembled."""
+    return [f"#{p.number} ({frag})" for p in github.open_pulls(cfg) if p.in_queue and (frag := adds_fragment(p))]
+
+
+def _fragments(cfg: common.Config, ref: str) -> set[str]:
+    listed = common.git(cfg.checkout, "ls-tree", "--name-only", ref, "changes/")
+    return {line.strip() for line in listed.splitlines() if FRAGMENT.match(line.strip())}
+
+
+def late_fragments(cfg: common.Config, branch: str) -> list[str]:
+    """The fragments on origin/<base> that the release pull request on `branch` did not assemble: those on the base
+    now, less those on the commit it was cut from (it assembles every one there)."""
+    with common.checkout_lock():
+        common.git(cfg.checkout, "fetch", "-q", "origin", cfg.base, branch)
+        cut = common.git(cfg.checkout, "merge-base", f"origin/{branch}", f"origin/{cfg.base}").strip()
+        return sorted(_fragments(cfg, f"origin/{cfg.base}") - _fragments(cfg, cut))
 
 
 def _cut(cfg: common.Config, branch: str, name: str, subject: str) -> pathlib.Path | None:
@@ -438,6 +529,10 @@ def step_pr(cfg: common.Config, v: Version, data: dict) -> str | None:
     branch = f"release/{v.text}"
     if _pull_for(cfg, branch):
         return None
+    queued = _queued_fragments(cfg)
+    if queued:
+        return (f"{', '.join(queued)} in the merge queue to land first: each adds a changelog fragment the release "
+                "must assemble")
     worktree = _cut(cfg, branch, f"release-{v.text}", f"chore(release): {v.text}")
     if worktree is not None:
         scratch = common.state_dir("scratch", f"release-{v.text}")
@@ -501,18 +596,41 @@ def step_merge(cfg: common.Config, v: Version, data: dict) -> str | None:
     pull = _pull_for(cfg, f"release/{v.text}")
     if pull is None:
         raise Blocked(f"the release pull request for {v.text} is gone")
+    if not pull.get("merged_at"):
+        late = late_fragments(cfg, f"release/{v.text}")
+        if late:
+            raise Blocked(f"{', '.join(late)} reached {cfg.base} after the release pull request #{pull['number']} was "
+                          f"cut, and would ship outside its changelog — close #{pull['number']} and delete "
+                          f"release/{v.text}; the next advance cuts it again from {cfg.base}")
     return _land(cfg, int(pull["number"]), cfg.parked_assignee, "the release pull request")
 
 
+def _release_commit(cfg: common.Config, v: Version, data: dict) -> str:
+    """The commit the tag goes on: the release pull request's merge, or — once `--fix-pr` recorded one — the merge of
+    the `chore(release)` pull request that fixed the release after it merged."""
+    if data.get("fix_pr"):
+        pull = _api(f"repos/{cfg.slug}/pulls/{int(data['fix_pr'])}")
+        what = f"the fix #{data['fix_pr']}"
+        if not github.is_release(str((pull.get("head") or {}).get("ref") or ""), str(pull.get("title") or "")):
+            raise Blocked(f"{what} is not a release pull request (branch release/<version> or a chore(release) "
+                          "title) — release.yml's gate would refuse its commit")
+    else:
+        pull = _pull_for(cfg, f"release/{v.text}") or {}
+        what = f"the release pull request for {v.text}"
+    merged = str(pull.get("merge_commit_sha") or "")
+    if not pull.get("merged_at") or not merged:
+        raise Blocked(f"{what} reads as not merged")
+    return merged
+
+
 def step_tag(cfg: common.Config, v: Version, data: dict) -> str | None:
-    pull = _pull_for(cfg, f"release/{v.text}")
-    merged = str((pull or {}).get("merge_commit_sha") or "")
-    if not (pull or {}).get("merged_at") or not merged:
-        raise Blocked(f"the release pull request for {v.text} reads as not merged")
+    merged = _release_commit(cfg, v, data)
     existing = _tag_sha(cfg, v.tag)
     if existing:
         if existing != merged:
-            raise Blocked(f"{v.tag} already exists at {existing[:9]}, not at the release's merged commit {merged[:9]}")
+            raise Blocked(f"{v.tag} already exists at {existing[:9]}, not at the release's merged commit {merged[:9]}"
+                          + (" — if nothing was published from it, delete the tag and the next advance tags "
+                             f"{merged[:9]}" if data.get("fix_pr") else ""))
         return None
     with common.checkout_lock():
         common.git(cfg.checkout, "fetch", "-q", "origin", cfg.base)
@@ -520,6 +638,7 @@ def step_tag(cfg: common.Config, v: Version, data: dict) -> str | None:
         raise Blocked(f"the release's merged commit {merged[:9]} is not on origin/{cfg.base}")
     if parse(_main_props(cfg, merged)).text != v.text:
         raise Blocked(f"Directory.Build.props at {merged[:9]} does not read {v.text}")
+    tag_check(cfg, v, merged)
     common.rest(_worker(), "POST", f"/repos/{cfg.slug}/git/refs", {"ref": f"refs/tags/{v.tag}", "sha": merged})
     if _tag_sha(cfg, v.tag) != merged:
         raise LaneError(f"{v.tag} does not read back at {merged[:9]}")
@@ -536,7 +655,10 @@ def _on_base(cfg: common.Config, sha: str) -> bool:
 
 
 def step_published(cfg: common.Config, v: Version, data: dict) -> str | None:
-    runs = [r for r in _workflow_runs(cfg, "release.yml", f"event=push&branch={v.tag}")]
+    sha = _tag_sha(cfg, v.tag)
+    # a tag moved by a fix (`--fix-pr`) keeps its old failed run under the same name: only the tagged commit's count
+    runs = [r for r in _workflow_runs(cfg, "release.yml", f"event=push&branch={v.tag}")
+            if not sha or not r.get("head_sha") or r.get("head_sha") == sha]
     if not runs:
         return f"the Release workflow to start on {v.tag}"
     run = runs[-1]

@@ -69,6 +69,15 @@ def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[
                and p.ejection is not None and p.ejection.kind == "infra" and p.review_decision == "APPROVED"
                and github.verdict(p, cfg.reviewer_app) == "APPROVED"]
     superseded = [p for p in worker_pulls if p.state == "OPEN" and github.superseded_by_person(p, cfg.reviewer_app)[1]]
+    # a fragment that lands while a release pull request is open ships in neither changelog (lunate#1003 after #1006):
+    # it waits for the release to merge. Read only when one would be enqueued, so a quiet tick costs nothing.
+    adding = [p for p in enqueue + ejected if release.adds_fragment(p)]
+    held = release.holding_fragments(cfg) if adding else None
+    if held:
+        for p in adding:
+            notes.append(f"#{p.number} adds {release.adds_fragment(p)}: not enqueued while {held}")
+        enqueue = [p for p in enqueue if p not in adding]
+        ejected = [p for p in ejected if p not in adding]
     return launches, notes, rerun, enqueue, disarm, ejected, superseded
 
 

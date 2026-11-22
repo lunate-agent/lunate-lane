@@ -7,7 +7,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from scripts import cleanup, common, feed, github, harness  # noqa: E402
+from scripts import cleanup, common, feed, github, harness, release  # noqa: E402
 from scripts.common import GhError, StateError  # noqa: E402
 from tests.helpers import REQUIRED, TempState, card, pull, review  # noqa: E402
 
@@ -953,3 +953,51 @@ class ParkedNotEnqueuedTests(unittest.TestCase):
         harness.park(850, "manual", "scope decision 2026-11-14")
         with mock.patch.object(open_pr, "enqueue", side_effect=AssertionError("never enqueued while parked")):
             self.assertEqual(feed.main(), 0)
+
+
+class FragmentHoldTests(unittest.TestCase):
+    """lunate#1003 was enqueued and merged while the 0.6.0 release pull request #1006 was open; #1006 then merged
+    without its fragment, and v0.6.0's gate failed. While a release pull request is open, a pull request that adds a
+    changelog fragment waits; one that adds none does not."""
+
+    def setUp(self) -> None:
+        FeedTests.setUp(self)
+        self.addCleanup(FeedTests.tearDown, self)
+        from scripts import open_pr
+        github.milestone_cards.return_value = []
+        self.tick = mock.patch.object(release, "tick").start()
+        self.enqueue = mock.patch.object(open_pr, "enqueue", return_value={"state": "QUEUED", "position": 1}).start()
+        self.addCleanup(mock.patch.stopall)
+
+    def ready(self, number: int, card: int, *files: str) -> None:
+        p = pull(number, card, node_id=f"PR_{number}", reviews=[review("APPROVED")], files=files)
+        github.open_pulls.return_value = [p]
+        github.pull.return_value = p
+
+    def log(self) -> str:
+        return (self.state.cfg.state / "logs" / "feed.log").read_text()
+
+    def test_1003s_shape_waits_while_the_release_pull_request_is_open_and_is_enqueued_after_it_merges(self) -> None:
+        self.ready(1003, 1002, "changes/1003.md", "scripts/ci-report")
+        release.start("0.6.0", "test")
+        with mock.patch.object(release, "_pull_for", return_value={"number": 1006, "state": "open"}):
+            self.assertEqual(feed.main(), 0)
+        self.enqueue.assert_not_called()
+        self.assertIn("#1003 adds changes/1003.md: not enqueued while release 0.6.0's pull request #1006 is open",
+                      self.log())
+        with mock.patch.object(release, "_pull_for", return_value={"number": 1006, "merged_at": "t"}):
+            self.assertEqual(feed.main(), 0)
+        self.enqueue.assert_called_once_with(1003, "PR_1003", "h1")
+
+    def test_a_pull_request_without_a_fragment_is_enqueued_during_a_release(self) -> None:
+        self.ready(1004, None, "docs/dev/distribution.md")
+        release.start("0.6.0", "test")
+        with mock.patch.object(release, "_pull_for", side_effect=AssertionError("read only for a fragment")):
+            self.assertEqual(feed.main(), 0)
+        self.enqueue.assert_called_once_with(1004, "PR_1004", "h1")
+
+    def test_with_no_release_open_a_fragment_is_enqueued_and_nothing_is_read(self) -> None:
+        self.ready(1003, 1002, "changes/1003.md")
+        with mock.patch.object(release, "_pull_for", side_effect=AssertionError("no release, no read")):
+            self.assertEqual(feed.main(), 0)
+        self.enqueue.assert_called_once_with(1003, "PR_1003", "h1")
