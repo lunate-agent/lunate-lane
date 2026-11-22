@@ -454,6 +454,15 @@ class BriefTests(unittest.TestCase):
         with mock.patch.object(github, "pull", return_value=p), self.assertRaises(LaneError):
             worker.rework_findings(self.cfg, 824)
 
+    def test_the_brief_counts_every_touched_specs_requirements_and_scenarios_as_acceptance(self) -> None:
+        """lunate#999 took three rework rounds: openspec/specs/agent-sessions/spec.md was stricter than the card."""
+        text = worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), 12, "", False)
+        self.assertIn("**The specs are acceptance too.** Every requirement and scenario of each spec your change "
+                      "touches", text)
+        self.assertIn("Where a spec is stricter than the card, the spec wins.", text)
+        self.assertIn("`### Requirement:` and `#### Scenario:`", text)
+        self.assertIn("under **Spec scenarios**, each touched spec", text)
+
     def test_the_rework_brief_says_merge_never_rebase_never_force(self) -> None:
         text = worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), 12, "### Checks are failing", True)
         self.assertIn("`git merge origin/main`", text)
