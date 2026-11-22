@@ -1,6 +1,6 @@
 {
   "repo": "lunate-agent/lunate",
-  "milestone": "0.5.0",
+  "milestone": "0.6.0",
   "base": "main",
   "wip_limit": 5,
   "apps": {
