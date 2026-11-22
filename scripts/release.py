@@ -704,19 +704,28 @@ def _open_in(cfg: common.Config, number: int) -> list[int]:
 
 def _move_forward(cfg: common.Config, v: Version) -> list[int]:
     """Move every open issue and pull request of the released milestone to the next one, creating it when missing,
-    and point the feeder at it. A card mid-rework moves with its pull request; its rounds are keyed by the card, so
-    they travel too. Returns what moved."""
+    and point the feeder at it. The milestone's description moves forward with its cards: the next milestone is
+    created with it, or gets it when it has none (one it already has is never overwritten); the released milestone
+    keeps its own, as the record of what it was for. A card mid-rework moves with its pull request; its rounds are
+    keyed by the card, so they travel too. Returns what moved."""
     shipped = _milestone(cfg, v.base)
     if shipped is None:
         raise Blocked(f"there is no milestone {v.base!r} in {cfg.slug}")
     token = None
+    description = str(shipped.get("description") or "").strip()
     nxt = _milestone(cfg, v.next_milestone)
     if nxt is None:
         token = _worker()
-        nxt = common.rest(token, "POST", f"/repos/{cfg.slug}/milestones", {"title": v.next_milestone})
+        nxt = common.rest(token, "POST", f"/repos/{cfg.slug}/milestones",
+                          {"title": v.next_milestone, **({"description": description} if description else {})})
         if not nxt.get("number"):
             raise LaneError(f"milestone {v.next_milestone} came back without a number")
-        common.log(JOB, f"{v.text}: created milestone {v.next_milestone}")
+        common.log(JOB, f"{v.text}: created milestone {v.next_milestone}"
+                        + (f" with {v.base}'s description" if description else ""))
+    elif description and not str(nxt.get("description") or "").strip():
+        token = _worker()
+        common.rest(token, "PATCH", f"/repos/{cfg.slug}/milestones/{nxt['number']}", {"description": description})
+        common.log(JOB, f"{v.text}: gave milestone {v.next_milestone} {v.base}'s description")
     moved = _open_in(cfg, int(shipped["number"]))
     for number in moved:
         token = token or _worker()

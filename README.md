@@ -373,13 +373,16 @@ A release is one deterministic command (`scripts/release.py`, lunate-lane#21), a
 or on a maintainer's word**. Whatever has merged since the last tag is what ships. A card that misses the train
 rides the next one: open cards never hold a release back, they move to the next milestone at the cut.
 
-- **Weekly**, from cron (Monday 06:00, below): `lane.py release --train` releases the milestone the feeder works.
-  It does nothing while another release is open, or when main has no changelog fragment (no pull request with a
-  release note has merged since the last tag).
+- **Weekly**, from cron (Monday 06:00, below): `lane.py release --train --yes` releases the milestone the feeder
+  works. It does nothing while another release is open, or when main has no changelog fragment (no pull request
+  with a release note has merged since the last tag). Only the cron line passes `--yes`. By hand, `--train` asks
+  for the version to be typed back from a terminal, and is refused with no terminal (an agent's shell has none:
+  0.6.0 was cut that way by accident on 2026-11-22). `--train --dry-run` says what it would cut and changes
+  nothing.
 - **On a maintainer's word**, any day, relayed by the orchestrator: `lane.py release <version>`.
 
     .venv/bin/python scripts/lane.py release 0.5.0             # record the intent, advance as far as it can
-    .venv/bin/python scripts/lane.py release --train           # the weekly train: the feeder's milestone, if anything shipped
+    .venv/bin/python scripts/lane.py release --train --dry-run # what the weekly train would cut; changes nothing
     .venv/bin/python scripts/lane.py release --status          # where it is and what it waits on
     .venv/bin/python scripts/lane.py release 0.5.0 --resmoke   # dispatch the smoke again after a fix
     .venv/bin/python scripts/lane.py release --abandon "wrong version"   # drop the record; GitHub is left as it is
@@ -403,8 +406,10 @@ fails with it, and the digest's first line says it.
 4. **tag**: `v<version>` on the merged commit, as `lunate-worker`, read back. `release.yml` publishes it.
 5. **forward** (stable only), the cut: every open issue and pull request of the milestone moves to the next minor
    one (created if missing), as `lunate-worker`, and the feeder is pointed at it through `<state>/milestone.json`,
-   which overrides `lane.json`'s `milestone`. A card mid-rework moves with its pull request, and its rounds go
-   with it (they are kept by card). Recorded in `release.json`, so it runs once.
+   which overrides `lane.json`'s `milestone`. The milestone's description moves too: the next one is created with
+   it, or gets it when it has none (one it has is never overwritten), and the released one keeps its own. A card
+   mid-rework moves with its pull request, and its rounds go with it (they are kept by card). Recorded in
+   `release.json`, so it runs once.
 6. **published**: the tag's Release workflow succeeded, and the release reads back published with six assets
    including `SHA256SUMS`.
 7. **channels** (stable only): `chore/<version>-channels`, filled by `scripts/fill-release-hashes` and `docs-sync`
@@ -443,7 +448,7 @@ the orchestrating user's crontab (`crontab -e`):
     */10 * * * *  cd $LANE && .venv/bin/python scripts/feed.py   >> $HOME/.local/state/lunate-lane/logs/cron.out 2>&1
     5-59/10 * * * * cd $LANE && .venv/bin/python scripts/review.py >> $HOME/.local/state/lunate-lane/logs/cron.out 2>&1
     0 7 * * *     cd $LANE && .venv/bin/python scripts/digest.py
-    0 6 * * 1     cd $LANE && .venv/bin/python scripts/lane.py release --train >> $HOME/.local/state/lunate-lane/logs/cron.out 2>&1
+    0 6 * * 1     cd $LANE && .venv/bin/python scripts/lane.py release --train --yes >> $HOME/.local/state/lunate-lane/logs/cron.out 2>&1
 
 `PATH` must reach `gh` and `git`; sessions get their own PATH, see above. The Monday line is the weekly release
 train; after it, the feeder tick advances the release every 10 minutes. The digest prints its message on stdout, so whatever runs that line
