@@ -8,6 +8,7 @@
     .venv/bin/python scripts/lane.py lunate-pin 16f9e25e9           # publish that main commit for the Lunate harness
     .venv/bin/python scripts/lane.py release 0.5.0                  # release it: one deterministic sequence (#21)
     .venv/bin/python scripts/lane.py release --status               # where the open release is, what it waits on
+    .venv/bin/python scripts/lane.py release --fix-pr 1012          # tag the open release on a merged release fix
 
 Park and unpark take the feeder's lock, so they never interleave with a tick (a busy lock is a refusal: try again
 in a minute). Unpark refuses while a worker runs the card. Both need a --reason, and both write a line to
@@ -200,6 +201,12 @@ def ship_release(args) -> int:
         common.log(JOB, f"release abandoned — by {who} — reason: {args.abandon}")
         print(release.abandon(args.abandon))
         return 0
+    if args.fix_pr is not None:
+        with common.job_lock(release.JOB):
+            data = release.fix(args.fix_pr)
+        common.log(JOB, f"release {data['version']} — tagged on the merge of #{args.fix_pr} — by {who}")
+        print(f"release {data['version']}: the tag goes on the merge of #{args.fix_pr}; the next advance reads it")
+        return 0
     cfg = common.config()
     harness.exit_on_signals()
     if args.train:
@@ -250,9 +257,14 @@ def main(argv=None) -> int:
     ship.add_argument("--yes", action="store_true", help="with --train: cut without asking (the cron line only)")
     ship.add_argument("--resmoke", action="store_true", help="dispatch the smoke again on the next advance")
     ship.add_argument("--abandon", metavar="REASON", help="drop the open release record (nothing on GitHub is undone)")
+    ship.add_argument("--fix-pr", type=int, metavar="N", help="tag the open release on the merge of N, a merged "
+                                                              "chore(release) pull request that fixed it after its merge")
     args = parser.parse_args(argv)
-    if args.command == "release" and not (args.version or args.status or args.abandon or args.train):
-        parser.error("release takes a version, --train, --status or --abandon REASON")
+    if args.command == "release" and not (args.version or args.status or args.abandon or args.train
+                                          or args.fix_pr is not None):
+        parser.error("release takes a version, --train, --status, --fix-pr N or --abandon REASON")
+    if args.command == "release" and args.fix_pr is not None and (args.version or args.train or args.abandon):
+        parser.error("--fix-pr N goes alone: it fixes the release that is open")
     if args.command == "release" and args.version and args.train:
         parser.error("release takes a version or --train, not both")
     if args.command == "release" and (args.dry_run or args.yes) and not args.train:

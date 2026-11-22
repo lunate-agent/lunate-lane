@@ -173,6 +173,17 @@ class GateTests(ReleaseCase):
             self.merge(pull(970, None, branch="release/0.5.0", checks=(("ci-ok", "COMPLETED", "FAILURE"),)))
         self.assertIsNone(self.merge(pull(970, None, branch="release/0.5.0", state="MERGED")))
 
+    def test_a_late_fragment_blocks_the_enqueue_and_none_lets_it_through(self) -> None:
+        p = pull(970, None, branch="release/0.5.0", node_id="PR_970",
+                 reviews=[review("APPROVED", author=self.cfg.parked_assignee)])
+        with mock.patch.object(release, "late_fragments", return_value=["changes/1003.md"]):
+            with self.assertRaisesRegex(release.Blocked, "changes/1003.md reached main after"):
+                self.merge(p)
+        open_pr.enqueue.assert_not_called()
+        with mock.patch.object(release, "late_fragments", return_value=[]):
+            self.assertIn("in the merge queue", self.merge(p))
+        open_pr.enqueue.assert_called_once()
+
     def test_the_feeder_never_enqueues_a_release_pull_request(self) -> None:
         """Approved by anyone, green, not queued: the feeder leaves it to the release job's gate."""
         p = pull(970, None, branch="release/0.5.0", title="chore(release): 0.5.0", reviews=[review("APPROVED")])
@@ -197,6 +208,7 @@ class TagTests(ReleaseCase):
         self.routes["repos/lunate-agent/lunate/git/matching-refs/tags/"] = lambda path: self.tags
         mock.patch.object(release, "_on_base", return_value=True).start()
         mock.patch.object(release, "_main_props", return_value="0.5.0").start()
+        self.tag_check = mock.patch.object(release, "tag_check").start()
         self.addCleanup(mock.patch.stopall)
 
     def tag(self):
@@ -215,6 +227,12 @@ class TagTests(ReleaseCase):
         self.assertIsNone(self.tag(), "the next advance finds it and goes on")
         self.assertEqual(len(self.posts), 1, "never tagged twice")
 
+    def test_a_commit_that_fails_the_tags_gate_is_never_tagged(self) -> None:
+        self.tag_check.side_effect = release.Blocked("v0.5.0 is not tagged: changes/1003.md is missing")
+        with self.assertRaisesRegex(release.Blocked, "changes/1003.md is missing"):
+            self.tag()
+        self.assertEqual(self.posts, [])
+
     def test_a_tag_elsewhere_is_blocked_and_a_wrong_version_is_never_tagged(self) -> None:
         self.tags.append({"ref": "refs/tags/v0.5.0", "object": {"type": "commit", "sha": "f" * 40}})
         with self.assertRaisesRegex(release.Blocked, "already exists at ffffffff"):
@@ -227,6 +245,10 @@ class TagTests(ReleaseCase):
 
 
 class PublishedTests(ReleaseCase):
+    def setUp(self) -> None:
+        super().setUp()
+        self.routes["repos/lunate-agent/lunate/git/matching-refs/tags/"] = []
+
     def published(self):
         return release.step_published(self.cfg, release.parse("0.5.0"), self.data())
 
@@ -246,6 +268,17 @@ class PublishedTests(ReleaseCase):
         runs[0]["conclusion"] = "failure"
         with self.assertRaisesRegex(release.Blocked, "ended failure"):
             self.published()
+
+    def test_a_moved_tag_reads_only_the_run_on_its_own_commit(self) -> None:
+        """v0.6.0's first run failed on #1006's merge; the tag moved to #1012's: that old run is not this tag's."""
+        old = {"id": 1, "status": "completed", "conclusion": "failure", "created_at": "t1", "head_sha": "old"}
+        runs = [old]
+        self.routes["repos/lunate-agent/lunate/actions/workflows/release.yml"] = lambda p: {"workflow_runs": runs}
+        self.routes["repos/lunate-agent/lunate/git/matching-refs/tags/"] = [
+            {"ref": "refs/tags/v0.5.0", "object": {"type": "commit", "sha": "new"}}]
+        self.assertIn("to start", self.published())
+        runs.append({"id": 2, "status": "in_progress", "created_at": "t0", "head_sha": "new"})
+        self.assertIn("run 2", self.published())
 
 
 class ChannelsTests(ReleaseCase):
@@ -374,6 +407,93 @@ class TrainTests(ReleaseCase):
         self.assertIn("no changelog fragment since the last tag", why)
         release.start("0.6.0", "test")
         self.assertEqual(release.train_version(common.config()), (None, "release 0.6.0 is still open"))
+
+
+class FragmentHoldTests(ReleaseCase):
+    """No changelog fragment lands between the release's cut and its merge (lunate#1003 after #1006)."""
+
+    def test_a_pull_request_adds_its_own_fragment_and_a_release_pull_request_adds_none(self) -> None:
+        self.assertEqual(release.adds_fragment(pull(1003, 1002, files=("changes/1003.md", "a.cs"))),
+                         "changes/1003.md")
+        self.assertIsNone(release.adds_fragment(pull(1004, None, files=("docs/x.md",))))
+        self.assertIsNone(release.adds_fragment(pull(1005, None, files=None)))
+        self.assertIsNone(release.adds_fragment(pull(1012, None, branch="chore/release-0.6.0-fragments",
+                                                     title="chore(release): 0.6.0 — fragments",
+                                                     files=("changes/1003.md", "changes/1012.md"))))
+
+    def test_the_hold_runs_from_the_start_until_the_release_pull_request_merges(self) -> None:
+        with mock.patch.object(release, "_pull_for", return_value=None):
+            self.assertEqual(release.holding_fragments(self.cfg), "release 0.5.0 is about to cut its pull request")
+        with mock.patch.object(release, "_pull_for", return_value={"number": 1006, "state": "open"}):
+            self.assertEqual(release.holding_fragments(self.cfg), "release 0.5.0's pull request #1006 is open")
+        with mock.patch.object(release, "_pull_for", return_value={"number": 1006, "merged_at": "t"}):
+            self.assertIsNone(release.holding_fragments(self.cfg))
+        release.abandon("test")
+        with mock.patch.object(release, "_pull_for", side_effect=AssertionError("no release, no read")):
+            self.assertIsNone(release.holding_fragments(self.cfg))
+
+    def test_the_cut_waits_for_a_queued_pull_request_that_adds_a_fragment(self) -> None:
+        queued = [pull(1003, 1002, files=("changes/1003.md",), in_queue=True),
+                  pull(1004, None, files=("docs/x.md",), in_queue=True),
+                  pull(1010, 1009, files=("changes/1010.md",))]  # not queued: the feeder holds it
+        with mock.patch.object(release, "_pull_for", return_value=None), \
+                mock.patch.object(github, "open_pulls", return_value=queued), \
+                mock.patch.object(release, "_cut", side_effect=AssertionError("cut before it landed")):
+            waits = release.step_pr(self.cfg, release.parse("0.5.0"), self.data())
+        self.assertEqual(waits, "#1003 (changes/1003.md) in the merge queue to land first: each adds a changelog "
+                                "fragment the release must assemble")
+
+
+class FixTests(TagTests):
+    """lunate#1012: 0.6.0 fixed after its release pull request merged; the tag goes on the fix's merge."""
+
+    FIX = "f1e" + "0" * 37
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.fix_pr = {"number": 1012, "merged_at": "2026-11-22T18:00:00Z", "merge_commit_sha": self.FIX,
+                       "title": "chore(release): 0.5.0 — late fragments", "head": {"ref": "chore/release-0.5.0-x"}}
+        self.routes["repos/lunate-agent/lunate/pulls/1012"] = lambda path: self.fix_pr
+        self.check = self.tag_check
+
+    def test_the_tag_goes_on_the_fixs_merge_once_recorded(self) -> None:
+        def created(token, method, path, payload=None):
+            self.posts.append((token, method, path, payload))
+            self.tags.append({"ref": "refs/tags/v0.5.0", "object": {"type": "commit", "sha": payload["sha"]}})
+            return {}
+
+        common.rest.side_effect = created
+        self.tags.append({"ref": "refs/tags/v0.5.0", "object": {"type": "commit", "sha": MERGED}})
+        self.assertIsNone(self.tag(), "before the fix is recorded, the old tag is the release's own")
+        out = io.StringIO()
+        with mock.patch("sys.stdout", new=out):
+            self.assertEqual(lane.main(["release", "--fix-pr", "1012"]), 0)
+        self.assertEqual(self.data()["fix_pr"], 1012)
+        with self.assertRaisesRegex(release.Blocked, "already exists at 5a7ac135.*delete the tag and the next advance "
+                                                     "tags f1e000000"):
+            self.tag()
+        self.tags.clear()  # the person deletes the remote tag: nothing consumed it
+        self.assertIn("Release workflow", self.tag())
+        self.assertEqual(self.posts[-1][3], {"ref": "refs/tags/v0.5.0", "sha": self.FIX})
+        self.check.assert_called_once_with(self.cfg, release.parse("0.5.0"), self.FIX)
+
+    def test_a_fix_that_is_not_a_merged_release_pull_request_is_refused(self) -> None:
+        release.fix(1012)
+        self.fix_pr["title"] = "fix: something"
+        with self.assertRaisesRegex(release.Blocked, "the fix #1012 is not a release pull request"):
+            self.tag()
+        self.fix_pr.update(title="chore(release): 0.5.0", merged_at=None)
+        with self.assertRaisesRegex(release.Blocked, "the fix #1012 reads as not merged"):
+            self.tag()
+        self.assertEqual(self.posts, [])
+
+    def test_fix_pr_goes_alone_and_needs_an_open_release(self) -> None:
+        for argv in (["release", "0.5.0", "--fix-pr", "1"], ["release", "--train", "--fix-pr", "1"]):
+            with self.subTest(argv=argv), self.assertRaises(SystemExit), mock.patch("sys.stderr", new=io.StringIO()):
+                lane.main(argv)
+        release.abandon("test")
+        with self.assertRaisesRegex(common.LaneError, "no release is open"):
+            release.fix(1)
 
 
 class AdvanceTests(ReleaseCase):
@@ -512,8 +632,11 @@ if version:
         common._CONFIG = self.cfg
         self.out = mock.patch("sys.stdout", new=io.StringIO())
         self.out.start()
+        self.queue = mock.patch.object(github, "open_pulls", return_value=[])
+        self.queue.start()
 
     def tearDown(self) -> None:
+        self.queue.stop()
         self.out.stop()
         self.state.close()
 
@@ -572,6 +695,45 @@ if version:
                 release.step_pr(self.cfg, release.parse("0.5.0"), {})
         opened.assert_not_called()
         self.assertTrue((self.cfg.state / "worktrees" / "release-0.5.0" / "src.cs").exists(), "kept, never forced")
+
+    def test_1003s_shape_a_fragment_that_merged_after_the_cut_is_named_and_the_release_is_not_enqueued(self) -> None:
+        """lunate#1006 was cut, #1003 merged with changes/1003.md, then #1006 merged without it: v0.6.0's gate
+        failed. Read on the real branches: the fragment on main that the release's cut did not have."""
+        self.seed()
+        with mock.patch.object(release, "_pull_for", return_value=None), \
+                mock.patch.object(harness, "_git_identity", return_value={"name": "T", "email": "t@example.com"}), \
+                mock.patch.object(open_pr, "open_pr", return_value={"number": 1006}):
+            release.step_pr(self.cfg, release.parse("0.5.0"), {})
+        git(self.clone, "push", "-q", "origin", "release/0.5.0")
+        self.assertEqual(release.late_fragments(self.cfg, "release/0.5.0"), [], "nothing landed since the cut")
+        git(self.clone, "checkout", "-q", "main")
+        (self.clone / "changes" / "1003.md").write_text("### Fixed\n\n- a late fix (#1003).\n")
+        (self.clone / "changes" / "README.md").write_text("how to write one\n")
+        git(self.clone, "add", "-A")
+        git(self.clone, "commit", "-q", "-m", "late")
+        git(self.clone, "push", "-q", "origin", "HEAD:main")
+        self.assertEqual(release.late_fragments(self.cfg, "release/0.5.0"), ["changes/1003.md"])
+        release.start("0.5.0", "test")
+        open_release = {"number": 1006, "state": "open", "head": {"ref": "release/0.5.0"}}
+        with mock.patch.object(release, "_pull_for", return_value=open_release), \
+                mock.patch.object(release, "_land", side_effect=AssertionError("never enqueued")):
+            with self.assertRaisesRegex(release.Blocked, "changes/1003.md reached main after the release pull request "
+                                                         "#1006 was cut.*close #1006 and delete release/0.5.0"):
+                release.step_merge(self.cfg, release.parse("0.5.0"), release.intent())
+
+    def test_the_tag_time_check_runs_the_repositorys_assembler_on_the_commit_to_tag(self) -> None:
+        self.seed()
+        check = ('import pathlib, sys\n'
+                 'late = [f.name for f in pathlib.Path("changes").glob("[0-9]*.md")]\n'
+                 'print(f"changes/{late[0]} is missing from CHANGELOG.md", file=sys.stderr) if late else None\n'
+                 'sys.exit(1 if late or sys.argv[-2:] != ["--tag", "v0.5.0"] else 0)\n')
+        (self.clone / "scripts" / "changelog-assemble").write_text(check)
+        git(self.clone, "commit", "-q", "-am", "check")
+        with self.assertRaisesRegex(release.Blocked, r"(?s)v0.5.0 is not tagged.*changes/900.md is missing.*--fix-pr"):
+            release.tag_check(self.cfg, release.parse("0.5.0"), git(self.clone, "rev-parse", "HEAD"))
+        git(self.clone, "rm", "-q", "changes/900.md")
+        git(self.clone, "commit", "-q", "-m", "assembled")
+        release.tag_check(self.cfg, release.parse("0.5.0"), git(self.clone, "rev-parse", "HEAD"))
 
 
 class SandboxedChannelsTests(unittest.TestCase):
