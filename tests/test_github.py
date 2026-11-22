@@ -256,6 +256,16 @@ class NewestCheckTests(unittest.TestCase):
         self.assertEqual([c for c in p.checks if c[0] == "ci-ok"], [("ci-ok", "COMPLETED", "SUCCESS")])
         self.assertIsNone(review_job.skip_reason(p, self.REQUIRED, {}, "lunate-reviewer"))
 
+    def test_a_null_check_suite_or_context_node_is_skipped_not_a_crash(self) -> None:
+        """Hermes's snapshot: GraphQL answered a suite it could not resolve with null in checkSuites.nodes, and
+        newest_runs raised AttributeError on it."""
+        draft, contexts = self.draft_run()
+        done = suite(2, "COMPLETED", "2026-11-12T21:25:58Z", 43310195848)
+        p = self.read([None, draft, None, done], contexts + [None, check("ci-ok", "COMPLETED", "SUCCESS", 201, done)])
+        self.assertEqual(github.check_state(p, self.REQUIRED), "green")
+        self.assertEqual(github.newest_runs([None], [None]), [])
+        self.assertEqual(github._complete({"nodes": [None, {"a": 1}, None]}, "x"), [{"a": 1}])
+
     def test_a_rerun_of_failed_jobs_is_pending_then_green_after_a_cancelled_first_attempt(self) -> None:
         """Same workflow run, attempt 2: the suite is re-queued, attempt 1's runs stay on the head."""
         first = [lambda s: check("verify (macos-latest, 2/4)", "COMPLETED", "CANCELLED", 90, s),
