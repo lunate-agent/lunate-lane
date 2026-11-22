@@ -399,6 +399,18 @@ class FeedTests(unittest.TestCase):
         self.assertEqual(feed.main(), 1)
         self.assertEqual(self.started, [])
 
+    def test_a_card_closed_since_the_milestone_read_is_never_started(self) -> None:
+        """#905: its pull request merged between the milestone read and the pull request read, so the card read open
+        and unclaimed; GitHub had not closed the issue yet either. A fresh read before the launch stops it."""
+        self.state.github.closed_by[2] = 914
+        self.state.github.issue(9, state="closed")
+        feed.tick()
+        self.assertEqual([(l.card, l.rework_pr) for l in self.started], [(1, None)], "only the open card starts")
+        log = (self.state.cfg.state / "logs" / "feed.log").read_text()
+        self.assertIn("card #2 is closed by #914, merged — not started (card #2)", log)
+        self.assertIn("card #9 is CLOSED — not started (rework of #50", log)
+        self.assertFalse((self.state.cfg.state / "attempts" / "2.json").exists(), "no attempt is counted")
+
     def test_a_dry_run_starts_nothing(self) -> None:
         with mock.patch.object(sys, "argv", ["feed.py", "--dry-run"]):
             self.assertEqual(feed.main(), 0)

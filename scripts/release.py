@@ -8,7 +8,8 @@ session decides or edits anything on this path. Each step reads GitHub, does one
 that is done is skipped, so the run continues from the first one not done and running it again is always safe.
 The feeder tick advances an open release every 10 minutes, so nothing waits in a terminal while CI runs.
 
-    preflight  the milestone is empty, main is green, the version is newer, the repository has what a release needs
+    preflight  the milestone is empty, main is green, the version is newer, the repository has what a release needs,
+               and every helper in HELPERS runs once (`--help`, the way the release runs it: the self-test)
     pr         `release/<version>`, `chore(release): <version>`, by lunate-worker: `changelog-assemble --release`
                in the session sandbox, ready and NOT armed
     approval   the one human gate: the maintainer approves the release pull request at its head
@@ -16,7 +17,8 @@ The feeder tick advances an open release every 10 minutes, so nothing waits in a
     tag        `v<version>` on the merged commit, as lunate-worker; release.yml publishes it
     published  the Release workflow on the tag succeeded and the release carries its assets and SHA256SUMS
     channels   stable only: `chore/<version>-channels` filled by `scripts/fill-release-hashes`, approved by the
-               reviewer identity once its diff touches only the channel manifests and the README, then enqueued
+               reviewer identity once its diff touches only the channel manifests and the README, then enqueued;
+               done with no pull request when the fill changes nothing (main already carries them)
     mirror     stable only: the Homebrew tap and the Scoop bucket get main's formula and manifest
     smoke      smoke.yml on the tag, dispatched once and waited for
     close      stable only: the milestone is closed, the next one created, and the feeder pointed at it
@@ -30,10 +32,13 @@ from __future__ import annotations
 import base64
 import dataclasses
 import fnmatch
+import io
 import json
 import pathlib
 import re
+import shutil
 import subprocess
+import tarfile
 import time
 
 from scripts import common, github, harness, identity, open_pr
@@ -49,6 +54,10 @@ ASSET_COUNT = 6
 MIRRORS = (("lunate-agent/homebrew-tap", "packaging/homebrew/lunate.rb", "Formula/lunate.rb"),
            ("lunate-agent/scoop-bucket", "packaging/scoop/lunate.json", "bucket/lunate.json"))
 PYTHON = "/usr/bin/python3"
+# Every repository script the release path runs. Each runs once in the preflight's self-test, so an import error
+# shows up before a real release, not halfway through one (lunate#974: `python3 -I` drops the script's directory
+# from sys.path). A step runs a script only through `_helper`, which refuses one not named here.
+HELPERS = ("scripts/changelog-assemble", "scripts/fill-release-hashes", "scripts/docs-sync")
 
 
 class Blocked(LaneError):
@@ -240,7 +249,7 @@ def _only(paths: list[str], allowed: tuple) -> list[str]:
     return [p for p in paths if not any(fnmatch.fnmatch(p, pattern) for pattern in allowed)]
 
 
-def _sandboxed_run(cfg: common.Config, worktree: pathlib.Path, scratch: pathlib.Path, branch: str,
+def _sandboxed_run(cfg: common.Config, worktree: pathlib.Path, scratch: pathlib.Path, branch: str | None,
                    argv: list[str]) -> str:
     """Run one of the repository's own scripts in the session sandbox: it can write the worktree and its scratch,
     nothing else; no credential in its environment."""
@@ -257,6 +266,43 @@ def _sandboxed_run(cfg: common.Config, worktree: pathlib.Path, scratch: pathlib.
         tail = (done.stderr + done.stdout).strip()[-600:]
         raise Blocked(f"`{' '.join(argv[1:])}` failed ({harness.describe_rc(done.returncode)}): {tail or 'no output'}")
     return done.stdout
+
+
+def _helper(cfg: common.Config, worktree: pathlib.Path, scratch: pathlib.Path, branch: str | None, script: str,
+            *args: str) -> str:
+    """Run one of HELPERS as the release runs every one: `python3 -I`, in the session sandbox."""
+    if script not in HELPERS:
+        raise LaneError(f"{script} is not in release.HELPERS — add it there, so the preflight's self-test runs it")
+    return _sandboxed_run(cfg, worktree, scratch, branch, [PYTHON, "-I", script, *args])
+
+
+def self_test(cfg: common.Config, ref: str) -> None:
+    """Every helper in HELPERS, run once with `--help` on `ref`'s scripts/, exactly as a step runs it. A helper that is
+    missing, does not import, or does not parse its arguments blocks by name. The tree is `git archive` of scripts/
+    into the self-test's own scratch, not a worktree: nothing in the checkout to remove, and it goes even when a run
+    failed."""
+    scratch = common.state_dir("scratch", "release-self-test")
+    tree = scratch / "tree"
+    shutil.rmtree(tree, ignore_errors=True)
+    tree.mkdir()
+    try:
+        with common.checkout_lock():
+            archive = subprocess.run(["git", "-C", str(cfg.checkout), "archive", "--format=tar", ref, "scripts"],
+                                     capture_output=True, timeout=120)
+        if archive.returncode != 0:
+            raise LaneError(f"scripts/ at {ref} could not be read: {archive.stderr.decode(errors='replace').strip()}")
+        with tarfile.open(fileobj=io.BytesIO(archive.stdout)) as tar:
+            tar.extractall(tree, filter="data")
+        missing = [script for script in HELPERS if not (tree / script).is_file()]
+        if missing:
+            raise Blocked(f"{ref} has no {', '.join(missing)} — the release path runs it")
+        for script in HELPERS:
+            try:
+                _helper(cfg, tree, scratch, None, script, "--help")
+            except Blocked as exc:
+                raise Blocked(f"the self-test of {script} on {ref} failed — {exc}") from exc
+    finally:
+        shutil.rmtree(tree, ignore_errors=True)
 
 
 def _cut(cfg: common.Config, branch: str, name: str, subject: str) -> pathlib.Path | None:
@@ -338,6 +384,7 @@ def step_preflight(cfg: common.Config, v: Version, data: dict) -> str | None:
         return f"{cfg.aggregate_check} is still running on {cfg.base} at {sha[:9]}"
     if state != "green":
         raise Blocked(f"{cfg.base} is not green at {sha[:9]} ({cfg.aggregate_check} {state})")
+    self_test(cfg, sha)
     return None
 
 
@@ -375,9 +422,8 @@ def step_pr(cfg: common.Config, v: Version, data: dict) -> str | None:
     if worktree is not None:
         scratch = common.state_dir("scratch", f"release-{v.text}")
         try:
-            _sandboxed_run(cfg, worktree, scratch, branch,
-                           [PYTHON, "-I", "scripts/changelog-assemble", "--release", v.text])
-            _sandboxed_run(cfg, worktree, scratch, branch, [PYTHON, "-I", "scripts/changelog-assemble", "--check"])
+            _helper(cfg, worktree, scratch, branch, "scripts/changelog-assemble", "--release", v.text)
+            _helper(cfg, worktree, scratch, branch, "scripts/changelog-assemble", "--check")
             changed = _changed(cfg, worktree)
             stray = _only(changed, RELEASE_FILES)
             if stray or "CHANGELOG.md" not in changed or "Directory.Build.props" not in changed:
@@ -494,6 +540,8 @@ def channels_check(changed: list[str]) -> list[str]:
 def step_channels(cfg: common.Config, v: Version, data: dict) -> str | None:
     if not v.stable:
         return None  # a prerelease stays off the stable channels
+    if data.get("channels"):
+        return None  # recorded as done: main already carried the release's channel files
     branch = f"chore/{v.text}-channels"
     pull = _pull_for(cfg, branch)
     if pull is None:
@@ -509,12 +557,11 @@ def step_channels(cfg: common.Config, v: Version, data: dict) -> str | None:
                 sums = scratch / "SHA256SUMS"
                 sums.unlink(missing_ok=True)
                 common.gh("release", "download", v.tag, "-R", cfg.slug, "-p", "SHA256SUMS", "--dir", str(scratch))
-                _sandboxed_run(cfg, worktree, scratch, branch,
-                               [PYTHON, "-I", "scripts/fill-release-hashes", v.tag, "--sums", str(sums)])
-                _sandboxed_run(cfg, worktree, scratch, branch, [PYTHON, "-I", "scripts/docs-sync", "--write"])
+                _helper(cfg, worktree, scratch, branch, "scripts/fill-release-hashes", v.tag, "--sums", str(sums))
+                _helper(cfg, worktree, scratch, branch, "scripts/docs-sync")  # no argument: it writes the regions
                 changed = _changed(cfg, worktree)
-                if not changed:
-                    raise Blocked(f"fill-release-hashes changed nothing for {v.tag}")
+                if not changed:  # main already carries this release's version, hashes and README line
+                    return _channels_on_main(cfg, v, data, worktree, branch)
                 stray = channels_check(changed)
                 if stray:
                     raise Blocked(f"the channel fill changed {', '.join(stray)} — only the channel manifests and the "
@@ -536,6 +583,20 @@ def step_channels(cfg: common.Config, v: Version, data: dict) -> str | None:
     if not pull.get("merged_at"):
         _approve_channels(cfg, v, number)
     return _land(cfg, number, cfg.reviewer_app, "the channels pull request")
+
+
+def _channels_on_main(cfg: common.Config, v: Version, data: dict, worktree: pathlib.Path, branch: str) -> None:
+    """The fill changed nothing: the manifests and the README on main already name this release's version and its
+    SHA256SUMS (they landed some other way, as 0.5.0's did in lunate#974). There is no pull request to open: the
+    worktree and its unpushed branch go, the step is recorded as done, and the release moves on to the mirror."""
+    head = common.wt_git(cfg, worktree, "rev-parse", "HEAD").strip()
+    _drop(cfg, worktree)
+    with common.checkout_lock():
+        common.git(cfg.checkout, "update-ref", "-d", f"refs/heads/{branch}", head)  # at its checked tip, never pushed
+    data["channels"] = f"{cfg.base} already carried {v.tag}'s channel manifests and README line at {head[:9]}"
+    _write(data)
+    common.log(JOB, f"{v.text}: channels done — {data['channels']}; no pull request needed")
+    return None
 
 
 def _approve_channels(cfg: common.Config, v: Version, number: int) -> None:
