@@ -17,7 +17,8 @@ The feeder tick advances an open release every 10 minutes, so nothing waits in a
     tag        `v<version>` on the merged commit, as lunate-worker; release.yml publishes it
     published  the Release workflow on the tag succeeded and the release carries its assets and SHA256SUMS
     channels   stable only: `chore/<version>-channels` filled by `scripts/fill-release-hashes`, approved by the
-               reviewer identity once its diff touches only the channel manifests and the README, then enqueued
+               reviewer identity once its diff touches only the channel manifests and the README, then enqueued;
+               done with no pull request when the fill changes nothing (main already carries them)
     mirror     stable only: the Homebrew tap and the Scoop bucket get main's formula and manifest
     smoke      smoke.yml on the tag, dispatched once and waited for
     close      stable only: the milestone is closed, the next one created, and the feeder pointed at it
@@ -539,6 +540,8 @@ def channels_check(changed: list[str]) -> list[str]:
 def step_channels(cfg: common.Config, v: Version, data: dict) -> str | None:
     if not v.stable:
         return None  # a prerelease stays off the stable channels
+    if data.get("channels"):
+        return None  # recorded as done: main already carried the release's channel files
     branch = f"chore/{v.text}-channels"
     pull = _pull_for(cfg, branch)
     if pull is None:
@@ -555,10 +558,10 @@ def step_channels(cfg: common.Config, v: Version, data: dict) -> str | None:
                 sums.unlink(missing_ok=True)
                 common.gh("release", "download", v.tag, "-R", cfg.slug, "-p", "SHA256SUMS", "--dir", str(scratch))
                 _helper(cfg, worktree, scratch, branch, "scripts/fill-release-hashes", v.tag, "--sums", str(sums))
-                _helper(cfg, worktree, scratch, branch, "scripts/docs-sync", "--write")
+                _helper(cfg, worktree, scratch, branch, "scripts/docs-sync")  # no argument: it writes the regions
                 changed = _changed(cfg, worktree)
-                if not changed:
-                    raise Blocked(f"fill-release-hashes changed nothing for {v.tag}")
+                if not changed:  # main already carries this release's version, hashes and README line
+                    return _channels_on_main(cfg, v, data, worktree, branch)
                 stray = channels_check(changed)
                 if stray:
                     raise Blocked(f"the channel fill changed {', '.join(stray)} — only the channel manifests and the "
@@ -580,6 +583,20 @@ def step_channels(cfg: common.Config, v: Version, data: dict) -> str | None:
     if not pull.get("merged_at"):
         _approve_channels(cfg, v, number)
     return _land(cfg, number, cfg.reviewer_app, "the channels pull request")
+
+
+def _channels_on_main(cfg: common.Config, v: Version, data: dict, worktree: pathlib.Path, branch: str) -> None:
+    """The fill changed nothing: the manifests and the README on main already name this release's version and its
+    SHA256SUMS (they landed some other way, as 0.5.0's did in lunate#974). There is no pull request to open: the
+    worktree and its unpushed branch go, the step is recorded as done, and the release moves on to the mirror."""
+    head = common.wt_git(cfg, worktree, "rev-parse", "HEAD").strip()
+    _drop(cfg, worktree)
+    with common.checkout_lock():
+        common.git(cfg.checkout, "update-ref", "-d", f"refs/heads/{branch}", head)  # at its checked tip, never pushed
+    data["channels"] = f"{cfg.base} already carried {v.tag}'s channel manifests and README line at {head[:9]}"
+    _write(data)
+    common.log(JOB, f"{v.text}: channels done — {data['channels']}; no pull request needed")
+    return None
 
 
 def _approve_channels(cfg: common.Config, v: Version, number: int) -> None:

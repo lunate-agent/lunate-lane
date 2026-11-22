@@ -32,6 +32,7 @@ class FakeIssues:
         self.drop_assignee = False
         self.calls: list = []
         self.comments: list = []  # (number, body): what `open_pr.comment` would have posted
+        self.closed_by: dict = {}  # card -> merged pull request that closes it (the issue may still read open)
 
     def issue(self, number: int, **over) -> dict:
         n = int(number)
@@ -104,10 +105,17 @@ class FakeIssues:
     def get(self, path):
         return self.call("", "GET", "/" + path)
 
+    def _closed_card(self, cfg, card: int) -> str | None:
+        i = self.issues.get(int(card))
+        if i and i["state"] != "open":
+            return f"is {i['state'].upper()}"
+        return f"is closed by #{self.closed_by[card]}, merged" if card in self.closed_by else None
+
     def install(self) -> list:
         from unittest import mock
         from scripts import open_pr, parked
-        return [mock.patch.object(parked, "_token", return_value="t"), mock.patch.object(parked, "_call", self.call),
+        return [mock.patch.object(github, "closed_card", self._closed_card),
+                mock.patch.object(parked, "_token", return_value="t"), mock.patch.object(parked, "_call", self.call),
                 mock.patch.object(parked, "_get", self.get),
                 mock.patch.object(parked, "_card_pulls", lambda cfg, card: set(self.pulls_of.get(card, ()))),
                 mock.patch.object(parked, "_blockers", lambda cfg, card: tuple(sorted(

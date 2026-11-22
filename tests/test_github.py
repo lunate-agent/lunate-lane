@@ -730,6 +730,29 @@ class WaitsOnTests(unittest.TestCase):
             self.assertEqual(github.open_blockers(CFG, 751), (749, 750))
 
 
+class ClosedCardTests(unittest.TestCase):
+    """The fresh read before a launch (#905): a closed issue, or one a merged pull request closes, is not started."""
+
+    def read(self, state, closers, more=False):
+        answer = {"repository": {"issue": {"state": state, "closedByPullRequestsReferences": page(closers, more=more)}}}
+        with mock.patch.object(common, "graphql", return_value=answer):
+            return github.closed_card(CFG, 905)
+
+    def test_open_with_no_merged_closer_may_start(self) -> None:
+        self.assertIsNone(self.read("OPEN", [{"number": 914, "merged": False}]))
+
+    def test_closed_or_closed_by_a_merged_pull_request_may_not(self) -> None:
+        self.assertEqual(self.read("CLOSED", []), "is CLOSED")
+        self.assertEqual(self.read("OPEN", [{"number": 914, "merged": True}]), "is closed by #914, merged")
+
+    def test_an_incomplete_read_raises(self) -> None:
+        with self.assertRaises(GhError):
+            self.read("OPEN", [], more=True)
+        with mock.patch.object(common, "graphql", return_value={"repository": {"issue": None}}), \
+                self.assertRaises(GhError):
+            github.closed_card(CFG, 905)
+
+
 class RunDraftTests(unittest.TestCase):
     """Whether a workflow run started from a draft payload, read from its ci-ok job's log (#815's two runs)."""
 

@@ -233,6 +233,10 @@ def tick(dry_run: bool = False) -> None:
     for launch in launches:
         what = (f"rework of #{launch.rework_pr} for card #{launch.card} ({launch.reason})" if launch.rework_pr
                 else f"card #{launch.card}")
+        closed = github.closed_card(cfg, launch.card)  # read now, not with the milestone: it may have just closed
+        if closed:
+            common.log(JOB, f"card #{launch.card} {closed} — not started ({what})")
+            continue
         deferred = parked.defer(cfg, launch.card, launch.person, JOB, dry_run) if launch.person is not None else None
         if deferred == parked.WAIT:  # it only asked for another pull request to merge first: the card waits on it
             continue

@@ -444,6 +444,67 @@ if version:
         self.assertTrue((self.cfg.state / "worktrees" / "release-0.5.0" / "src.cs").exists(), "kept, never forced")
 
 
+class SandboxedChannelsTests(unittest.TestCase):
+    """The channels step on a real worktree: a fill that changes nothing means main already carries the release's
+    channel files, so the step is recorded as done with no pull request, and the release moves on."""
+
+    FILL = ('import pathlib, sys\n'
+            'p = pathlib.Path("packaging/homebrew/lunate.rb")\n'
+            'p.write_text("version " + sys.argv[1] + "\\n")\n')
+    SYNC = 'import sys\nassert sys.argv[1:] == [], sys.argv  # it writes with no argument\n'
+
+    def setUp(self) -> None:
+        if not pathlib.Path(harness.SANDBOX_EXEC).exists():
+            self.skipTest("sandbox-exec is not on this host")
+        self.state = TempState()
+        self.origin, self.clone = origin_and_clone(self.state.root / "repos")
+        self.state.cfg = self.cfg = __import__("dataclasses").replace(self.state.cfg, checkout=self.clone)
+        common._CONFIG = self.cfg
+        self.out = mock.patch("sys.stdout", new=io.StringIO())
+        self.out.start()
+        release.start("0.5.0", "test")
+
+    def tearDown(self) -> None:
+        self.out.stop()
+        self.state.close()
+
+    def seed(self, formula: str) -> None:
+        for path, text in (("scripts/fill-release-hashes", self.FILL), ("scripts/docs-sync", self.SYNC),
+                           ("packaging/homebrew/lunate.rb", formula)):
+            (self.clone / path).parent.mkdir(parents=True, exist_ok=True)
+            (self.clone / path).write_text(text)
+        git(self.clone, "add", "-A")
+        git(self.clone, "commit", "-q", "-m", "seed")
+        git(self.clone, "push", "-q", "origin", "HEAD:main")
+
+    def step(self):
+        with mock.patch.object(release, "_pull_for", return_value=None), \
+                mock.patch.object(common, "gh", return_value=""), \
+                mock.patch.object(harness, "_git_identity", return_value={"name": "T", "email": "t@example.com"}), \
+                mock.patch.object(open_pr, "open_pr", side_effect=lambda *a, **k: self.opened.append(a) or
+                                  {"number": 975}):
+            return release.step_channels(self.cfg, release.parse("0.5.0"), release.intent())
+
+    def test_main_already_filled_is_done_with_no_pull_request(self) -> None:
+        self.seed("version v0.5.0\n")
+        self.opened = []
+        self.assertIsNone(self.step())
+        self.assertEqual(self.opened, [])
+        self.assertIn("already carried v0.5.0's channel manifests", release.intent()["channels"])
+        self.assertFalse((self.cfg.state / "worktrees" / "channels-0.5.0").exists(), "the worktree is removed")
+        self.assertEqual(git(self.clone, "branch", "--list", "chore/0.5.0-channels"), "", "the branch is removed")
+        with mock.patch.object(release, "_pull_for", side_effect=AssertionError("read again")):
+            self.assertIsNone(release.step_channels(self.cfg, release.parse("0.5.0"), release.intent()))
+
+    def test_a_stale_main_gets_its_channels_pull_request(self) -> None:
+        self.seed("version v0.4.0\n")
+        self.opened = []
+        self.assertEqual(self.step(), "the required checks on #975")
+        (args,) = self.opened
+        self.assertEqual(args[1:3], ("chore/0.5.0-channels", "chore: fill 0.5.0 release hashes"))
+        self.assertNotIn("channels", release.intent())
+
+
 class SelfTestTests(unittest.TestCase):
     """The preflight runs every helper the release path calls once, the way a step runs it (`python3 -I`, in the
     session sandbox), so an import error blocks before a release, not in its channels step (lunate#974)."""

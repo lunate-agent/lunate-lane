@@ -398,6 +398,28 @@ def open_blockers(cfg: common.Config, card: int) -> tuple:
                         if b.get("state") == "OPEN"))
 
 
+CARD_STATE = """query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){
+state closedByPullRequestsReferences(first:20,includeClosedPrs:true){pageInfo{hasNextPage} nodes{number merged}}}}}"""
+
+
+def closed_card(cfg: common.Config, card: int) -> str | None:
+    """Why `card` must not be started, read fresh just before a launch, or None. It is closed, or a merged pull
+    request closes it: GitHub closes the issue a moment after the merge, so the milestone read earlier in the same
+    tick can still list it while the open pull requests no longer carry it (#905, 2026-11-16 01:00:10). Unreadable
+    raises."""
+    data = common.graphql(CARD_STATE, owner=cfg.owner, name=cfg.name, n=int(card))
+    issue = (data.get("repository") or {}).get("issue")
+    if not issue:
+        raise GhError(f"issue #{card} was not found in {cfg.slug}")
+    if issue.get("state") != "OPEN":
+        return f"is {issue.get('state')}"
+    merged = sorted(p["number"] for p in _complete(issue["closedByPullRequestsReferences"],
+                                                   f"issue #{card}'s closing pull requests") if p.get("merged"))
+    if merged:
+        return "is closed by " + ", ".join(f"#{n}" for n in merged) + ", merged"
+    return None
+
+
 # "PR #827 (S7, head `b468752d`) must merge first, or …" (#807), "#755 has to land first", "waits on #755",
 # "blocked by card #755": the reason's first sentence is a merge-first dependency on one pull request or card
 MERGE_FIRST = re.compile(
