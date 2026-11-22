@@ -71,13 +71,20 @@ def decide_all(cfg: common.Config) -> tuple[list[cards.Launch], list[str], list[
     superseded = [p for p in worker_pulls if p.state == "OPEN" and github.superseded_by_person(p, cfg.reviewer_app)[1]]
     # a fragment that lands while a release pull request is open ships in neither changelog (lunate#1003 after #1006):
     # it waits for the release to merge. Read only when one would be enqueued, so a quiet tick costs nothing.
+    # Auto-merge would land one past this hold the moment the reviewer approves (lunate#1014, armed by its worker
+    # before 0.6.0's fix #1012 merged): an armed one is disarmed while the hold lasts, and enqueued after it.
     adding = [p for p in enqueue + ejected if release.adds_fragment(p)]
-    held = release.holding_fragments(cfg) if adding else None
+    armed = [p for p in worker_pulls if p.state == "OPEN" and p.auto_merge and p not in disarm
+             and release.adds_fragment(p)]
+    held = release.holding_fragments(cfg) if adding or armed else None
     if held:
         for p in adding:
             notes.append(f"#{p.number} adds {release.adds_fragment(p)}: not enqueued while {held}")
+        for p in armed:
+            notes.append(f"#{p.number} adds {release.adds_fragment(p)}: auto-merge turned off while {held}")
         enqueue = [p for p in enqueue if p not in adding]
         ejected = [p for p in ejected if p not in adding]
+        disarm = disarm + armed
     return launches, notes, rerun, enqueue, disarm, ejected, superseded
 
 
@@ -315,7 +322,8 @@ def tick(dry_run: bool = False) -> None:
         requeue(cfg, p, dry_run)
     for p in disarms:
         why = (github.waits_line(p.waits_on) if p.waits_on else
-               f"has a Decision newer than {p.head[:8]}: {p.decided_after[:120]}")
+               f"has a Decision newer than {p.head[:8]}: {p.decided_after[:120]}" if p.decided_after else
+               f"adds {release.adds_fragment(p)} while a release holds fragments")
         what = f"#{p.number}: card #{p.card} {why}"
         if dry_run:
             common.log(JOB, f"would turn auto-merge off on {what}")
@@ -323,7 +331,8 @@ def tick(dry_run: bool = False) -> None:
         open_pr.disarm(p.number, p.node_id)
         common.log(JOB, f"turned auto-merge off on {what} — "
                         + ("it is enqueued once approved after they close" if p.waits_on else
-                           "it is reworked first, then reviewed and enqueued again"))
+                           "it is reworked first, then reviewed and enqueued again" if p.decided_after else
+                           "it is enqueued once the release has merged"))
     # after the launches, so a cleanup that fails never holds work back — it still fails the tick, by name
     cleanup.tidy(cfg, JOB, github.open_pulls(cfg), harness.running_workers(), dry_run)
     if not dry_run:  # last: a release that is blocked fails the tick by name, after everything else ran

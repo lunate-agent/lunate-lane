@@ -989,6 +989,37 @@ class FragmentHoldTests(unittest.TestCase):
             self.assertEqual(feed.main(), 0)
         self.enqueue.assert_called_once_with(1003, "PR_1003", "h1")
 
+    def test_1014s_shape_an_armed_fragment_is_disarmed_while_the_fix_is_open_and_left_alone_after(self) -> None:
+        """lunate#1014 was armed by its worker; the reviewer approved while 0.6.0's fix #1012 was open and auto-merge
+        put it in the queue four seconds later, past the enqueue hold."""
+        from scripts import open_pr
+        p = pull(1014, 1001, node_id="PR_1014", auto_merge=True, files=("changes/1014.md", "a.cs"))
+        github.open_pulls.return_value = [p]
+        github.pull.return_value = p
+        release.start("0.6.0", "test")
+        disarm = mock.patch.object(open_pr, "disarm").start()
+        with mock.patch.object(release, "_pull_for", return_value={"number": 1006, "state": "open"}):
+            self.assertEqual(feed.main(), 0)
+        disarm.assert_called_once_with(1014, "PR_1014")
+        self.assertIn("#1014 adds changes/1014.md: auto-merge turned off while release 0.6.0's pull request #1006 "
+                      "is open", self.log())
+        self.assertIn("it is enqueued once the release has merged", self.log())
+        disarm.reset_mock()
+        with mock.patch.object(release, "_pull_for", return_value={"number": 1006, "merged_at": "t"}):
+            self.assertEqual(feed.main(), 0)
+        disarm.assert_not_called()
+
+    def test_an_armed_pull_request_without_a_fragment_stays_armed_and_nothing_is_read(self) -> None:
+        from scripts import open_pr
+        p = pull(1004, 1001, node_id="PR_1004", auto_merge=True, files=("docs/x.md",))
+        github.open_pulls.return_value = [p]
+        github.pull.return_value = p
+        release.start("0.6.0", "test")
+        disarm = mock.patch.object(open_pr, "disarm").start()
+        with mock.patch.object(release, "_pull_for", side_effect=AssertionError("read only for a fragment")):
+            self.assertEqual(feed.main(), 0)
+        disarm.assert_not_called()
+
     def test_a_pull_request_without_a_fragment_is_enqueued_during_a_release(self) -> None:
         self.ready(1004, None, "docs/dev/distribution.md")
         release.start("0.6.0", "test")

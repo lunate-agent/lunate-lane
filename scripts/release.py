@@ -76,6 +76,10 @@ class Blocked(LaneError):
     """The release cannot go on without a person: said by name, every tick, until it is fixed."""
 
 
+class Waiting(Exception):
+    """A step that cannot act yet, and needs no person: the advance records it as waiting, not blocked."""
+
+
 @dataclasses.dataclass(frozen=True)
 class Version:
     text: str
@@ -620,6 +624,8 @@ def _release_commit(cfg: common.Config, v: Version, data: dict) -> str:
         if not github.is_release(str((pull.get("head") or {}).get("ref") or ""), str(pull.get("title") or "")):
             raise Blocked(f"{what} is not a release pull request (branch release/<version> or a chore(release) "
                           "title) — release.yml's gate would refuse its commit")
+        if not pull.get("merged_at") and pull.get("state") == "open":
+            raise Waiting(f"{what} to merge")
     else:
         pull = _pull_for(cfg, f"release/{v.text}") or {}
         what = f"the release pull request for {v.text}"
@@ -910,6 +916,8 @@ def advance(cfg: common.Config) -> str:
     for name, step in STEPS:
         try:
             waiting = step(cfg, v, data)
+        except Waiting as exc:
+            waiting = str(exc)
         except Blocked as exc:
             data["last"] = f"{name}: blocked — {exc}"
             _write(data)
