@@ -172,8 +172,9 @@ def train_version(cfg: common.Config) -> tuple[str | None, str]:
 
 
 def fix(number: int) -> dict:
-    """Record that the open release is tagged on `number`'s merge: a `chore(release)` pull request that fixed the
-    release after its own pull request merged (lunate#1012 for 0.6.0). The tag step checks the rest."""
+    """Record that the open release is tagged on `number`'s merge: a `chore(release)` pull request that fixes the
+    release after its own pull request merged (lunate#1012 for 0.6.0). Record it as soon as the fix is opened: until
+    it merges, the feeder holds every pull request that adds a fragment, and the tag step waits on it."""
     data = intent()
     if not data:
         raise LaneError("no release is open to fix")
@@ -386,11 +387,16 @@ def adds_fragment(p: github.Pull) -> str | None:
 def holding_fragments(cfg: common.Config) -> str | None:
     """Why the feeder must not enqueue a pull request that adds a changelog fragment right now, or None. From the
     release's start until its pull request has merged, a fragment that lands is in neither the assembled section nor
-    the next one: the release's squash deletes only the fragments it saw (lunate#1003 after #1006)."""
+    the next one: the release's squash deletes only the fragments it saw (lunate#1003 after #1006). A release fixed
+    after its merge (`--fix-pr`) holds them until the fix merges too: the tag goes on the fix's merge, so a fragment
+    that lands before it fails the tag's gate (lunate#996 and #1011 while #1012 was open)."""
     data = intent()
     if data is None:
         return None
     v = parse(data["version"])
+    if data.get("fix_pr"):
+        fix = _api(f"repos/{cfg.slug}/pulls/{int(data['fix_pr'])}")
+        return None if fix.get("merged_at") else f"release {v.text}'s fix #{data['fix_pr']} is open"
     pull = _pull_for(cfg, f"release/{v.text}")
     if pull and pull.get("merged_at"):
         return None

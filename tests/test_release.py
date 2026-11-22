@@ -487,6 +487,17 @@ class FixTests(TagTests):
             self.tag()
         self.assertEqual(self.posts, [])
 
+    def test_996_and_1011s_shape_fragments_are_held_until_the_recorded_fix_merges(self) -> None:
+        """#1006 had merged, so the hold had ended; #996 and #1011 landed while the fix #1012 was open and its
+        merge, the commit to tag, would have failed the gate again."""
+        with mock.patch.object(release, "_pull_for", return_value={"number": 970, "merged_at": "t"}):
+            self.assertIsNone(release.holding_fragments(self.cfg))
+        release.fix(1012)
+        self.fix_pr["merged_at"] = None
+        self.assertEqual(release.holding_fragments(self.cfg), "release 0.5.0's fix #1012 is open")
+        self.fix_pr["merged_at"] = "2026-11-22T19:00:00Z"
+        self.assertIsNone(release.holding_fragments(self.cfg))
+
     def test_fix_pr_goes_alone_and_needs_an_open_release(self) -> None:
         for argv in (["release", "0.5.0", "--fix-pr", "1"], ["release", "--train", "--fix-pr", "1"]):
             with self.subTest(argv=argv), self.assertRaises(SystemExit), mock.patch("sys.stderr", new=io.StringIO()):
