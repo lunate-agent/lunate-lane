@@ -156,7 +156,8 @@ def login(raw: dict | None) -> str:
 def _complete(connection: dict, what: str) -> list:
     if (connection.get("pageInfo") or {}).get("hasNextPage"):
         raise GhError(f"{what} has more entries than one page holds — refusing to decide on part of it")
-    return connection.get("nodes") or []
+    # GraphQL answers a node it could not resolve (a deleted suite, a run it cannot read) with null in place
+    return [node for node in connection.get("nodes") or [] if node is not None]
 
 
 def _paged(query: str, path: tuple, what: str, **variables) -> list:
@@ -654,6 +655,8 @@ def newest_runs(check_runs: list, suites: list) -> list:
     failure is the newest `ci-ok` until the ready run creates its own. The returned runs are copies with
     status IN_PROGRESS and no conclusion where that applies.
     """
+    suites = [s for s in suites if s is not None]  # a null node: GraphQL could not resolve that suite
+    check_runs = [c for c in check_runs if c is not None]
     every_suite = {int(s.get("databaseId") or 0): s for s in suites}
     for c in check_runs:
         suite = c.get("checkSuite") or {}
