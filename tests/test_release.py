@@ -482,8 +482,17 @@ class FixTests(TagTests):
         self.fix_pr["title"] = "fix: something"
         with self.assertRaisesRegex(release.Blocked, "the fix #1012 is not a release pull request"):
             self.tag()
-        self.fix_pr.update(title="chore(release): 0.5.0", merged_at=None)
+        self.fix_pr.update(title="chore(release): 0.5.0", merged_at=None, state="closed")
         with self.assertRaisesRegex(release.Blocked, "the fix #1012 reads as not merged"):
+            self.tag()
+        self.assertEqual(self.posts, [])
+
+    def test_an_open_fix_is_waited_on_not_blocked(self) -> None:
+        """Every feed tick logged 'FAILED — the fix #1012 reads as not merged' while #1012 sat in review: a wait,
+        not something for a person to fix."""
+        release.fix(1012)
+        self.fix_pr.update(merged_at=None, state="open")
+        with self.assertRaisesRegex(release.Waiting, "the fix #1012 to merge"):
             self.tag()
         self.assertEqual(self.posts, [])
 

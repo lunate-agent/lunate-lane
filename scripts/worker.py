@@ -26,7 +26,7 @@ import sys
 if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
-from scripts import cards, common, dispatch_card, github, harness, open_pr, parked, secret_scan  # noqa: E402
+from scripts import cards, common, dispatch_card, github, harness, open_pr, parked, release, secret_scan  # noqa: E402
 from scripts.common import GitError, LaneError  # noqa: E402
 
 COMMENT_LIMIT = 60000
@@ -470,6 +470,19 @@ def start_at_head(cfg: common.Config, worktree: pathlib.Path, number: int, pr: i
     return what
 
 
+
+def fragment_hold(cfg: common.Config, worktree: pathlib.Path) -> tuple[str, str] | None:
+    """(the fragment, why it is held) when the branch adds a changelog fragment while a release holds them, else
+    None. The fragments are those the branch adds against origin/<base>; the hold is `release.holding_fragments`."""
+    added = common.wt_git(cfg, worktree, "diff", "--name-only", "--diff-filter=A", f"origin/{cfg.base}...HEAD",
+                          "--", "changes/")
+    fragments = sorted(line.strip() for line in added.splitlines() if release.FRAGMENT.match(line.strip()))
+    if not fragments:
+        return None
+    held = release.holding_fragments(cfg)
+    return (", ".join(fragments), held) if held else None
+
+
 def drive(cfg: common.Config, number: int, rework_pr: int | None) -> int:
     job = f"worker-{number}"
     worktree = prepare_worktree(cfg, number)
@@ -623,6 +636,11 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
     blockers = github.open_blockers(cfg, number)
     if blockers:
         common.log(job, f"card #{number} {github.waits_line(blockers)} — the pull request is left unarmed")
+    # a fragment armed now lands the moment the reviewer approves, past the feeder's hold (lunate#1014 merged while
+    # 0.6.0's fix #1012 was open): left unarmed, and the feeder enqueues it once the release has merged
+    held = fragment_hold(cfg, worktree)
+    if held:
+        common.log(job, f"the branch adds {held[0]} while {held[1]} — the pull request is left unarmed")
     with common.checkout_lock():  # the session may have rewritten a commit the early open already pushed
         common.git(cfg.checkout, "fetch", "-q", "origin")
         if ref_exists(cfg.checkout, f"refs/remotes/origin/wt/issue-{number}"):
@@ -635,7 +653,7 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
                      "are pushed, the pull request stays a draft with auto-merge off")
         common.log(job, found[-1])
     try:
-        result = dispatch_card.dispatch(cfg.checkout, number, arm=not found and not blockers,
+        result = dispatch_card.dispatch(cfg.checkout, number, arm=not found and not blockers and not held,
                                         known=(harness.read_credential(cfg),))
     except open_pr.ReadyRunError as exc:
         # pushed and marked ready, but CI never ran it as ready: left unarmed, and parked by name below

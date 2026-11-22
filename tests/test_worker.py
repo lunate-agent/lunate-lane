@@ -10,7 +10,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from scripts import common, dispatch_card, github, harness, identity, open_pr, worker  # noqa: E402
+from scripts import common, dispatch_card, github, harness, identity, open_pr, release, worker  # noqa: E402
 from scripts.common import GitError, LaneError  # noqa: E402
 from tests.helpers import REQUIRED, TempState, git, origin_and_clone, pull, review  # noqa: E402
 
@@ -518,7 +518,8 @@ class DriveCase(RepoCase):
         return {"number": 77, "url": "u", "author": "lunate-worker[bot]", "reused": False,
                 "auto_merge": "armed" if arm else "not armed"}
 
-    def fake_session(self, *, commit=True, dirty=False, rc=0, stalled=False, text="done: 1. met — a.cs:1"):
+    def fake_session(self, *, commit=True, dirty=False, rc=0, stalled=False, text="done: 1. met — a.cs:1",
+                     fragment=None):
         def run(cfg, *, worktree, log_path, extra_env, on_tick, **_):
             if commit:
                 git(worktree, "config", "user.email", "w@example.invalid")
@@ -526,6 +527,10 @@ class DriveCase(RepoCase):
                 self.runs = getattr(self, "runs", 0) + 1
                 (worktree / "fix.cs").write_text(f"fixed {self.runs}\n")
                 git(worktree, "add", "fix.cs")
+                if fragment:
+                    (worktree / fragment).parent.mkdir(exist_ok=True)
+                    (worktree / fragment).write_text("### Added\n\n- x (#77).\n")
+                    git(worktree, "add", fragment)
                 git(worktree, "commit", "-q", "-m", "fix")
                 on_tick()
                 seen = pathlib.Path(extra_env["LANE_PR_FILE"])
@@ -558,6 +563,27 @@ class DriveTests(DriveCase):
         self.assertEqual(self.dispatched, [False, False])
         self.assertIn("card #3 waits on #749 — the pull request is left unarmed",
                       (self.cfg.state / "logs" / "worker-3.log").read_text())
+
+    def test_a_clean_run_that_adds_a_fragment_while_a_release_holds_them_is_left_unarmed(self) -> None:
+        """lunate#1014: armed at the finish, auto-merge queued it on approval while 0.6.0's fix #1012 was open."""
+        with self.fake_session(fragment="changes/77.md"), \
+                mock.patch.object(release, "holding_fragments", return_value="release 0.6.0's fix #1012 is open"):
+            self.assertEqual(worker.drive(self.cfg, 3, None), 0)
+        self.assertEqual(self.dispatched, [False, False])
+        self.assertIn("the branch adds changes/77.md while release 0.6.0's fix #1012 is open — the pull request is "
+                      "left unarmed", (self.cfg.state / "logs" / "worker-3.log").read_text())
+
+    def test_a_fragment_with_no_hold_is_armed_and_no_fragment_reads_no_hold(self) -> None:
+        with self.fake_session(fragment="changes/77.md"), \
+                mock.patch.object(release, "holding_fragments", return_value=None):
+            self.assertEqual(worker.drive(self.cfg, 3, None), 0)
+        self.assertEqual(self.dispatched, [False, True])
+
+    def test_a_run_with_no_fragment_never_reads_the_hold(self) -> None:
+        with self.fake_session(), \
+                mock.patch.object(release, "holding_fragments", side_effect=AssertionError("no fragment, no read")):
+            self.assertEqual(worker.drive(self.cfg, 3, None), 0)
+        self.assertEqual(self.dispatched, [False, True])
 
     def test_a_run_with_no_commits_opens_nothing(self) -> None:
         with self.fake_session(commit=False):
