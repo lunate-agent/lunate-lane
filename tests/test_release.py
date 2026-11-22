@@ -303,7 +303,7 @@ class TrainTests(ReleaseCase):
         if method == "PATCH" and "/issues/" in path:
             self.items[int(path.rsplit("/", 1)[1])] = payload["milestone"]
         elif method == "PATCH" and "/milestones/" in path:
-            next(m for m in self.milestones if m["number"] == int(path.rsplit("/", 1)[1]))["state"] = "closed"
+            next(m for m in self.milestones if m["number"] == int(path.rsplit("/", 1)[1])).update(payload)
         return {}
 
     def test_the_cut_moves_every_open_item_to_the_next_milestone_and_points_the_feeder_there(self) -> None:
@@ -336,6 +336,24 @@ class TrainTests(ReleaseCase):
         with self.assertRaisesRegex(release.Blocked, "still lists #975, #976, #990 open after the move"):
             release.step_close(self.cfg, release.parse("0.5.0"), self.data())
         self.assertEqual(self.milestones[0]["state"], "open")
+
+    def test_the_cut_creates_the_next_milestone_with_the_released_ones_description(self) -> None:
+        self.milestones[0]["description"] = "Daily-driver reflexes; short cycle"
+        release.step_forward(self.cfg, release.parse("0.5.0"), self.data())
+        self.assertEqual(self.posts[0], ("POST", "/repos/lunate-agent/lunate/milestones",
+                                         {"title": "0.6.0", "description": "Daily-driver reflexes; short cycle"}))
+        self.assertEqual(self.milestones[0]["description"], "Daily-driver reflexes; short cycle", "kept as the record")
+
+    def test_an_existing_next_milestone_gets_the_description_only_when_it_has_none(self) -> None:
+        self.milestones[0]["description"] = "Daily-driver reflexes; short cycle"
+        self.milestones.append({"title": "0.6.0", "number": 8, "state": "open", "description": ""})
+        release.step_forward(self.cfg, release.parse("0.5.0"), self.data())
+        self.assertIn(("PATCH", "/repos/lunate-agent/lunate/milestones/8",
+                       {"description": "Daily-driver reflexes; short cycle"}), self.posts)
+        self.posts.clear()
+        self.milestones[1]["description"] = "its own"
+        release._move_forward(self.cfg, release.parse("0.5.0"))
+        self.assertEqual([p for p in self.posts if "milestones/8" in p[1]], [], "never overwritten")
 
     def test_a_prerelease_moves_nothing(self) -> None:
         self.assertIsNone(release.step_forward(self.cfg, release.parse("0.5.0-rc.1"), self.data()))
@@ -411,11 +429,59 @@ class AdvanceTests(ReleaseCase):
         with mock.patch.object(release, "train_version", return_value=("0.6.0", "2 changelog fragment(s) on main")), \
                 mock.patch.object(release, "STEPS", (("preflight", lambda *a: "ci-ok on main"),)), \
                 mock.patch.object(harness, "exit_on_signals"), mock.patch("sys.stdout", new=out):
-            self.assertEqual(lane.main(["release", "--train"]), 0)
+            self.assertEqual(lane.main(["release", "--train", "--yes"]), 0)
         self.assertEqual(release.intent()["version"], "0.6.0")
         self.assertIn("the weekly train (2 changelog fragment(s) on main)", release.intent()["by"])
         with mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
             lane.main(["release", "0.6.0", "--train"])
+
+    def train(self, *argv, tty=False, answer=None):
+        """`lane.py release --train …` with a train due (0.6.0); returns (exit code, stdout + stderr)."""
+        release.abandon("test")
+        out = io.StringIO()
+        stdin = mock.Mock(isatty=mock.Mock(return_value=tty))
+        with mock.patch.object(release, "train_version", return_value=("0.6.0", "2 changelog fragment(s) on main")), \
+                mock.patch.object(release, "STEPS", (("preflight", lambda *a: "ci-ok on main"),)), \
+                mock.patch.object(harness, "exit_on_signals"), mock.patch("sys.stdin", new=stdin), \
+                mock.patch("builtins.input", side_effect=[answer] if answer is not None else EOFError) as asked, \
+                mock.patch("sys.stdout", new=out), mock.patch("sys.stderr", new=out):
+            rc = lane.main(["release", "--train", *argv])
+        self.asked = asked.call_args_list
+        return rc, out.getvalue()
+
+    def test_train_dry_run_says_what_it_would_cut_and_changes_nothing(self) -> None:
+        rc, out = self.train("--dry-run")
+        self.assertEqual(rc, 0)
+        self.assertIn("would cut release 0.6.0 — the weekly train (2 changelog fragment(s) on main); nothing was "
+                      "changed", out)
+        self.assertIsNone(release.intent())
+        self.assertEqual(self.asked, [])
+
+    def test_train_without_a_terminal_or_yes_is_refused(self) -> None:
+        # 2026-11-22: an agent's shell (no terminal) ran `release --train` as a check and cut 0.6.0
+        rc, out = self.train()
+        self.assertEqual(rc, 1)
+        self.assertIn("refused — `lane.py release --train` would cut 0.6.0", out)
+        self.assertIn("only with --yes (the cron line)", out)
+        self.assertIsNone(release.intent())
+
+    def test_train_from_a_terminal_cuts_only_when_the_version_is_typed_back(self) -> None:
+        rc, out = self.train(tty=True, answer="y")
+        self.assertEqual(rc, 1)
+        self.assertIn("not cut — 'y' is not 0.6.0", out)
+        self.assertIsNone(release.intent())
+        self.assertEqual(self.train(tty=True)[0], 1, "no answer (EOF) is not a yes")
+        self.assertIsNone(release.intent())
+        rc, out = self.train(tty=True, answer="0.6.0")
+        self.assertEqual(rc, 0)
+        self.assertEqual(release.intent()["version"], "0.6.0")
+        self.assertIn("Type 0.6.0 to confirm", self.asked[0].args[0])
+
+    def test_dry_run_and_yes_go_with_train_and_not_together(self) -> None:
+        for argv in (["release", "0.6.0", "--yes"], ["release", "0.6.0", "--dry-run"],
+                     ["release", "--train", "--dry-run", "--yes"]):
+            with mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
+                lane.main(argv)
 
 
 class SandboxedAssembleTests(unittest.TestCase):

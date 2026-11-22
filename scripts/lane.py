@@ -169,6 +169,24 @@ def rereview(numbers: list[int], all_open: bool) -> str:
     return "\n".join(out) or "no open worker pull requests"
 
 
+def confirm_train(version: str, why: str) -> bool:
+    """A real `release --train` without --yes: from a terminal, the version typed back; with no terminal, refused —
+    an agent's shell has none, and that is how 0.6.0 was cut by accident on 2026-11-22. Only the cron line passes
+    --yes."""
+    if not sys.stdin.isatty():
+        print(f"refused — `lane.py release --train` would cut {version} ({why}). Unattended, it runs only with --yes "
+              "(the cron line); `--train --dry-run` shows what it would cut", file=sys.stderr)
+        return False
+    try:
+        answer = input(f"Cut release {version} now ({why})? Type {version} to confirm: ")
+    except EOFError:
+        answer = ""
+    if answer.strip() != version:
+        print(f"not cut — {answer.strip()!r} is not {version}")
+        return False
+    return True
+
+
 def ship_release(args) -> int:
     """`lane.py release`: record the intent (or read it), then advance it under the release lock. Exits 1 when it is
     blocked on something a person must fix, and says what."""
@@ -184,13 +202,18 @@ def ship_release(args) -> int:
         return 0
     cfg = common.config()
     harness.exit_on_signals()
+    if args.train:
+        version, why = release.train_version(cfg)
+        if version is None:
+            print(f"no release train — {why}")
+            return 0
+        if args.dry_run:
+            print(f"would cut release {version} — the weekly train ({why}); nothing was changed")
+            return 0
+        if not args.yes and not confirm_train(version, why):
+            return 1
+        args.version, who = version, f"the weekly train ({why}), {who}"
     with common.job_lock(release.JOB):
-        if args.train:
-            version, why = release.train_version(cfg)
-            if version is None:
-                print(f"no release train — {why}")
-                return 0
-            args.version, who = version, f"the weekly train ({why}), {who}"
         data = release.start(args.version, who)
         if args.resmoke:
             data.pop("smoke_dispatched", None)
@@ -223,6 +246,8 @@ def main(argv=None) -> int:
     ship.add_argument("--status", action="store_true")
     ship.add_argument("--train", action="store_true", help="the weekly train: release the feeder's milestone when a "
                                                            "changelog fragment merged since the last tag (cron)")
+    ship.add_argument("--dry-run", action="store_true", help="with --train: print what it would cut, change nothing")
+    ship.add_argument("--yes", action="store_true", help="with --train: cut without asking (the cron line only)")
     ship.add_argument("--resmoke", action="store_true", help="dispatch the smoke again on the next advance")
     ship.add_argument("--abandon", metavar="REASON", help="drop the open release record (nothing on GitHub is undone)")
     args = parser.parse_args(argv)
@@ -230,6 +255,10 @@ def main(argv=None) -> int:
         parser.error("release takes a version, --train, --status or --abandon REASON")
     if args.command == "release" and args.version and args.train:
         parser.error("release takes a version or --train, not both")
+    if args.command == "release" and (args.dry_run or args.yes) and not args.train:
+        parser.error("--dry-run and --yes go with --train")
+    if args.command == "release" and args.dry_run and args.yes:
+        parser.error("--dry-run and --yes are opposites; pass one")
     if args.command == "rereview" and bool(args.pr) == args.all_open:
         parser.error("rereview takes pull request numbers or --all-open, not both or neither")
     try:
