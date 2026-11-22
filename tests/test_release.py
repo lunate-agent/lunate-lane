@@ -100,11 +100,8 @@ class PreflightTests(ReleaseCase):
         with self.assertRaisesRegex(release.Blocked, "0.5.0 is not newer than 0.5.0"):
             self.run_step()
 
-    def test_open_issues_block_unless_allowed(self) -> None:
+    def test_open_cards_in_the_milestone_do_not_hold_the_release(self) -> None:
         self.routes["repos/lunate-agent/lunate/milestones"] = [{"title": "0.5.0", "number": 7, "open_issues": 4}]
-        with self.assertRaisesRegex(release.Blocked, "still has 4 open issue"):
-            self.run_step()
-        release.start("0.5.0", "test", allow_open=True)
         self.assertIsNone(self.run_step())
 
     def test_no_release_mode_in_the_assembler_is_blocked_by_name(self) -> None:
@@ -281,34 +278,84 @@ class ChannelsTests(ReleaseCase):
         self.assertEqual(self.posts, [])
 
 
-class CloseTests(ReleaseCase):
-    def test_the_milestone_is_closed_the_next_created_and_the_feeder_moved(self) -> None:
-        milestones = [{"title": "0.5.0", "number": 7, "open_issues": 0, "state": "open"}]
-        self.routes["repos/lunate-agent/lunate/milestones"] = lambda path: milestones
+class TrainTests(ReleaseCase):
+    """The release train (lunate-lane#21, Decision 2026-11-22): the cut moves open cards forward, the close reads
+    back an empty milestone, and nothing waits for a milestone to empty."""
 
-        def rest(token, method, path, payload=None):
-            self.posts.append((method, path, payload))
-            if method == "POST":
-                milestones.append({"title": payload["title"], "number": 8, "open_issues": 0, "state": "open"})
-            else:
-                milestones[0]["state"] = "closed"
-            return {}
+    def setUp(self) -> None:
+        super().setUp()
+        self.milestones = [{"title": "0.5.0", "number": 7, "state": "open"}]
+        self.items = {975: 7, 976: 7, 990: 7}  # open issue or pull request -> its milestone number
+        self.closed_items = {7: 41}
+        self.routes["repos/lunate-agent/lunate/milestones"] = lambda path: [
+            {**m, "open_issues": sum(1 for v in self.items.values() if v == m["number"]),
+             "closed_issues": self.closed_items.get(m["number"], 0)} for m in self.milestones]
+        self.routes["repos/lunate-agent/lunate/issues?milestone="] = lambda path: [
+            {"number": n} for n, m in sorted(self.items.items()) if f"milestone={m}&" in path]
+        common.rest.side_effect = self.github
 
-        common.rest.side_effect = rest
-        self.assertIsNone(release.step_close(self.cfg, release.parse("0.5.0"), {}))
-        self.assertEqual(self.posts, [("PATCH", "/repos/lunate-agent/lunate/milestones/7", {"state": "closed"}),
-                                      ("POST", "/repos/lunate-agent/lunate/milestones", {"title": "0.6.0"})])
+    def github(self, token, method, path, payload=None):
+        self.posts.append((method, path, payload))
+        if method == "POST" and path.endswith("/milestones"):
+            made = {"title": payload["title"], "number": 8, "state": "open"}
+            self.milestones.append(made)
+            return made
+        if method == "PATCH" and "/issues/" in path:
+            self.items[int(path.rsplit("/", 1)[1])] = payload["milestone"]
+        elif method == "PATCH" and "/milestones/" in path:
+            next(m for m in self.milestones if m["number"] == int(path.rsplit("/", 1)[1]))["state"] = "closed"
+        return {}
+
+    def test_the_cut_moves_every_open_item_to_the_next_milestone_and_points_the_feeder_there(self) -> None:
+        data = self.data()
+        self.assertIsNone(release.step_forward(self.cfg, release.parse("0.5.0"), data))
+        self.assertEqual(self.items, {975: 8, 976: 8, 990: 8})
+        self.assertEqual(self.posts[0], ("POST", "/repos/lunate-agent/lunate/milestones", {"title": "0.6.0"}))
         self.assertEqual(common.config().milestone, "0.6.0")
-        self.assertEqual(common.with_milestone(self.cfg).milestone, "0.6.0", "read from lane state on the next run")
+        self.assertEqual(self.data()["forward"], "3 open item(s) moved to 0.6.0 at the cut")
         self.posts.clear()
-        self.assertIsNone(release.step_close(self.cfg, release.parse("0.5.0"), {}))
+        self.assertIsNone(release.step_forward(self.cfg, release.parse("0.5.0"), self.data()))
+        self.assertEqual(self.posts, [], "recorded: the cut runs once")
+
+    def test_the_close_moves_what_was_added_since_the_cut_then_reads_back_an_empty_closed_milestone(self) -> None:
+        release.step_forward(self.cfg, release.parse("0.5.0"), self.data())
+        self.items[999] = 7  # filed into the released milestone after the cut
+        self.posts.clear()
+        self.assertIsNone(release.step_close(self.cfg, release.parse("0.5.0"), self.data()))
+        self.assertEqual(self.posts, [("PATCH", "/repos/lunate-agent/lunate/issues/999", {"milestone": 8}),
+                                      ("PATCH", "/repos/lunate-agent/lunate/milestones/7", {"state": "closed"})])
+        self.assertEqual(self.milestones[0]["state"], "closed")
+        self.posts.clear()
+        self.assertIsNone(release.step_close(self.cfg, release.parse("0.5.0"), self.data()))
         self.assertEqual(self.posts, [], "done is done")
 
-    def test_an_issue_added_during_the_release_blocks_the_close(self) -> None:
-        self.routes["repos/lunate-agent/lunate/milestones"] = [{"title": "0.5.0", "number": 7, "open_issues": 1,
-                                                               "state": "open"}]
-        with self.assertRaisesRegex(release.Blocked, "gained 1 open issue"):
-            release.step_close(self.cfg, release.parse("0.5.0"), {})
+    def test_an_item_that_does_not_move_blocks_by_name_and_the_milestone_stays_open(self) -> None:
+        common.rest.side_effect = lambda token, method, path, payload=None: (
+            self.posts.append((method, path, payload)) or {"title": "0.6.0", "number": 8} if method == "POST" else {})
+        self.milestones.append({"title": "0.6.0", "number": 8, "state": "open"})
+        with self.assertRaisesRegex(release.Blocked, "still lists #975, #976, #990 open after the move"):
+            release.step_close(self.cfg, release.parse("0.5.0"), self.data())
+        self.assertEqual(self.milestones[0]["state"], "open")
+
+    def test_a_prerelease_moves_nothing(self) -> None:
+        self.assertIsNone(release.step_forward(self.cfg, release.parse("0.5.0-rc.1"), self.data()))
+        self.assertEqual(self.posts, [])
+
+    def test_the_cut_runs_right_after_the_tag(self) -> None:
+        names = [name for name, _ in release.STEPS]
+        self.assertEqual(names[names.index("tag") + 1], "forward")
+
+    def test_the_train_ships_the_feeders_milestone_only_when_a_fragment_merged(self) -> None:
+        common._CONFIG = __import__("dataclasses").replace(self.cfg, milestone="0.6.0")
+        release.abandon("test")
+        common.git.side_effect = lambda repo, *args: "changes/975.md\nchanges/README\n" if "ls-tree" in args else ""
+        self.assertEqual(release.train_version(common.config()), ("0.6.0", "1 changelog fragment(s) on main"))
+        common.git.side_effect = lambda repo, *args: "changes/README\n" if "ls-tree" in args else ""
+        version, why = release.train_version(common.config())
+        self.assertIsNone(version)
+        self.assertIn("no changelog fragment since the last tag", why)
+        release.start("0.6.0", "test")
+        self.assertEqual(release.train_version(common.config()), (None, "release 0.6.0 is still open"))
 
 
 class AdvanceTests(ReleaseCase):
@@ -352,6 +399,23 @@ class AdvanceTests(ReleaseCase):
             self.assertEqual(lane.main(["release", "--status"]), 0)
         self.assertIn("release 0.5.0: FAILED — main is red", out.getvalue())
         self.assertIn("preflight: blocked — main is red", out.getvalue())
+
+    def test_lane_release_train_starts_the_milestones_release_or_says_why_not(self) -> None:
+        release.abandon("test")
+        out = io.StringIO()
+        with mock.patch.object(release, "train_version", return_value=(None, "nothing to ship")), \
+                mock.patch.object(harness, "exit_on_signals"), mock.patch("sys.stdout", new=out):
+            self.assertEqual(lane.main(["release", "--train"]), 0)
+        self.assertIn("no release train — nothing to ship", out.getvalue())
+        self.assertIsNone(release.intent())
+        with mock.patch.object(release, "train_version", return_value=("0.6.0", "2 changelog fragment(s) on main")), \
+                mock.patch.object(release, "STEPS", (("preflight", lambda *a: "ci-ok on main"),)), \
+                mock.patch.object(harness, "exit_on_signals"), mock.patch("sys.stdout", new=out):
+            self.assertEqual(lane.main(["release", "--train"]), 0)
+        self.assertEqual(release.intent()["version"], "0.6.0")
+        self.assertIn("the weekly train (2 changelog fragment(s) on main)", release.intent()["by"])
+        with mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
+            lane.main(["release", "0.6.0", "--train"])
 
 
 class SandboxedAssembleTests(unittest.TestCase):

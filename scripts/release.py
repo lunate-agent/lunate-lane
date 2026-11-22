@@ -3,25 +3,30 @@
     .venv/bin/python scripts/lane.py release 0.5.0      # record the intent and advance as far as it can
     .venv/bin/python scripts/lane.py release --status   # where it is and what it waits on
 
-A maintainer decides that a version ships; the orchestrator relays it as `lane.py release <version>`. No model
+A release is cut weekly (`lane.py release --train`, from cron: the milestone the feeder works, when a changelog
+fragment has merged since the last tag) or on a maintainer's word, which the orchestrator relays as
+`lane.py release <version>`. Open cards never hold a release back: they move to the next milestone at the cut. No model
 session decides or edits anything on this path. Each step reads GitHub, does one thing, and reads it back; a step
 that is done is skipped, so the run continues from the first one not done and running it again is always safe.
 The feeder tick advances an open release every 10 minutes, so nothing waits in a terminal while CI runs.
 
-    preflight  the milestone is empty, main is green, the version is newer, the repository has what a release needs,
+    preflight  main is green, the version is newer, the repository has what a release needs (open cards do not hold it),
                and every helper in HELPERS runs once (`--help`, the way the release runs it: the self-test)
     pr         `release/<version>`, `chore(release): <version>`, by lunate-worker: `changelog-assemble --release`
                in the session sandbox, ready and NOT armed
     approval   the one human gate: the maintainer approves the release pull request at its head
     merge      the release job enqueues it (the feeder never does: `github.release_owned`)
     tag        `v<version>` on the merged commit, as lunate-worker; release.yml publishes it
+    forward    stable only, the cut: every open issue and pull request of the milestone moves to the next one (created
+               if missing), and the feeder is pointed at it — what merges from here on ships next time
     published  the Release workflow on the tag succeeded and the release carries its assets and SHA256SUMS
     channels   stable only: `chore/<version>-channels` filled by `scripts/fill-release-hashes`, approved by the
                reviewer identity once its diff touches only the channel manifests and the README, then enqueued;
                done with no pull request when the fill changes nothing (main already carries them)
     mirror     stable only: the Homebrew tap and the Scoop bucket get main's formula and manifest
     smoke      smoke.yml on the tag, dispatched once and waited for
-    close      stable only: the milestone is closed, the next one created, and the feeder pointed at it
+    close      stable only: anything opened in the milestone since the cut moves forward too, then the milestone is
+               closed and read back with no open item, so its counts are what shipped
 
 The intent lives in `<state>/release.json` (the version, who asked, when the smoke was dispatched, the last word);
 everything else is read from GitHub. A finished release moves to `<state>/releases/<version>.json`.
@@ -129,17 +134,34 @@ def _write(data: dict) -> None:
         raise StateError(f"the release record {path} could not be written: {exc}") from exc
 
 
-def start(version: str, by: str, allow_open: bool = False) -> dict:
+def start(version: str, by: str) -> dict:
     """Record the intent to release `version`. Refused while another release is open."""
     v = parse(version)
     current = intent()
     if current and current["version"] != v.text:
         raise LaneError(f"release {current['version']} is still open — finish it, or `lane.py release --abandon`")
-    data = current or {"version": v.text, "by": by, "started": time.time(), "allow_open": bool(allow_open)}
-    if allow_open:
-        data["allow_open"] = True
+    data = current or {"version": v.text, "by": by, "started": time.time()}
     _write(data)
     return data
+
+
+def train_version(cfg: common.Config) -> tuple[str | None, str]:
+    """The weekly train's version, or None and why there is no train this week. The train ships the milestone the
+    feeder works, from whatever has merged: it runs when main has at least one changelog fragment (a pull request
+    with a release note merged since the last tag), and never while another release is open."""
+    current = intent()
+    if current:
+        return None, f"release {current['version']} is still open"
+    v = parse(cfg.milestone)
+    if not v.stable:
+        raise LaneError(f"the feeder's milestone {cfg.milestone!r} is not a stable version — the train ships X.Y.Z")
+    with common.checkout_lock():
+        common.git(cfg.checkout, "fetch", "-q", "origin", cfg.base)
+    listed = common.git(cfg.checkout, "ls-tree", "--name-only", f"origin/{cfg.base}", "changes/")
+    fragments = [p for p in listed.splitlines() if p.strip().endswith(".md")]
+    if not fragments:
+        return None, f"nothing to ship: {cfg.base} has no changelog fragment since the last tag"
+    return v.text, f"{len(fragments)} changelog fragment(s) on {cfg.base}"
 
 
 def abandon(reason: str) -> str:
@@ -375,9 +397,7 @@ def step_preflight(cfg: common.Config, v: Version, data: dict) -> str | None:
     milestone = _milestone(cfg, v.base)
     if milestone is None:
         raise Blocked(f"there is no milestone {v.base!r} in {cfg.slug}")
-    if int(milestone.get("open_issues") or 0) and not data.get("allow_open"):
-        raise Blocked(f"milestone {v.base} still has {milestone['open_issues']} open issue(s) — finish them, move "
-                      f"them, or `lane.py release {v.text} --allow-open`")
+    # open cards in it do not hold the release: they move to the next milestone at the cut (step_forward)
     sha = common.git(cfg.checkout, "rev-parse", ref).strip()
     state = _ci_ok_on(cfg, sha)
     if state == "pending":
@@ -669,30 +689,77 @@ def step_smoke(cfg: common.Config, v: Version, data: dict) -> str | None:
     return None
 
 
-def step_close(cfg: common.Config, v: Version, data: dict) -> str | None:
-    if not v.stable:
-        return None
-    token = None
+def _open_in(cfg: common.Config, number: int) -> list[int]:
+    """Every open issue and pull request in milestone `number` (the issues endpoint lists both), all pages."""
+    found, page = [], 1
+    while True:
+        batch = _api(f"repos/{cfg.slug}/issues?milestone={number}&state=open&per_page=100&page={page}")
+        if not isinstance(batch, list):
+            raise LaneError(f"the open items of milestone {number} came back as {type(batch).__name__}, not a list")
+        found += [int(i["number"]) for i in batch]
+        if len(batch) < 100:
+            return sorted(found)
+        page += 1
+
+
+def _move_forward(cfg: common.Config, v: Version) -> list[int]:
+    """Move every open issue and pull request of the released milestone to the next one, creating it when missing,
+    and point the feeder at it. A card mid-rework moves with its pull request; its rounds are keyed by the card, so
+    they travel too. Returns what moved."""
     shipped = _milestone(cfg, v.base)
-    if shipped and shipped.get("state") == "open":
-        if int(shipped.get("open_issues") or 0):
-            raise Blocked(f"milestone {v.base} gained {shipped['open_issues']} open issue(s) during the release — "
-                          "move them, and the next tick closes it")
+    if shipped is None:
+        raise Blocked(f"there is no milestone {v.base!r} in {cfg.slug}")
+    token = None
+    nxt = _milestone(cfg, v.next_milestone)
+    if nxt is None:
         token = _worker()
-        common.rest(token, "PATCH", f"/repos/{cfg.slug}/milestones/{shipped['number']}", {"state": "closed"})
-        common.log(JOB, f"{v.text}: closed milestone {v.base}")
-    if _milestone(cfg, v.next_milestone) is None:
-        token = token or _worker()
-        common.rest(token, "POST", f"/repos/{cfg.slug}/milestones", {"title": v.next_milestone})
+        nxt = common.rest(token, "POST", f"/repos/{cfg.slug}/milestones", {"title": v.next_milestone})
+        if not nxt.get("number"):
+            raise LaneError(f"milestone {v.next_milestone} came back without a number")
         common.log(JOB, f"{v.text}: created milestone {v.next_milestone}")
+    moved = _open_in(cfg, int(shipped["number"]))
+    for number in moved:
+        token = token or _worker()
+        common.rest(token, "PATCH", f"/repos/{cfg.slug}/issues/{number}", {"milestone": int(nxt["number"])})
+    if moved:
+        common.log(JOB, f"{v.text}: moved {len(moved)} open item(s) from {v.base} to {v.next_milestone}: "
+                        + ", ".join(f"#{n}" for n in moved))
+    left = _open_in(cfg, int(shipped["number"]))
+    if left:
+        raise Blocked(f"milestone {v.base} still lists {', '.join(f'#{n}' for n in left)} open after the move — "
+                      "the next tick moves them again")
     if common.config().milestone != v.next_milestone:
         common.set_milestone(v.next_milestone)
         common.log(JOB, f"{v.text}: the feeder now works milestone {v.next_milestone}")
+    return moved
+
+
+def step_forward(cfg: common.Config, v: Version, data: dict) -> str | None:
+    """The cut: right after the tag, so what merges from now on counts toward the next milestone."""
+    if not v.stable or data.get("forward"):
+        return None
+    moved = _move_forward(cfg, v)
+    data["forward"] = f"{len(moved)} open item(s) moved to {v.next_milestone} at the cut"
+    _write(data)
+    return None
+
+
+def step_close(cfg: common.Config, v: Version, data: dict) -> str | None:
+    if not v.stable:
+        return None
+    _move_forward(cfg, v)  # anything opened in the milestone since the cut
+    shipped = _milestone(cfg, v.base)
+    if shipped.get("state") == "open":
+        common.rest(_worker(), "PATCH", f"/repos/{cfg.slug}/milestones/{shipped['number']}", {"state": "closed"})
+        shipped = _milestone(cfg, v.base)
+        if (shipped or {}).get("state") != "closed" or int(shipped.get("open_issues") or 0):
+            raise LaneError(f"milestone {v.base} does not read back closed with no open item")
+        common.log(JOB, f"{v.text}: closed milestone {v.base} — {shipped.get('closed_issues', '?')} closed item(s)")
     return None
 
 
 STEPS = (("preflight", step_preflight), ("pr", step_pr), ("merge", step_merge), ("tag", step_tag),
-         ("published", step_published), ("channels", step_channels), ("mirror", step_mirror),
+         ("forward", step_forward), ("published", step_published), ("channels", step_channels), ("mirror", step_mirror),
          ("smoke", step_smoke), ("close", step_close))
 
 
