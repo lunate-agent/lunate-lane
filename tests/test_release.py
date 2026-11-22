@@ -78,10 +78,13 @@ class PreflightTests(ReleaseCase):
         })
         self.props = mock.patch.object(release, "_main_props", return_value="0.4.0")
         self.has = mock.patch.object(release, "_has", return_value=True)
+        self.selftest = mock.patch.object(release, "self_test")
         self.props.start()
         self.has.start()
+        self.selftest.start()
 
     def tearDown(self) -> None:
+        self.selftest.stop()
         self.has.stop()
         self.props.stop()
         super().tearDown()
@@ -116,6 +119,16 @@ class PreflightTests(ReleaseCase):
                                                                              "conclusion": "failure"}]}
         with self.assertRaisesRegex(release.Blocked, "is not green"):
             self.run_step()
+
+    def test_a_helper_that_fails_its_self_test_blocks_the_preflight(self) -> None:
+        release.self_test.side_effect = release.Blocked("the self-test of scripts/docs-sync failed")
+        with self.assertRaisesRegex(release.Blocked, "self-test of scripts/docs-sync"):
+            self.run_step()
+
+    def test_the_self_test_is_not_run_on_a_red_main(self) -> None:
+        self.routes["repos/lunate-agent/lunate/commits/"] = {"check_runs": [{"status": "in_progress"}]}
+        self.run_step()
+        release.self_test.assert_not_called()
 
     def test_it_is_skipped_once_the_release_pull_request_exists(self) -> None:
         self.routes["repos/lunate-agent/lunate/pulls?"] = [{"number": 970, "state": "open",
@@ -429,6 +442,66 @@ if version:
                 release.step_pr(self.cfg, release.parse("0.5.0"), {})
         opened.assert_not_called()
         self.assertTrue((self.cfg.state / "worktrees" / "release-0.5.0" / "src.cs").exists(), "kept, never forced")
+
+
+class SelfTestTests(unittest.TestCase):
+    """The preflight runs every helper the release path calls once, the way a step runs it (`python3 -I`, in the
+    session sandbox), so an import error blocks before a release, not in its channels step (lunate#974)."""
+
+    BROKEN = "import sys\nfrom published_release import X\nprint(X)\n"  # -I drops scripts/ from sys.path
+    FIXED = ("import pathlib, sys\nsys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))\n"
+             "from published_release import X\nprint(X)\n")
+
+    def setUp(self) -> None:
+        if not pathlib.Path(harness.SANDBOX_EXEC).exists():
+            self.skipTest("sandbox-exec is not on this host")
+        self.state = TempState()
+        self.origin, self.clone = origin_and_clone(self.state.root / "repos")
+        self.state.cfg = self.cfg = __import__("dataclasses").replace(self.state.cfg, checkout=self.clone)
+        common._CONFIG = self.cfg
+
+    def tearDown(self) -> None:
+        self.state.close()
+
+    def seed(self, **scripts: str) -> str:
+        (self.clone / "scripts").mkdir(exist_ok=True)
+        (self.clone / "scripts" / "published_release.py").write_text("X = 1\n")
+        for script in release.HELPERS:
+            name = pathlib.Path(script).name
+            path = self.clone / script
+            if scripts.get(name) is None and name in scripts:
+                path.unlink(missing_ok=True)
+                continue
+            path.write_text(scripts.get(name, self.FIXED))
+        git(self.clone, "add", "-A")
+        git(self.clone, "commit", "-q", "-m", "seed")
+        return git(self.clone, "rev-parse", "HEAD").strip()
+
+    def worktree(self) -> pathlib.Path:
+        return self.cfg.state / "scratch" / "release-self-test" / "tree"
+
+    def test_every_helper_runs_once_and_the_worktree_is_removed(self) -> None:
+        ran = []
+        real = release._sandboxed_run
+        with mock.patch.object(release, "_sandboxed_run", side_effect=lambda *a: ran.append(a[4]) or real(*a)):
+            release.self_test(self.cfg, self.seed())
+        self.assertEqual(ran, [[release.PYTHON, "-I", script, "--help"] for script in release.HELPERS])
+        self.assertFalse(self.worktree().exists())
+
+    def test_a_helper_that_does_not_import_under_isolated_mode_is_blocked_by_name(self) -> None:
+        sha = self.seed(**{"fill-release-hashes": self.BROKEN})
+        with self.assertRaisesRegex(release.Blocked, "(?s)self-test of scripts/fill-release-hashes.*ModuleNotFoundError"):
+            release.self_test(self.cfg, sha)
+        self.assertFalse(self.worktree().exists(), "the self-test's own tree goes even when a run failed")
+        release.self_test(self.cfg, self.seed())  # and the next run starts clean
+
+    def test_a_missing_helper_is_blocked_by_name(self) -> None:
+        with self.assertRaisesRegex(release.Blocked, "has no scripts/docs-sync"):
+            release.self_test(self.cfg, self.seed(**{"docs-sync": None}))
+
+    def test_a_step_runs_only_a_helper_the_self_test_covers(self) -> None:
+        with self.assertRaisesRegex(common.LaneError, "not in release.HELPERS"):
+            release._helper(self.cfg, self.clone, self.state.root, None, "scripts/new-helper")
 
 
 if __name__ == "__main__":
