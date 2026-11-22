@@ -413,7 +413,8 @@ fails with it, and the digest's first line says it.
 4. **tag**: `v<version>` on the merged commit, as `lunate-worker`, read back. `release.yml` publishes it. First,
    `changelog-assemble --check --tag v<version>` runs on that commit in the sandbox, the check `release.yml`'s gate
    runs, so a commit the gate would refuse is never tagged. A release fixed after its merge is tagged on the fix:
-   a merged `chore(release)` pull request recorded with `lane.py release --fix-pr N`. A tag already on the old
+   a `chore(release)` pull request recorded with `lane.py release --fix-pr N`. Record it once the fix is open: until
+   it merges, the feeder holds fragments as it does for the release pull request. A tag already on the old
    commit is deleted by a person first, and only when nothing was published from it. `published` reads only the
    Release runs on the tag's own commit.
 5. **forward** (stable only), the cut: every open issue and pull request of the milestone moves to the next minor

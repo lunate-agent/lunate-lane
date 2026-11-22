@@ -257,8 +257,9 @@ def main(argv=None) -> int:
     ship.add_argument("--yes", action="store_true", help="with --train: cut without asking (the cron line only)")
     ship.add_argument("--resmoke", action="store_true", help="dispatch the smoke again on the next advance")
     ship.add_argument("--abandon", metavar="REASON", help="drop the open release record (nothing on GitHub is undone)")
-    ship.add_argument("--fix-pr", type=int, metavar="N", help="tag the open release on the merge of N, a merged "
-                                                              "chore(release) pull request that fixed it after its merge")
+    ship.add_argument("--fix-pr", type=int, metavar="N", help="tag the open release on the merge of N, a "
+                                                              "chore(release) pull request that fixes it after its merge; "
+                                                              "record it once N is open: fragments are held until it merges")
     args = parser.parse_args(argv)
     if args.command == "release" and not (args.version or args.status or args.abandon or args.train
                                           or args.fix_pr is not None):
