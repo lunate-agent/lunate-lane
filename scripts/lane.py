@@ -185,11 +185,17 @@ def ship_release(args) -> int:
     cfg = common.config()
     harness.exit_on_signals()
     with common.job_lock(release.JOB):
-        data = release.start(args.version, who, args.allow_open)
+        if args.train:
+            version, why = release.train_version(cfg)
+            if version is None:
+                print(f"no release train — {why}")
+                return 0
+            args.version, who = version, f"the weekly train ({why}), {who}"
+        data = release.start(args.version, who)
         if args.resmoke:
             data.pop("smoke_dispatched", None)
             release._write(data)
-        common.log(JOB, f"release {data['version']} — by {who}" + (" (allow open)" if data.get("allow_open") else ""))
+        common.log(JOB, f"release {data['version']} — by {who}")
         try:
             print(release.advance(cfg))
         except release.Blocked as exc:
@@ -212,15 +218,18 @@ def main(argv=None) -> int:
     sub.add_parser("lunate-pin", help="publish a main commit of lunate in the sandbox and pin it in lane.json"
                    ).add_argument("commit")
     ship = sub.add_parser("release", help="release a version: preflight, release PR, the maintainer's approval, "
-                                          "merge, tag, publish, channels, smoke, milestone")
+                                          "merge, tag, cut (open cards move forward), publish, channels, mirror, smoke, close")
     ship.add_argument("version", nargs="?")
     ship.add_argument("--status", action="store_true")
-    ship.add_argument("--allow-open", action="store_true", help="release though the milestone has open issues")
+    ship.add_argument("--train", action="store_true", help="the weekly train: release the feeder's milestone when a "
+                                                           "changelog fragment merged since the last tag (cron)")
     ship.add_argument("--resmoke", action="store_true", help="dispatch the smoke again on the next advance")
     ship.add_argument("--abandon", metavar="REASON", help="drop the open release record (nothing on GitHub is undone)")
     args = parser.parse_args(argv)
-    if args.command == "release" and not (args.version or args.status or args.abandon):
-        parser.error("release takes a version, --status or --abandon REASON")
+    if args.command == "release" and not (args.version or args.status or args.abandon or args.train):
+        parser.error("release takes a version, --train, --status or --abandon REASON")
+    if args.command == "release" and args.version and args.train:
+        parser.error("release takes a version or --train, not both")
     if args.command == "rereview" and bool(args.pr) == args.all_open:
         parser.error("rereview takes pull request numbers or --all-open, not both or neither")
     try:

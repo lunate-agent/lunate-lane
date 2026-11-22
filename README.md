@@ -369,12 +369,18 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
 
 ## Releases
 
-A release is one deterministic command (`scripts/release.py`, lunate-lane#21). A maintainer decides that a version
-ships; the orchestrator relays it:
+A release is one deterministic command (`scripts/release.py`, lunate-lane#21), and it runs as a train: **weekly,
+or on a maintainer's word**. Whatever has merged since the last tag is what ships. A card that misses the train
+rides the next one: open cards never hold a release back, they move to the next milestone at the cut.
+
+- **Weekly**, from cron (Monday 06:00, below): `lane.py release --train` releases the milestone the feeder works.
+  It does nothing while another release is open, or when main has no changelog fragment (no pull request with a
+  release note has merged since the last tag).
+- **On a maintainer's word**, any day, relayed by the orchestrator: `lane.py release <version>`.
 
     .venv/bin/python scripts/lane.py release 0.5.0             # record the intent, advance as far as it can
+    .venv/bin/python scripts/lane.py release --train           # the weekly train: the feeder's milestone, if anything shipped
     .venv/bin/python scripts/lane.py release --status          # where it is and what it waits on
-    .venv/bin/python scripts/lane.py release 0.5.0 --allow-open   # though the milestone still has open issues
     .venv/bin/python scripts/lane.py release 0.5.0 --resmoke   # dispatch the smoke again after a fix
     .venv/bin/python scripts/lane.py release --abandon "wrong version"   # drop the record; GitHub is left as it is
 
@@ -383,8 +389,10 @@ a step that is done is skipped, so running it again is always safe, and the feed
 every 10 minutes. A step that needs a person stops by name (`blocked — …`): the command exits 1, the feeder tick
 fails with it, and the digest's first line says it.
 
-1. **preflight**: the milestone named by the version has no open issues, main's `ci-ok` is green, the version is
-   newer than `<Version>` on main, and main's `scripts/changelog-assemble` has `--release`.
+1. **preflight**: the milestone named by the version exists (its open cards do not hold the release), main's
+   `ci-ok` is green, the version is newer than `<Version>` on main, and main's `scripts/changelog-assemble` has
+   `--release`. Then the self-test: every helper in `release.HELPERS` runs once with `--help` the way a step runs
+   it (`python3 -I`, in the session sandbox), so an import error blocks here rather than halfway through.
 2. **pr**: `release/<version>`, `chore(release): <version>`, by `lunate-worker`. `changelog-assemble --release
    <version>` and `--check` run in the session sandbox on a fresh worktree. The result may change only
    `CHANGELOG.md` and `Directory.Build.props` and delete fragments. The pull request is ready, not armed, and its
@@ -393,16 +401,21 @@ fails with it, and the digest's first line says it.
    approval lets the release job enqueue it. The feeder never enqueues a release-owned branch
    (`github.release_owned`), and the reviewer bot skips it (no card).
 4. **tag**: `v<version>` on the merged commit, as `lunate-worker`, read back. `release.yml` publishes it.
-5. **published**: the tag's Release workflow succeeded, and the release reads back published with six assets
+5. **forward** (stable only), the cut: every open issue and pull request of the milestone moves to the next minor
+   one (created if missing), as `lunate-worker`, and the feeder is pointed at it through `<state>/milestone.json`,
+   which overrides `lane.json`'s `milestone`. A card mid-rework moves with its pull request, and its rounds go
+   with it (they are kept by card). Recorded in `release.json`, so it runs once.
+6. **published**: the tag's Release workflow succeeded, and the release reads back published with six assets
    including `SHA256SUMS`.
-6. **channels** (stable only): `chore/<version>-channels`, filled by `scripts/fill-release-hashes` and `docs-sync`
+7. **channels** (stable only): `chore/<version>-channels`, filled by `scripts/fill-release-hashes` and `docs-sync`
    in the sandbox, ready and not armed. Once it is green and its files are only the channel manifests and the
-   README, the reviewer identity approves it (a check of the diff's shape) and the release job enqueues it.
-7. **mirror** (stable only): the Homebrew tap's formula and the Scoop bucket's manifest get main's copies, through
+   README, the reviewer identity approves it (a check of the diff's shape) and the release job enqueues it. When
+   the fill changes nothing, main already carries them: the step is recorded as done with no pull request.
+8. **mirror** (stable only): the Homebrew tap's formula and the Scoop bucket's manifest get main's copies, through
    the contents API as `lunate-worker`. The App must be installed on both repositories.
-8. **smoke**: `smoke.yml -f tag=v<version>`, dispatched once and waited for.
-9. **close** (stable only): the milestone is closed, the next minor one created, and the feeder pointed at it
-   through `<state>/milestone.json`, which overrides `lane.json`'s `milestone`.
+9. **smoke**: `smoke.yml -f tag=v<version>`, dispatched once and waited for.
+10. **close** (stable only): anything opened in the milestone since the cut moves forward too. Then the milestone
+    is closed and read back closed with no open item, so its counts are what shipped.
 
 The intent is `<state>/release.json`; a finished or abandoned one moves to `<state>/releases/<version>.json`.
 
@@ -430,8 +443,10 @@ the orchestrating user's crontab (`crontab -e`):
     */10 * * * *  cd $LANE && .venv/bin/python scripts/feed.py   >> $HOME/.local/state/lunate-lane/logs/cron.out 2>&1
     5-59/10 * * * * cd $LANE && .venv/bin/python scripts/review.py >> $HOME/.local/state/lunate-lane/logs/cron.out 2>&1
     0 7 * * *     cd $LANE && .venv/bin/python scripts/digest.py
+    0 6 * * 1     cd $LANE && .venv/bin/python scripts/lane.py release --train >> $HOME/.local/state/lunate-lane/logs/cron.out 2>&1
 
-`PATH` must reach `gh` and `git`; sessions get their own PATH, see above. The digest prints its message on stdout, so whatever runs that line
+`PATH` must reach `gh` and `git`; sessions get their own PATH, see above. The Monday line is the weekly release
+train; after it, the feeder tick advances the release every 10 minutes. The digest prints its message on stdout, so whatever runs that line
 delivers it (cron mail, or the orchestrator's own scheduler capturing stdout). Before the first real tick, run
 `feed.py --dry-run` and `review.py --dry-run` by hand and read what they would do.
 
