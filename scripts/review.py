@@ -286,7 +286,7 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str, str]:
                                FRAGMENT_CHECK=fragments, BODY_FILE=str(body_file),
                                VERDICT_CMD=verdict_command(verdict_file, body_file), CARD=str(p.card),
                                SPEC_NEIGHBOURS=spec_neighbours(p, others), WORKER_REPORT=report,
-                               SCOPE=scope_context(p, cfg.area_prefix),
+                               SCOPE=scope_context(p, cfg.area_prefix, issue.get("body") or "", others),
                                DECISIONS=github.decisions_section(github.decisions_for(cfg, p.card)),
                                CARD_DECISIONS=card_decisions(issue.get("body") or ""),
                                BODY=(issue.get("body") or "").strip())
@@ -339,12 +339,49 @@ def spec_neighbours(p: github.Pull, others) -> str:
     return "\n".join(lines)
 
 
-def scope_context(p: github.Pull, area_prefix: str) -> str:
-    """For the brief's scope check: the card's `area/*` labels. Files other open pull requests also change are not
-    listed: overlap is never blocking (a merge conflict goes back to a worker as a rework)."""
+PROCESS_LABELS = ("area/process", "kind/process")
+SCOPE_SECTIONS = ("Scope", "Acceptance")
+
+
+def card_section(body: str, name: str) -> str:
+    """The text under the card's `## <name>` heading, up to the next `##` heading; empty when it has none."""
+    lines, out, inside = body.splitlines(), [], False
+    for line in lines:
+        if line.startswith("## "):
+            if inside:
+                break
+            inside = line[3:].strip().lower() == name.lower()
+            continue
+        if inside:
+            out.append(line)
+    return "\n".join(out).strip()
+
+
+def scope_context(p: github.Pull, area_prefix: str, body: str = "", others=()) -> str:
+    """For the brief's scope check: the card's own Scope and Acceptance sections, which are its scope; its `area/*`
+    label, which only schedules it (#992: an `area/tui` card whose Scope names Lunate.Coding and Lunate.Contracts
+    work was flagged for reaching outside `area/tui`); and the other open pull requests' cards, whose work is out of
+    scope here. Their files are not listed: overlap is never blocking (a merge conflict goes back to a worker)."""
+    out = []
+    for name in SCOPE_SECTIONS:
+        text = card_section(body, name)
+        if text:
+            out.append(f"The card's **{name}** section:\n\n" + "\n".join(f"> {line}" if line else ">"
+                                                                         for line in text.splitlines()))
+    if not out:
+        out.append("The card has no Scope or Acceptance section: its scope is what its own text asks.")
     areas = sorted(label for label in p.labels if label.startswith(area_prefix))
-    return (f"The card's area: {', '.join(f'`{a}`' for a in areas)}." if areas
-            else "The card has no area label: its area is what its own text names.")
+    if areas:
+        out.append(f"Its area label ({', '.join(f'`{a}`' for a in areas)}) schedules the card; it does not fence "
+                   "its scope.")
+    if any(label in PROCESS_LABELS for label in p.labels):
+        out.append("This is a process card: repo-wide tooling and formatter output are in scope.")
+    cards = sorted({(o.card, o.number, o.title) for o in others
+                    if o.number != p.number and o.card is not None and o.card != p.card})
+    if cards:
+        out.append("Other open pull requests' cards (their work is out of scope here): "
+                   + "; ".join(f"card #{card} (#{number}, {title})" for card, number, title in cards) + ".")
+    return "\n\n".join(out)
 
 
 def remove_review_worktree(cfg: common.Config, pr: int) -> None:

@@ -403,21 +403,54 @@ class ScopeTests(unittest.TestCase):
         verdict = text[text.index("## Your verdict"):]
         blocking = verdict[:verdict.index("**Everything else is non-blocking**")]
         rest = verdict[verdict.index("**Everything else is non-blocking**"):]
-        self.assertIn("- a scope violation: a change outside the card's area;\n", blocking)
+        self.assertIn("- a scope violation: a change neither the card's Scope nor its Acceptance asks for, or another "
+                      "open card's work;\n", blocking)
+        self.assertNotIn("outside the card's area", text, "the area label schedules a card, it does not fence it")
         self.assertNotIn("another open pull request", blocking, "overlap is never blocking (#818, #826)")
         self.assertIn("a test the acceptance asks for that would pass with the change reverted", blocking)
-        self.assertIn("a small cleanup in the card's own area", rest)
+        self.assertIn("a small cleanup next to the change", rest)
+        self.assertIn("work in another area's\ncode that the card's Scope or Acceptance asks for", rest)
         self.assertIn("a file or lines\nanother open pull request also changes", rest)
         self.assertIn("is **never** blocking and never a scope finding", text)
         self.assertIn("## Scope\n\n{{SCOPE}}", text)
 
-    def test_the_scope_context_names_the_area_and_no_overlaps(self) -> None:
-        # #818's shape: S1 shares openspec/specs/repo-quality/spec.md with #820 — not something the brief raises
-        mine = pull(818, 749, labels=["area/docs", "kind/feature"],
-                    files=("openspec/specs/repo-quality/spec.md", "scripts/docs-check"))
-        self.assertEqual(review.scope_context(mine, "area/"), "The card's area: `area/docs`.")
-        self.assertEqual(review.scope_context(pull(9, 9, files=("a.cs",)), "area/"),
-                         "The card has no area label: its area is what its own text names.")
+    # #992's shape: an `area/tui` card whose Scope asks for work in Lunate.Coding and Lunate.Contracts
+    BODY_992 = ("A `todo` tool the model calls, rendered by the TUI.\n\n## Scope\n\n"
+                "- the tool and its session state in `Lunate.Coding`;\n- the `TodoUpdated` event in `Lunate.Contracts`;\n"
+                "- the TUI shows the list in the live area, bounded.\n\n## Acceptance\n\n"
+                "- `--json` emits one event per update with the full list.\n\n## Decisions\n\n- 2026-11-22: kept.\n")
+
+    def test_the_scope_is_the_cards_scope_and_acceptance_not_its_area_label(self) -> None:
+        mine = pull(992, 976, labels=["area/tui", "kind/feature"],
+                    files=("src/Lunate.Coding/Sessions/InteractiveSession.Todo.cs", "src/Lunate.Contracts/Todo.cs"))
+        text = review.scope_context(mine, "area/", self.BODY_992, [mine])
+        self.assertIn("The card's **Scope** section:\n\n> - the tool and its session state in `Lunate.Coding`;", text)
+        self.assertIn("> - the `TodoUpdated` event in `Lunate.Contracts`;", text)
+        self.assertIn("The card's **Acceptance** section:\n\n> - `--json` emits one event per update", text)
+        self.assertIn("Its area label (`area/tui`) schedules the card; it does not fence its scope.", text)
+        self.assertNotIn("2026-11-22: kept", text, "Decisions are their own section of the brief")
+        self.assertNotIn("process card", text)
+        self.assertNotIn("Other open", text, "its own pull request is not another card")
+
+    def test_another_open_pull_requests_card_is_named_and_its_files_are_not(self) -> None:
+        # #818's shape: S1 shares openspec/specs/repo-quality/spec.md with #820 — overlap is never raised
+        mine = pull(818, 749, labels=["area/docs"], files=("openspec/specs/repo-quality/spec.md",))
+        other = pull(820, 750, files=("openspec/specs/repo-quality/spec.md",))
+        text = review.scope_context(mine, "area/", "", [mine, other, pull(5, None, author="someone")])
+        self.assertIn("The card has no Scope or Acceptance section: its scope is what its own text asks.", text)
+        self.assertIn("Other open pull requests' cards (their work is out of scope here): card #750 (#820, pr 820).",
+                      text)
+        self.assertNotIn("repo-quality", text)
+
+    def test_a_process_card_keeps_repo_wide_tooling_and_formatter_output_in_scope(self) -> None:
+        for label in ("area/process", "kind/process"):
+            text = review.scope_context(pull(9, 9, labels=[label]), "area/", "## Scope\n\nCI timing.\n")
+            self.assertIn("This is a process card: repo-wide tooling and formatter output are in scope.", text)
+
+    def test_the_card_sections_stop_at_the_next_heading(self) -> None:
+        self.assertEqual(review.card_section(self.BODY_992, "acceptance"),
+                         "- `--json` emits one event per update with the full list.")
+        self.assertEqual(review.card_section("no sections", "Scope"), "")
 
 
 class CardDecisionsTests(unittest.TestCase):

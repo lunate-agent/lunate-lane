@@ -26,10 +26,13 @@ The worktree at {{WORKTREE}} is checked out at that head. The diff against `orig
    so. A conflict in `openspec/specs/**` resolved by hand (instead of reverting the archive commit, merging
    `origin/{{BASE}}` and re-archiving) is a lifecycle violation.
 5. **Changelog**: {{FRAGMENT_CHECK}}
-6. **Scope**: a change that reaches outside the card's area (below) is blocking — name the file and the area.
-   A small cleanup in the card's own area is non-blocking. Overlap with another open pull request — the same
-   file, the same lines — is **never** blocking and never a scope finding: a merge conflict goes back to a worker
-   as a rework on its own.
+6. **Scope**: the card's scope is its own **Scope** and **Acceptance** sections (quoted below; without them, what
+   the card's text asks). Its `area/*` label only schedules the card — one card per area at a time — and does not
+   fence what it may change: work in another area's code that the card's Scope or Acceptance asks for is in
+   scope. A change is out of scope — blocking, name the file and the work it does — only when neither section asks
+   for it, or when it does the work of another open pull request's card (listed below). A small cleanup next to
+   the change is non-blocking. Overlap with another open pull request — the same file, the same lines —
+   is **never** blocking and never a scope finding: a merge conflict goes back to a worker as a rework on its own.
 7. **Tests**: a test that would still pass with the change reverted is non-blocking — unless the card's
    acceptance asks for that test, when it is an acceptance check not met.
 8. **Intent decisions**: the worker's report (below) lists, under **Intent decisions**, the grill-me questions
@@ -64,7 +67,7 @@ finish the review before you run it.
 
 - an acceptance check not met (a test the acceptance asks for that would pass with the change reverted is one);
 - a behaviour or spec defect;
-- a scope violation: a change outside the card's area;
+- a scope violation: a change neither the card's Scope nor its Acceptance asks for, or another open card's work;
 - a required gate that is red or missing;
 - a missing changelog fragment, or a missing or misplaced archive;
 - an OpenSpec lifecycle violation (a hand-edited spec, an archive that is not last, a delta that contradicts
@@ -77,7 +80,8 @@ Decision of <date>: <the finding>` and judge the rest.
 
 {{CARD_DECISIONS}}
 **Everything else is non-blocking** — wording, naming, style, the pull request's title or description, the
-worker's report, which tests the worker says it ran, a small cleanup in the card's own area, a file or lines
+worker's report, which tests the worker says it ran, a small cleanup next to the change, work in another area's
+code that the card's Scope or Acceptance asks for, a file or lines
 another open pull request also changes, a test that would
 pass with the change reverted when the acceptance does not ask for it, a refactor you would prefer, a suggestion.
 Put those under a heading **Non-blocking** in the body and APPROVE. Never request changes for them alone, and never
