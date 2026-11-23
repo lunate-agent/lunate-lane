@@ -30,9 +30,11 @@ hand-edit a file under `openspec/specs/`. Docs and guide updates come before the
 **The specs are acceptance too.** Every requirement and scenario of each spec your change touches — the
 `openspec/specs/<capability>/spec.md` of every capability your change's delta specs add to, modify or remove
 from, and every spec whose behaviour your code changes — counts as acceptance, as much as the card's own checks.
-Where a spec is stricter than the card, the spec wins. Before the archive commit (the pull request is marked
-ready when the session ends), read each of those specs' `### Requirement:` and `#### Scenario:` entries and check
-your branch against every one: a test that covers it, or a `file:line` that meets it. One you cannot meet is
+Where a spec is stricter than the card, the spec wins — the spec as amended by this change's own deltas: a card
+decision that contradicts a current spec is carried out through a spec delta in this change, never dropped
+because the old spec is stricter. Before the archive commit (the pull request is marked ready when the session
+ends), read each of those specs' `### Requirement:` and `#### Scenario:` entries and check your branch against
+every one: a test that covers it, or a `file:line` that meets it. One you cannot meet is
 **not met** in your report, never left out.
 
 **The archive is the last commit.** `openspec archive <change> --yes` is the final commit on the branch, after
