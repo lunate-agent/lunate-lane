@@ -11,6 +11,8 @@ from scripts import cleanup, common, feed, github, harness, release  # noqa: E40
 from scripts.common import GhError, StateError  # noqa: E402
 from tests.helpers import REQUIRED, TempState, card, pull, review  # noqa: E402
 
+REAL_CLOSED_CARD = github.closed_card  # captured before any test patches it
+
 
 class FeedTests(unittest.TestCase):
     def setUp(self) -> None:
@@ -410,6 +412,32 @@ class FeedTests(unittest.TestCase):
         self.assertIn("card #2 is closed by #914, merged — not started (card #2)", log)
         self.assertIn("card #9 is CLOSED — not started (rework of #50", log)
         self.assertFalse((self.state.cfg.state / "attempts" / "2.json").exists(), "no attempt is counted")
+
+    def test_979s_shape_a_card_reopened_after_its_closer_merged_starts_and_one_not_reopened_does_not(self) -> None:
+        """#1014 closed #979 at its merge; #979 was reopened as open work, and the fresh read refused it every tick
+        from 23:10 because #1014 was still its closing reference. The real `closed_card`, on GitHub's answers."""
+        from scripts import common
+
+        def answer(reopened, merged=True):
+            closers = [{"number": 1014, "merged": merged, "mergedAt": "2026-11-22T19:24:27Z"}]
+            return {"repository": {"issue": {
+                "state": "OPEN", "closedByPullRequestsReferences": {"pageInfo": {"hasNextPage": False},
+                                                                     "nodes": closers},
+                "timelineItems": {"nodes": [{"createdAt": t} for t in reopened]}}}}
+
+        answers = {1: answer([], merged=False), 2: answer(["2026-11-22T19:56:20Z"]), 9: answer([])}
+        graphql = common.graphql
+
+        def read(query, **kw):
+            return answers[kw["n"]] if query == github.CARD_STATE else graphql(query, **kw)
+
+        with mock.patch.object(github, "closed_card", REAL_CLOSED_CARD), \
+                mock.patch.object(common, "graphql", side_effect=read):
+            feed.tick()
+        self.assertEqual(sorted((l.card, l.rework_pr) for l in self.started), [(1, None), (2, None)])
+        log = (self.state.cfg.state / "logs" / "feed.log").read_text()
+        self.assertIn("card #9 is closed by #1014, merged — not started (rework of #50", log)
+        self.assertNotIn("card #2 is closed", log)
 
     def test_a_dry_run_starts_nothing(self) -> None:
         with mock.patch.object(sys, "argv", ["feed.py", "--dry-run"]):

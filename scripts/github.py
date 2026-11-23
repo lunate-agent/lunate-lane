@@ -400,22 +400,28 @@ def open_blockers(cfg: common.Config, card: int) -> tuple:
 
 
 CARD_STATE = """query($owner:String!,$name:String!,$n:Int!){repository(owner:$owner,name:$name){issue(number:$n){
-state closedByPullRequestsReferences(first:20,includeClosedPrs:true){pageInfo{hasNextPage} nodes{number merged}}}}}"""
+state closedByPullRequestsReferences(first:20,includeClosedPrs:true){pageInfo{hasNextPage} nodes{number merged mergedAt}}
+timelineItems(last:1,itemTypes:[REOPENED_EVENT]){nodes{... on ReopenedEvent{createdAt}}}}}}"""
 
 
 def closed_card(cfg: common.Config, card: int) -> str | None:
     """Why `card` must not be started, read fresh just before a launch, or None. It is closed, or a merged pull
     request closes it: GitHub closes the issue a moment after the merge, so the milestone read earlier in the same
-    tick can still list it while the open pull requests no longer carry it (#905, 2026-11-16 01:00:10). Unreadable
-    raises."""
+    tick can still list it while the open pull requests no longer carry it (#905, 2026-11-16 01:00:10). A card
+    reopened after its closer merged is open work again: that closer no longer counts (#979, reopened after #1014
+    merged, refused every tick from 23:10). Unreadable raises."""
     data = common.graphql(CARD_STATE, owner=cfg.owner, name=cfg.name, n=int(card))
     issue = (data.get("repository") or {}).get("issue")
     if not issue:
         raise GhError(f"issue #{card} was not found in {cfg.slug}")
     if issue.get("state") != "OPEN":
         return f"is {issue.get('state')}"
+    reopens = [str(e.get("createdAt") or "") for e in (issue.get("timelineItems") or {}).get("nodes") or []
+               if e is not None]
+    reopened = max(reopens, default="")
     merged = sorted(p["number"] for p in _complete(issue["closedByPullRequestsReferences"],
-                                                   f"issue #{card}'s closing pull requests") if p.get("merged"))
+                                                   f"issue #{card}'s closing pull requests")
+                    if p.get("merged") and not (reopened and str(p.get("mergedAt") or "") < reopened))
     if merged:
         return "is closed by " + ", ".join(f"#{n}" for n in merged) + ", merged"
     return None

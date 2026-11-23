@@ -743,8 +743,9 @@ class WaitsOnTests(unittest.TestCase):
 class ClosedCardTests(unittest.TestCase):
     """The fresh read before a launch (#905): a closed issue, or one a merged pull request closes, is not started."""
 
-    def read(self, state, closers, more=False):
-        answer = {"repository": {"issue": {"state": state, "closedByPullRequestsReferences": page(closers, more=more)}}}
+    def read(self, state, closers, more=False, reopened=()):
+        answer = {"repository": {"issue": {"state": state, "closedByPullRequestsReferences": page(closers, more=more),
+                                           "timelineItems": {"nodes": [{"createdAt": t} for t in reopened]}}}}
         with mock.patch.object(common, "graphql", return_value=answer):
             return github.closed_card(CFG, 905)
 
@@ -754,6 +755,20 @@ class ClosedCardTests(unittest.TestCase):
     def test_closed_or_closed_by_a_merged_pull_request_may_not(self) -> None:
         self.assertEqual(self.read("CLOSED", []), "is CLOSED")
         self.assertEqual(self.read("OPEN", [{"number": 914, "merged": True}]), "is closed by #914, merged")
+
+    def test_979s_shape_reopened_after_its_closer_merged_may_start(self) -> None:
+        """#1014 closed #979 at its merge (19:24:27Z); #979 was reopened at 19:56:20Z as open work."""
+        self.assertIsNone(self.read("OPEN", [{"number": 1014, "merged": True, "mergedAt": "2026-11-22T19:24:27Z"}],
+                                    reopened=["2026-11-22T19:56:20Z"]))
+
+    def test_closed_by_a_merge_and_not_reopened_is_still_refused(self) -> None:
+        self.assertEqual(self.read("OPEN", [{"number": 1014, "merged": True, "mergedAt": "2026-11-22T19:24:27Z"}]),
+                         "is closed by #1014, merged")
+
+    def test_a_closer_merged_after_the_last_reopen_still_refuses(self) -> None:
+        closers = [{"number": 1014, "merged": True, "mergedAt": "2026-11-22T19:24:27Z"},
+                   {"number": 1030, "merged": True, "mergedAt": "2026-11-23T09:00:00Z"}]
+        self.assertEqual(self.read("OPEN", closers, reopened=["2026-11-22T19:56:20Z"]), "is closed by #1030, merged")
 
     def test_an_incomplete_read_raises(self) -> None:
         with self.assertRaises(GhError):
