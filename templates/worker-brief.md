@@ -17,7 +17,8 @@ uses and say so in your final report.
 - **Never create a container VM**: no `podman machine`, `docker machine`, colima or lima. The sandbox refuses
   them, and a VM image is gigabytes. A check that needs a container runtime is a maintainer step: say so in your
   report and go on with the rest.
-- Stay inside the issue's acceptance. An unrelated improvement is a new issue, not a commit here.
+- Stay inside the issue's acceptance — the card's checks plus the specs below. An unrelated improvement is a new
+  issue, not a commit here.
 - No new NuGet packages. `CultureInfo.InvariantCulture` for anything formatted. Read `AGENTS.md` first.
 
 ## The OpenSpec lifecycle
@@ -25,6 +26,14 @@ uses and say so in your final report.
 If the card changes behaviour, it needs an OpenSpec change. Use the lifecycle skills in `.agents/skills/`
 (new change → propose → apply → verify → sync specs → archive) and let them drive the `openspec` CLI. Never
 hand-edit a file under `openspec/specs/`. Docs and guide updates come before the archive.
+
+**The specs are acceptance too.** Every requirement and scenario of each spec your change touches — the
+`openspec/specs/<capability>/spec.md` of every capability your change's delta specs add to, modify or remove
+from, and every spec whose behaviour your code changes — counts as acceptance, as much as the card's own checks.
+Where a spec is stricter than the card, the spec wins. Before the archive commit (the pull request is marked
+ready when the session ends), read each of those specs' `### Requirement:` and `#### Scenario:` entries and check
+your branch against every one: a test that covers it, or a `file:line` that meets it. One you cannot meet is
+**not met** in your report, never left out.
 
 **The archive is the last commit.** `openspec archive <change> --yes` is the final commit on the branch, after
 the code is done and verified — nothing follows it, not a formatting run, not a test fix. Before it, run
@@ -65,8 +74,9 @@ your last code edit, and before the archive commit.
 
 Your final message is posted on the pull request as the record of this session. Make it a short report:
 what you changed; the tests you ran with their counts; every acceptance check in the issue, by number, as
-**met** / **not met** with evidence (a `file:line` or a test name); anything you could not finish; and a section
-headed **Intent decisions** listing each grill-me question with the answer you chose and why. The reviewer
+**met** / **not met** with evidence (a `file:line` or a test name); under **Spec scenarios**, each touched spec
+by path with every requirement and scenario of it, **met** / **not met**, with the same evidence; anything you
+could not finish; and a section headed **Intent decisions** listing each grill-me question with the answer you chose and why. The reviewer
 checks those answers. A wrong
 "done" is worse than an honest "blocked": if you cannot finish, commit what you have and say what is missing.
 
