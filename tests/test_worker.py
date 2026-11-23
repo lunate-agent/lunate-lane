@@ -459,9 +459,17 @@ class BriefTests(unittest.TestCase):
         text = worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), 12, "", False)
         self.assertIn("**The specs are acceptance too.** Every requirement and scenario of each spec your change "
                       "touches", text)
-        self.assertIn("Where a spec is stricter than the card, the spec wins.", text)
+        self.assertIn("Where a spec is stricter than the card, the spec wins — the spec as amended by this "
+                      "change's own deltas", text)
         self.assertIn("`### Requirement:` and `#### Scenario:`", text)
         self.assertIn("under **Spec scenarios**, each touched spec", text)
+
+    def test_a_card_decision_against_a_current_spec_goes_through_a_delta_not_dropped(self) -> None:
+        """'The spec wins' must not turn a card's decision back: a decision that contradicts the current spec is the
+        change's own delta to that spec."""
+        text = " ".join(worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), 12, "", False).split())
+        self.assertIn("a card decision that contradicts a current spec is carried out through a spec delta in this "
+                      "change, never dropped because the old spec is stricter.", text)
 
     def test_the_rework_brief_says_merge_never_rebase_never_force(self) -> None:
         text = worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), 12, "### Checks are failing", True)
