@@ -34,6 +34,12 @@ class StateTests(unittest.TestCase):
         self.assertEqual(state(pull(1, 1, reviews=[review("APPROVED")], disarmed_by="a-maintainer")),
                          "approved, auto-merge turned off by @a-maintainer")
 
+    def test_a_pull_request_in_the_merge_queue_is_queued_whatever_its_auto_merge(self) -> None:
+        """#1022: the release job enqueued it with auto-merge off; the digest said 'auto-merge NOT armed'."""
+        self.assertEqual(state(pull(1022, None, reviews=[review("APPROVED")], in_queue=True)), "in the merge queue")
+        self.assertEqual(state(pull(1022, None, reviews=[review("APPROVED")], in_queue=True, auto_merge=True)),
+                         "in the merge queue")
+
 
 class ComposeTests(unittest.TestCase):
     def test_the_message_names_stuck_pull_requests_and_why(self) -> None:
@@ -181,10 +187,11 @@ class WaitingOnYouTests(unittest.TestCase):
         person = pull(817, 790)
         merged = [{"number": 813, "title": "Per-PR changelog fragments",
                    "closingIssuesReferences": [{"number": 794}]}]
-        text = digest.compose(CFG, [card(794), card(790)], [waiting, not_yet, person], merged, REQUIRED, NOW,
-                              {790: ("person", "whether `cache prune` may delete pinned entries"), 11: ("idle", ""),
-                               700: ("person", "closed since: waits on nobody")},
-                              decisions=decisions)
+        with mock.patch.object(github, "closed_card", return_value="is closed by #813, merged"):
+            text = digest.compose(CFG, [card(794), card(790)], [waiting, not_yet, person], merged, REQUIRED, NOW,
+                                  {790: ("person", "whether `cache prune` may delete pinned entries"),
+                                   11: ("idle", ""), 700: ("person", "closed since: waits on nobody")},
+                                  decisions=decisions)
         lines = text.splitlines()
         self.assertEqual(lines[1], "Waiting on you (7):")
         self.assertEqual(lines[2], "  decide #820 Should release PRs be opened by… — blocks #794, #801")
@@ -200,6 +207,31 @@ class WaitingOnYouTests(unittest.TestCase):
         self.assertNotIn("#816", "\n".join(lines[:9]))
         bare = [line.split(" https://")[0] for line in lines[:9]]
         self.assertTrue(all(len(line) <= 72 for line in bare), "a phone line, before its link")
+
+    def test_979s_shape_a_card_reopened_after_its_merge_is_no_close_to_do(self) -> None:
+        """#1014 closed #979 at its merge and #979 was reopened: the feeder starts it (#73), so the digest must not
+        ask for it to be closed. The same `closed_card` the feeder reads, on GitHub's answers."""
+        merged = [{"number": 1014, "title": "Vision fallback", "closingIssuesReferences": [{"number": 979}]}]
+
+        def answer(reopened):
+            return {"repository": {"issue": {
+                "state": "OPEN", "closedByPullRequestsReferences": {
+                    "pageInfo": {"hasNextPage": False},
+                    "nodes": [{"number": 1014, "merged": True, "mergedAt": "2026-11-22T19:24:27Z"}]},
+                "timelineItems": {"nodes": [{"createdAt": t} for t in reopened]}}}}
+
+        with mock.patch.object(common, "graphql", return_value=answer(["2026-11-22T19:56:20Z"])):
+            text = digest.compose(CFG, [card(979)], [], merged, REQUIRED, NOW, {})
+        self.assertNotIn("close #979", text)
+        with mock.patch.object(common, "graphql", return_value=answer([])):
+            text = digest.compose(CFG, [card(979)], [], merged, REQUIRED, NOW, {})
+        self.assertIn("  close #979 — #1014 merged but it is still open", text, "not reopened: still a close to do")
+
+    def test_an_unreadable_card_keeps_its_close_line(self) -> None:
+        merged = [{"number": 1014, "title": "x", "closingIssuesReferences": [{"number": 979}]}]
+        with mock.patch.object(common, "graphql", side_effect=GhError("gh api failed (1): HTTP 502")):
+            text = digest.compose(CFG, [card(979)], [], merged, REQUIRED, NOW, {})
+        self.assertIn("  close #979 — #1014 merged but it is still open", text)
 
     def test_nothing_waiting_is_one_line(self) -> None:
         text = digest.compose(CFG, [], [], [], REQUIRED, NOW, {})

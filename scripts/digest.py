@@ -24,7 +24,10 @@ MERGED_LIMIT = 100
 
 
 def pull_state(p: github.Pull, required: frozenset, reviewer: str) -> str:
-    """One phrase for where a pull request stands, from GitHub's own state only."""
+    """One phrase for where a pull request stands, from GitHub's own state only. One in the merge queue is queued,
+    whatever its auto-merge reads (#1022, enqueued by the release job with auto-merge off, read as held)."""
+    if p.in_queue:
+        return "in the merge queue"
     if p.waits_on:
         return github.waits_line(p.waits_on) + (" (auto-merge still armed)" if p.auto_merge else "")
     if p.draft:
@@ -134,6 +137,16 @@ def _short(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit - 1] + "…"
 
 
+def _left_open(cfg: common.Config, number: int) -> bool:
+    """Whether an open card a merge closes was left open by mistake: the feeder's own check (`github.closed_card`),
+    so a card reopened after that merge is open work, not a close to do (#979 after #1014). Unreadable keeps the
+    line: a close to check is safer than one hidden."""
+    try:
+        return github.closed_card(cfg, number) is not None
+    except GhError:
+        return True
+
+
 def waiting_on_you(cfg: common.Config, decisions: list, pulls: list, required: frozenset, parked: dict,
                    merged: list, cards: list, flag_errors: dict | None = None, codeowners: tuple = ()) -> list[str]:
     """The lines a maintainer acts on, short enough for a phone: open decisions (oldest first, with the cards each
@@ -165,7 +178,7 @@ def waiting_on_you(cfg: common.Config, decisions: list, pulls: list, required: f
             lines.append(f"  approve #{p.number} {_short(p.title, WAIT_TITLE)} {url}/pull/{p.number}")
     for m in merged:
         for ref in m.get("closingIssuesReferences") or []:
-            if ref.get("number") in still_open:
+            if ref.get("number") in still_open and _left_open(cfg, int(ref["number"])):
                 lines.append(f"  close #{ref['number']} — #{m['number']} merged but it is still open")
     return [f"Waiting on you ({len(lines)}):", *lines] if lines else ["Waiting on you: nothing"]
 

@@ -388,6 +388,18 @@ class TrainTests(ReleaseCase):
         release._move_forward(self.cfg, release.parse("0.5.0"))
         self.assertEqual([p for p in self.posts if "milestones/8" in p[1]], [], "never overwritten")
 
+    def test_a_next_milestone_made_by_hand_is_reused_by_title_and_its_description_kept(self) -> None:
+        """0.8.0 (#10) was created by hand with its own description and cards filed in it before 0.7.0 closed: the
+        roll-forward moves the open items into it, creates no second 0.8.0 and leaves its description alone."""
+        self.milestones[0]["description"] = "Daily-driver reflexes; short cycle"
+        self.milestones.append({"title": "0.6.0", "number": 10, "state": "open", "description": "Hand-written scope"})
+        moved = release._move_forward(self.cfg, release.parse("0.5.0"))
+        self.assertTrue(moved)
+        self.assertEqual([p for p in self.posts if p[0] == "POST" and p[1].endswith("/milestones")], [], "no duplicate")
+        self.assertEqual([p for p in self.posts if "milestones/10" in p[1]], [], "its description is kept")
+        self.assertEqual({p[2]["milestone"] for p in self.posts if "/issues/" in p[1]}, {10})
+        self.assertEqual(self.milestones[1]["description"], "Hand-written scope")
+
     def test_a_prerelease_moves_nothing(self) -> None:
         self.assertIsNone(release.step_forward(self.cfg, release.parse("0.5.0-rc.1"), self.data()))
         self.assertEqual(self.posts, [])
