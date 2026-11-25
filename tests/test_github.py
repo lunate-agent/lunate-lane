@@ -616,6 +616,22 @@ class NeedsPersonTests(unittest.TestCase):
         for text in ("", "all checks met", "needs a person? no"):
             self.assertIsNone(github.needs_person(text))
 
+    def test_a_line_that_denies_the_need_is_none(self) -> None:
+        # #1034 parked its own finished card on the reason "none."
+        for text in ("no NEEDS-PERSON decision is required.\nNEEDS-PERSON: none.", "NEEDS-PERSON: none",
+                     "NEEDS-PERSON: None", "**NEEDS-PERSON:** no", "NEEDS-PERSON: N/A", "NEEDS-PERSON: nothing.",
+                     "NEEDS-PERSON: none needed", "NEEDS-PERSON: not required.", "NEEDS-PERSON: none — every check is met",
+                     "- NEEDS-PERSON: `none`"):
+            with self.subTest(text=text):
+                self.assertIsNone(github.needs_person(text))
+                self.assertIsNone(github.raw_needs_person(text))
+
+    def test_a_reason_that_only_starts_like_a_denial_is_still_a_reason(self) -> None:
+        for reason in ("a maintainer must rotate the key", "no test can evidence check 3 without a real release",
+                       "nothing in the repository says which locale is the default"):
+            with self.subTest(reason=reason):
+                self.assertEqual(github.needs_person("NEEDS-PERSON: " + reason), reason)
+
     def test_a_mention_mid_sentence_is_not_a_line(self) -> None:
         # #818's review, which parked card #749 with the reason "item."
         review_818 = ("Decisions 1–9 are consistent with the issue and the checked-in deltas. **Decision 10 is "

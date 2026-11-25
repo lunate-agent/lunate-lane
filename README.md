@@ -286,7 +286,8 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
    other such test is non-blocking). Everything else — wording, style, the pull request's
    description, suggestions — goes under **Non-blocking** in an approval. Test evidence is CI's: the reviewer
    never asks the worker which tests it ran. A **`NEEDS-PERSON:`** line counts only at the start of a line, in a
-   review or a worker's report; a mention inside a sentence is not one. One whose first sentence is about the
+   review or a worker's report; a mention inside a sentence is not one, nor is a line that denies the
+   need (`NEEDS-PERSON: none.`, `no`, `n/a`, `not required`). One whose first sentence is about the
    card's **Maintainer steps**, or a check only evidence after the merge or outside this repository can satisfy
    (a `merge_group` wall time "before and after", a nightly, the lane's own briefs), is not one either: those are
    the maintainer's after the merge. Both briefs say so, and the reviewer lists such a check under
