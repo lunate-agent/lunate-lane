@@ -966,6 +966,11 @@ def orphaned_draft(p: Pull, running, parked) -> bool:
 # "this is a worker-fixable omission, not a `NEEDS-PERSON` item." — is not a request for a person
 NEEDS_PERSON = re.compile(r"^[ \t>*_`-]*NEEDS-PERSON\b[*_`]*[ \t]*[:—–-]?[ \t]*(.*)", re.MULTILINE)
 REASON_LIMIT = 300
+# a line that denies the need — `NEEDS-PERSON: none.` after "no NEEDS-PERSON decision is required" (#1034, which
+# parked its own finished card on the reason "none.") — is no request: the whole reason is the denial, or the
+# denial ends at a stop ("none — every check is met")
+DENIAL = re.compile(r"(?:none|no|n/?a|nothing|not (?:needed|required))(?:[ \t]+(?:needed|required))?"
+                    r"[ \t]*(?:[.;:,!—–(-].*)?", re.IGNORECASE)
 # a card's "## Maintainer steps", and any check only evidence from after the merge or from outside this repository
 # can satisfy, are the maintainer's after the merge: never a reason to stop for a person
 AFTER_MERGE = re.compile(r"\bmaintainer[ -]steps?\b|\bpost-merge\b|\bafter (?:the |it )?merg(?:e|es|ing)\b"
@@ -995,11 +1000,13 @@ def needs_person(text: str) -> str | None:
 
 
 def raw_needs_person(text: str) -> str | None:
-    """The NEEDS-PERSON line's reason as written, Maintainer steps or not; None without such a line."""
+    """The NEEDS-PERSON line's reason as written, Maintainer steps or not; None without such a line, or with one
+    that only denies the need (`NEEDS-PERSON: none.`)."""
     match = NEEDS_PERSON.search(text or "")
     if not match:
         return None
-    return match.group(1).strip().strip("*_` ").strip()
+    reason = match.group(1).strip().strip("*_` ").strip()
+    return None if DENIAL.fullmatch(reason) else reason
 
 
 class CiRun(typing.NamedTuple):

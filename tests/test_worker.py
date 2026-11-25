@@ -987,6 +987,13 @@ class NeedsPersonDriveTests(DriveCase):
         self.assertEqual(parking[0], 77)
         self.assertIn("card #3 is parked", parking[1])
 
+    def test_a_worker_that_denies_needing_a_person_is_not_parked(self) -> None:
+        # #1034's rework session: "… no NEEDS-PERSON decision is required." then a last line `NEEDS-PERSON: none.`
+        with self.fake_session(text="1. met. 2. met. No NEEDS-PERSON decision is required.\\nNEEDS-PERSON: none."):
+            worker.drive(self.cfg, 3, None)
+        self.assertEqual(harness.parked_info(), {})
+        self.assertNotIn("needs a person", "\n".join(c[1] for c in self.comments))
+
     def test_with_no_commits_the_issue_gets_the_reason(self) -> None:
         with self.fake_session(commit=False, text="NEEDS-PERSON: the failure is in src/Other.cs, which the card does not touch"):
             worker.drive(self.cfg, 3, None)
