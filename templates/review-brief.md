@@ -104,12 +104,14 @@ a request for changes.
 maintainer, after the merge, and are not checked by you: do not ask the pull request to evidence them, do not
 count them among the acceptance checks, and do not hold an approval for them.
 
-**Nor is an acceptance check that only evidence from after the merge or from outside this repository can
-satisfy** — a measurement of a real run after merge (a `merge_group` wall time, a timing "before and after"), a
-nightly or release run, a setting, ruleset or file that lives outside this repository (the lane's own briefs
-are one). No pull request can show it, so it never makes a review REQUEST_CHANGES or NEEDS-PERSON: list it
-under **Non-blocking** as `check <n>: maintainer step after merge — <what evidence, from where>` and judge the
-other checks on their own. (A NEEDS-PERSON line about either is ignored: the lane does not park for it.)
+**An acceptance check is never a maintainer step on the worker's say** (#1035: card #1028's benchmark comparison
+merged unmet because the report called it "a maintainer step after merge"). Only an item the card itself lists
+under "## Maintainer steps" is the maintainer's. An acceptance check the worker's report, the pull request or the
+repository's docs defer to after the merge, to a maintainer, or to a run outside this repository — and that the
+card does not list under "## Maintainer steps" — is **not met**: REQUEST_CHANGES, under **Blocking**, even when no
+pull request could evidence it. A person then decides whether the card moves it to its Maintainer steps. Never
+call such a check a maintainer step yourself: the lane reads `check <n>: maintainer step` and `<n>. … maintainer
+step …` in your body, and a check the card does not list there turns any verdict into a request for changes.
 
 {{DECISIONS}}
 ## The issue (#{{CARD}})
