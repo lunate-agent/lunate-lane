@@ -215,11 +215,11 @@ def ship_release(args) -> int:
             print(f"no release train — {why}")
             return 0
         if args.dry_run:
-            print(f"would cut release {version} — the weekly train ({why}); nothing was changed")
+            print(f"would cut release {version} — the train ({why}); nothing was changed")
             return 0
         if not args.yes and not confirm_train(version, why):
             return 1
-        args.version, who = version, f"the weekly train ({why}), {who}"
+        args.version, who = version, f"the train ({why}), {who}"
     with common.job_lock(release.JOB):
         data = release.start(args.version, who)
         if args.resmoke:
@@ -251,8 +251,8 @@ def main(argv=None) -> int:
                                           "merge, tag, cut (open cards move forward), publish, channels, mirror, smoke, close")
     ship.add_argument("version", nargs="?")
     ship.add_argument("--status", action="store_true")
-    ship.add_argument("--train", action="store_true", help="the weekly train: release the feeder's milestone when a "
-                                                           "changelog fragment merged since the last tag (cron)")
+    ship.add_argument("--train", action="store_true", help="the train: release the feeder's milestone once it has no "
+                                                           "open card and a changelog fragment merged (cron, daily)")
     ship.add_argument("--dry-run", action="store_true", help="with --train: print what it would cut, change nothing")
     ship.add_argument("--yes", action="store_true", help="with --train: cut without asking (the cron line only)")
     ship.add_argument("--resmoke", action="store_true", help="dispatch the smoke again on the next advance")

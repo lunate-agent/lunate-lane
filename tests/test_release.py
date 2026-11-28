@@ -312,8 +312,9 @@ class ChannelsTests(ReleaseCase):
 
 
 class TrainTests(ReleaseCase):
-    """The release train (lunate-lane#21, Decision 2026-11-22): the cut moves open cards forward, the close reads
-    back an empty milestone, and nothing waits for a milestone to empty."""
+    """The release train (lunate-lane#21, Decision 2026-11-22; lunate-lane#78, Decision 2026-11-26): the train waits
+    for the feeder's milestone to empty; a release on a maintainer's word moves open cards forward at the cut, and
+    the close reads back an empty milestone."""
 
     def setUp(self) -> None:
         super().setUp()
@@ -410,15 +411,39 @@ class TrainTests(ReleaseCase):
 
     def test_the_train_ships_the_feeders_milestone_only_when_a_fragment_merged(self) -> None:
         common._CONFIG = __import__("dataclasses").replace(self.cfg, milestone="0.6.0")
+        self.milestones.append({"title": "0.6.0", "number": 8, "state": "open"})
         release.abandon("test")
         common.git.side_effect = lambda repo, *args: "changes/975.md\nchanges/README\n" if "ls-tree" in args else ""
-        self.assertEqual(release.train_version(common.config()), ("0.6.0", "1 changelog fragment(s) on main"))
+        self.assertEqual(release.train_version(common.config()),
+                         ("0.6.0", "0.6.0 has no open card; 1 changelog fragment(s) on main"))
         common.git.side_effect = lambda repo, *args: "changes/README\n" if "ls-tree" in args else ""
         version, why = release.train_version(common.config())
         self.assertIsNone(version)
         self.assertIn("no changelog fragment since the last tag", why)
         release.start("0.6.0", "test")
         self.assertEqual(release.train_version(common.config()), (None, "release 0.6.0 is still open"))
+
+    def test_the_train_waits_while_the_milestone_has_open_cards(self) -> None:
+        """lunate-lane#78: the trigger is the milestone, not a clock — open cards hold the train, and it ships the
+        version once they are closed (or moved forward by hand)."""
+        common._CONFIG = __import__("dataclasses").replace(self.cfg, milestone="0.6.0")
+        self.milestones.append({"title": "0.6.0", "number": 8, "state": "open"})
+        self.items.update({979: 8, 980: 8, 981: 8})
+        release.abandon("test")
+        common.git.side_effect = lambda repo, *args: "changes/975.md\n" if "ls-tree" in args else ""
+        self.assertEqual(release.train_version(common.config()), (None, "0.6.0 still has 3 open card(s)"))
+        del self.items[979], self.items[980]
+        self.assertEqual(release.train_version(common.config()), (None, "0.6.0 still has 1 open card(s)"))
+        self.items[981] = 9  # moved to the next milestone by hand
+        self.assertEqual(release.train_version(common.config()),
+                         ("0.6.0", "0.6.0 has no open card; 1 changelog fragment(s) on main"))
+
+    def test_the_train_says_so_when_the_feeders_milestone_does_not_exist(self) -> None:
+        common._CONFIG = __import__("dataclasses").replace(self.cfg, milestone="0.6.0")
+        release.abandon("test")
+        common.git.side_effect = lambda repo, *args: "changes/975.md\n" if "ls-tree" in args else ""
+        self.assertEqual(release.train_version(common.config()),
+                         (None, "there is no milestone '0.6.0' in lunate-agent/lunate"))
 
 
 class FragmentHoldTests(ReleaseCase):
@@ -583,7 +608,7 @@ class AdvanceTests(ReleaseCase):
                 mock.patch.object(harness, "exit_on_signals"), mock.patch("sys.stdout", new=out):
             self.assertEqual(lane.main(["release", "--train", "--yes"]), 0)
         self.assertEqual(release.intent()["version"], "0.6.0")
-        self.assertIn("the weekly train (2 changelog fragment(s) on main)", release.intent()["by"])
+        self.assertIn("the train (2 changelog fragment(s) on main)", release.intent()["by"])
         with mock.patch("sys.stderr", new=io.StringIO()), self.assertRaises(SystemExit):
             lane.main(["release", "0.6.0", "--train"])
 
@@ -604,7 +629,7 @@ class AdvanceTests(ReleaseCase):
     def test_train_dry_run_says_what_it_would_cut_and_changes_nothing(self) -> None:
         rc, out = self.train("--dry-run")
         self.assertEqual(rc, 0)
-        self.assertIn("would cut release 0.6.0 — the weekly train (2 changelog fragment(s) on main); nothing was "
+        self.assertIn("would cut release 0.6.0 — the train (2 changelog fragment(s) on main); nothing was "
                       "changed", out)
         self.assertIsNone(release.intent())
         self.assertEqual(self.asked, [])

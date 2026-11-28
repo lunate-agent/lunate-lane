@@ -370,20 +370,24 @@ logs to `<state>/logs/<job>.log`, and exits non-zero when a read failed.
 
 ## Releases
 
-A release is one deterministic command (`scripts/release.py`, lunate-lane#21), and it runs as a train: **weekly,
-or on a maintainer's word**. Whatever has merged since the last tag is what ships. A card that misses the train
-rides the next one: open cards never hold a release back, they move to the next milestone at the cut.
+A release is one deterministic command (`scripts/release.py`, lunate-lane#21), and the trigger is the milestone,
+not a clock (lunate-lane#78): **when the milestone the feeder works is complete, or on a maintainer's word**. A
+version number then says what it contains: `0.8.0` means 0.8.0's scope shipped, and its changelog section matches
+the milestone.
 
-- **Weekly**, from cron (Monday 06:00, below): `lane.py release --train --yes` releases the milestone the feeder
-  works. It does nothing while another release is open, or when main has no changelog fragment (no pull request
-  with a release note has merged since the last tag). Only the cron line passes `--yes`. By hand, `--train` asks
-  for the version to be typed back from a terminal, and is refused with no terminal (an agent's shell has none:
-  0.6.0 was cut that way by accident on 2026-11-22). `--train --dry-run` says what it would cut and changes
-  nothing.
-- **On a maintainer's word**, any day, relayed by the orchestrator: `lane.py release <version>`.
+- **When the milestone is complete**, checked daily from cron (07:00, below): `lane.py release --train --yes`
+  releases the milestone the feeder works once it has no open issue or pull request left. It does nothing while
+  another release is open, when main has no changelog fragment (no pull request with a release note has merged
+  since the last tag), or while the milestone still has open cards (`0.8.0 still has 3 open card(s)`). A straggler
+  holds the release until someone moves it to the next milestone by hand — an explicit decision, not a clock's.
+  Only the cron line passes `--yes`. By hand, `--train` asks for the version to be typed back from a terminal, and
+  is refused with no terminal (an agent's shell has none: 0.6.0 was cut that way by accident on 2026-11-22).
+  `--train --dry-run` says what it would cut and changes nothing.
+- **On a maintainer's word**, any day, relayed by the orchestrator: `lane.py release <version>` — the way to ship
+  something urgent mid-milestone. Open cards do not hold it: they move to the next milestone at the cut.
 
     .venv/bin/python scripts/lane.py release 0.5.0             # record the intent, advance as far as it can
-    .venv/bin/python scripts/lane.py release --train --dry-run # what the weekly train would cut; changes nothing
+    .venv/bin/python scripts/lane.py release --train --dry-run # what the train would cut; changes nothing
     .venv/bin/python scripts/lane.py release --status          # where it is and what it waits on
     .venv/bin/python scripts/lane.py release 0.5.0 --resmoke   # dispatch the smoke again after a fix
     .venv/bin/python scripts/lane.py release --abandon "wrong version"   # drop the record; GitHub is left as it is
@@ -466,10 +470,10 @@ the orchestrating user's crontab (`crontab -e`):
     */10 * * * *  cd $LANE && .venv/bin/python scripts/feed.py   >> $HOME/.local/state/lunate-lane/logs/cron.out 2>&1
     5-59/10 * * * * cd $LANE && .venv/bin/python scripts/review.py >> $HOME/.local/state/lunate-lane/logs/cron.out 2>&1
     0 7 * * *     cd $LANE && .venv/bin/python scripts/digest.py
-    0 6 * * 1     cd $LANE && .venv/bin/python scripts/lane.py release --train --yes >> $HOME/.local/state/lunate-lane/logs/cron.out 2>&1
+    0 7 * * *     cd $LANE && .venv/bin/python scripts/lane.py release --train --yes >> $HOME/.local/state/lunate-lane/logs/cron.out 2>&1
 
-`PATH` must reach `gh` and `git`; sessions get their own PATH, see above. The Monday line is the weekly release
-train; after it, the feeder tick advances the release every 10 minutes. The digest prints its message on stdout, so whatever runs that line
+`PATH` must reach `gh` and `git`; sessions get their own PATH, see above. The last line is the release train,
+checked daily; once it cuts, the feeder tick advances the release every 10 minutes. The digest prints its message on stdout, so whatever runs that line
 delivers it (cron mail, or the orchestrator's own scheduler capturing stdout). Before the first real tick, run
 `feed.py --dry-run` and `review.py --dry-run` by hand and read what they would do.
 

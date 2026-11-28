@@ -3,9 +3,10 @@
     .venv/bin/python scripts/lane.py release 0.5.0      # record the intent and advance as far as it can
     .venv/bin/python scripts/lane.py release --status   # where it is and what it waits on
 
-A release is cut weekly (`lane.py release --train`, from cron: the milestone the feeder works, when a changelog
-fragment has merged since the last tag) or on a maintainer's word, which the orchestrator relays as
-`lane.py release <version>`. Open cards never hold a release back: they move to the next milestone at the cut. No model
+A release is cut when the milestone the feeder works has no open card left (`lane.py release --train`, from a daily
+cron line: and only when a changelog fragment has merged since the last tag; lunate-lane#78), or on a maintainer's
+word, which the orchestrator relays as `lane.py release <version>` — the way to ship something urgent mid-milestone.
+A maintainer's release is not held by open cards: they move to the next milestone at the cut. No model
 session decides or edits anything on this path. Each step reads GitHub, does one thing, and reads it back; a step
 that is done is skipped, so the run continues from the first one not done and running it again is always safe.
 The feeder tick advances an open release every 10 minutes, so nothing waits in a terminal while CI runs.
@@ -157,9 +158,10 @@ def start(version: str, by: str) -> dict:
 
 
 def train_version(cfg: common.Config) -> tuple[str | None, str]:
-    """The weekly train's version, or None and why there is no train this week. The train ships the milestone the
-    feeder works, from whatever has merged: it runs when main has at least one changelog fragment (a pull request
-    with a release note merged since the last tag), and never while another release is open."""
+    """The train's version, or None and why there is no train today. The train ships the milestone the feeder works
+    once that milestone is complete (lunate-lane#78): it runs when no other release is open, main has at least one
+    changelog fragment (a pull request with a release note merged since the last tag), and the milestone has no open
+    issue or pull request left. A straggler holds it until someone moves that card to the next milestone by hand."""
     current = intent()
     if current:
         return None, f"release {current['version']} is still open"
@@ -172,7 +174,13 @@ def train_version(cfg: common.Config) -> tuple[str | None, str]:
     fragments = [p for p in listed.splitlines() if p.strip().endswith(".md")]
     if not fragments:
         return None, f"nothing to ship: {cfg.base} has no changelog fragment since the last tag"
-    return v.text, f"{len(fragments)} changelog fragment(s) on {cfg.base}"
+    milestone = _milestone(cfg, v.text)
+    if milestone is None:
+        return None, f"there is no milestone {v.text!r} in {cfg.slug}"
+    still_open = int(milestone.get("open_issues") or 0)
+    if still_open:
+        return None, f"{v.text} still has {still_open} open card(s)"
+    return v.text, f"{v.text} has no open card; {len(fragments)} changelog fragment(s) on {cfg.base}"
 
 
 def fix(number: int) -> dict:
