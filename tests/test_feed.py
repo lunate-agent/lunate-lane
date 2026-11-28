@@ -1060,3 +1060,39 @@ class FragmentHoldTests(unittest.TestCase):
         with mock.patch.object(release, "_pull_for", side_effect=AssertionError("no release, no read")):
             self.assertEqual(feed.main(), 0)
         self.enqueue.assert_called_once_with(1003, "PR_1003", "h1")
+
+
+class NoAskFeedTests(unittest.TestCase):
+    """#789: a worker's draft left on a NEEDS-PERSON that asks for nothing goes back to a worker as a review round
+    (REWORK_LIMIT), not as an orphaned draft's fix (FIX_LIMIT), and parks as "reworks" at the cap."""
+
+    tearDown = FeedTests.tearDown
+
+    def setUp(self) -> None:
+        FeedTests.setUp(self)
+        github.milestone_cards.return_value = []
+        github.open_pulls.return_value = [pull(1043, 789, draft=True)]
+        github.pull.return_value = pull(1043, 789, head="d70d82083", draft=True)
+
+    def test_789s_draft_spends_a_review_round_each_time_and_parks_at_the_cap(self) -> None:
+        from scripts import open_pr
+
+        comments = []
+        with mock.patch.object(open_pr, "comment", side_effect=lambda n, body: comments.append((n, body))):
+            for n in range(1, harness.REWORK_LIMIT + 1):
+                harness.note_no_ask(789, 1043)  # the run before ended on `NEEDS-PERSON: none.`
+                self.assertEqual(feed.main(), 0)
+                self.assertEqual((harness.rework_rounds(789, 1043), harness.fix_rounds(789, 1043)), (n, 0))
+                self.assertFalse(harness.no_ask_on(789, 1043), "the started rework clears it")
+                harness.note_run(789, True)
+            harness.note_no_ask(789, 1043)
+            self.assertEqual(feed.main(), 0)
+        self.assertEqual([(l.rework_pr, l.reason) for l in self.started], [(1043, "orphaned draft")] * 3)
+        self.assertEqual(harness.parked_details(), {789: "reworks"})
+        self.assertEqual([c[0] for c in comments], [1043])
+        self.assertIn("parked card #789 after 3 rework rounds on #1043",
+                      (self.state.cfg.state / "logs" / "feed.log").read_text())
+
+    def test_without_it_an_orphaned_draft_is_still_a_fix(self) -> None:
+        self.assertEqual(feed.main(), 0)
+        self.assertEqual((harness.rework_rounds(789, 1043), harness.fix_rounds(789, 1043)), (0, 1))

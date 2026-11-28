@@ -594,6 +594,7 @@ def person_reason(cfg: common.Config, report: str) -> str | None:
     if reason is None:
         raw = github.raw_needs_person(report)
         if raw is not None:  # Maintainer steps, or evidence only after the merge: the maintainer's, not a park
+            # (one that asks for nothing is not raw: `empty_needs_person`, a rework round)
             common.log("worker", "NEEDS-PERSON about a maintainer step after merge is not a park — it is for the "
                                  "maintainer after the merge: " + secret_scan.redact(
                                      raw, (harness.read_credential(cfg),))[0][:200])
@@ -618,8 +619,14 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
     except harness.HarnessError as exc:
         report = f"(the session's final message could not be read: {exc})"
     person = None if outcome.stalled else person_reason(cfg, report)
+    # a NEEDS-PERSON that asks a person for nothing (#789: "none.") is no park: never armed, and the draft goes
+    # back to the worker as a review round (the feeder reads `note_no_ask`)
+    empty = None if outcome.stalled or person is not None else github.empty_needs_person(report)
     if person is not None:  # the worker stopped for a person: never armed, and the card parks at once
         found.append(f"the worker says it needs a person: {person}")
+    elif empty is not None:
+        found.append(f"the worker ended on `{empty}`, which asks a person for nothing — no reason to stop: finish "
+                     "the card, or name exactly what a person must decide or supply")
     idle, parked_now = harness.note_run(number, common.wt_git(cfg, worktree, "rev-parse", "HEAD") != start_head)
     if idle:
         common.log(job, f"no new commit — idle run {idle} of {harness.IDLE_RUN_LIMIT}")
@@ -693,6 +700,10 @@ def finish(cfg: common.Config, number: int, worktree: pathlib.Path, outcome: har
                + (f" — {'; '.join(found)}" if found else ""))
     if person is not None:
         park_for_person(cfg, number, result["number"], person)
+    elif empty is not None:
+        harness.note_no_ask(number, result["number"])
+        common.log(job, f"#{result['number']} goes back to a worker as a rework round — `{empty}` asks a person for "
+                        "nothing; the card is not parked")
     elif not_ready:
         if harness.park(number, "ready", not_ready):
             park(cfg, number, result["number"], "ready", detail=not_ready)

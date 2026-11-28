@@ -994,6 +994,27 @@ class NeedsPersonDriveTests(DriveCase):
         self.assertEqual(harness.parked_info(), {})
         self.assertNotIn("needs a person", "\n".join(c[1] for c in self.comments))
 
+    def test_789s_needs_person_none_is_sent_back_as_a_rework_round_not_parked(self) -> None:
+        """#789 (draft #1043) parked on "needs a person: none.". A NEEDS-PERSON that asks for nothing stops
+        nothing: the pull request stays an unarmed draft that says why, and its next rework is a review round."""
+        text = "1. met. 2. the maintainer's post-merge measurement.\\n\\nNEEDS-PERSON: none."
+        with self.fake_session(text=text):
+            self.assertEqual(worker.drive(self.cfg, 3, None), 1)
+        self.assertEqual(harness.parked_info(), {})
+        self.assertEqual(self.dispatched, [False, False], "never armed: it goes back to a worker")
+        self.assertEqual(len(self.comments), 1, "the report only, no parking comment")
+        self.assertIn("**Incomplete — the pull request stays a draft", self.comments[0][1])
+        self.assertIn("the worker ended on `NEEDS-PERSON: none.`, which asks a person for nothing", self.comments[0][1])
+        self.assertTrue(harness.no_ask_on(3, 77))
+        self.assertIn("#77 goes back to a worker as a rework round — `NEEDS-PERSON: none.` asks a person for nothing",
+                      (self.cfg.state / "logs" / "worker-3.log").read_text())
+
+    def test_a_bare_needs_person_is_sent_back_too(self) -> None:
+        with self.fake_session(text="1. met.\\nNEEDS-PERSON:"):
+            worker.drive(self.cfg, 3, None)
+        self.assertEqual(harness.parked_info(), {})
+        self.assertTrue(harness.no_ask_on(3, 77))
+
     def test_with_no_commits_the_issue_gets_the_reason(self) -> None:
         with self.fake_session(commit=False, text="NEEDS-PERSON: the failure is in src/Other.cs, which the card does not touch"):
             worker.drive(self.cfg, 3, None)

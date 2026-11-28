@@ -971,6 +971,18 @@ REASON_LIMIT = 300
 # denial ends at a stop ("none — every check is met")
 DENIAL = re.compile(r"(?:none|no|n/?a|nothing|not (?:needed|required))(?:[ \t]+(?:needed|required))?"
                     r"[ \t]*(?:[.;:,!—–(-].*)?", re.IGNORECASE)
+# nor is a line that names nothing a person could do (#789 parked on "none."; a bare `NEEDS-PERSON`, "-", "TBD",
+# "(none)", "no person is needed", "nothing to decide"): it goes back to the worker as a rework round instead
+NO_ASK = re.compile(r"[\W_]*(?:(?:tbd|tba|todo|unknown|n/?a|none|nil)[\W_]*)?"
+                    r"|no (?:person|one|human|maintainer|decision|input|action)(?: is)? (?:needed|required|necessary)\b.*"
+                    r"|nothing (?:to (?:decide|supply|do)|(?:is )?(?:needed|required|left)(?: to do)?)\b.*",
+                    re.IGNORECASE | re.DOTALL)
+
+
+def no_ask(reason: str) -> bool:
+    """The reason of a NEEDS-PERSON line asks a person for nothing: a denial, a placeholder or nothing at all."""
+    reason = (reason or "").strip()
+    return DENIAL.fullmatch(reason) is not None or NO_ASK.fullmatch(reason) is not None
 # a card's "## Maintainer steps", and any check only evidence from after the merge or from outside this repository
 # can satisfy, are the maintainer's after the merge: never a reason to stop for a person
 AFTER_MERGE = re.compile(r"\bmaintainer[ -]steps?\b|\bpost-merge\b|\bafter (?:the |it )?merg(?:e|es|ing)\b"
@@ -996,17 +1008,36 @@ def needs_person(text: str) -> str | None:
     reason = raw_needs_person(text)
     if reason is None or (after_merge_only(reason) and merge_first(reason) is None):  # a merge-first is a wait
         return None
-    return reason[:REASON_LIMIT] or "(no reason given)"
+    return reason[:REASON_LIMIT]
+
+
+def _line_reason(text: str) -> tuple[str, str] | None:
+    """(the NEEDS-PERSON line as written, its reason), or None without such a line. A line with nothing after the
+    marker takes its reason from the next non-blank line, unless that is a heading or another marker."""
+    text = text or ""
+    match = NEEDS_PERSON.search(text)
+    if not match:
+        return None
+    reason = match.group(1).strip().strip("*_` ").strip()
+    if not reason:
+        following = next((l.strip() for l in text[match.end():].splitlines() if l.strip()), "")
+        if following and not following.startswith("#") and not NEEDS_PERSON.match(following):
+            reason = following.strip("*_` ").strip()
+    return match.group(0).strip(), reason
 
 
 def raw_needs_person(text: str) -> str | None:
     """The NEEDS-PERSON line's reason as written, Maintainer steps or not; None without such a line, or with one
-    that only denies the need (`NEEDS-PERSON: none.`)."""
-    match = NEEDS_PERSON.search(text or "")
-    if not match:
-        return None
-    reason = match.group(1).strip().strip("*_` ").strip()
-    return None if DENIAL.fullmatch(reason) else reason
+    that asks a person for nothing (`NEEDS-PERSON: none.`, a bare marker, a placeholder: `no_ask`)."""
+    found = _line_reason(text)
+    return None if found is None or no_ask(found[1]) else found[1]
+
+
+def empty_needs_person(text: str) -> str | None:
+    """The NEEDS-PERSON line as written when it asks a person for nothing (`no_ask`); None without such a line, or
+    when it names a concrete ask. The worker's is no park: its pull request goes back to it as a rework round."""
+    found = _line_reason(text)
+    return found[0] if found is not None and no_ask(found[1]) else None
 
 
 class CiRun(typing.NamedTuple):
