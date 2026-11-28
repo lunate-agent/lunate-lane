@@ -1232,6 +1232,19 @@ def parked_info() -> dict:
     return found
 
 
+PARKED_WHY = {"idle": "runs with no new commit", "reworks": "rework rounds used up",
+              "fixes": "fix reworks used up",
+              "secret": "secret-shaped text in a push", "person": "needs a person",
+              "ready": "CI never ran it as ready", "manual": "parked by hand"}
+
+
+def parked_line(why) -> str:
+    """One parked card's reason: the kind, and for a person's decision or a failed ready run, the words why."""
+    reason, detail = why if isinstance(why, tuple) else (why, "")
+    text = PARKED_WHY.get(reason, reason)
+    return f"{text}: {detail}" if detail else text
+
+
 def parked_cards() -> frozenset:
     """Cards the feeder must not start again until a person deletes their attempts record."""
     return frozenset(parked_details())
