@@ -1232,6 +1232,31 @@ def parked_info() -> dict:
     return found
 
 
+def _lane_code() -> pathlib.Path:
+    return common.state_dir() / "lane-code.json"
+
+
+def note_lane_code(behind: int, head: str, origin: str) -> None:
+    """What the feeder found on its last tick: how far the lane's own checkout is behind origin (`lane_behind`)."""
+    path = _lane_code()
+    tmp = path.with_suffix(".tmp")
+    try:
+        tmp.write_text(json.dumps({"behind": int(behind), "head": head, "origin": origin, "at": time.time()}))
+        os.replace(tmp, path)
+    except OSError as exc:
+        raise StateError(f"the lane-code record {path} could not be written: {exc}") from exc
+
+
+def lane_code() -> dict:
+    """The feeder's last lane-code record, or {} when there is none or it cannot be read (the digest only shows it)."""
+    try:
+        data = json.loads(_lane_code().read_text())
+        return {"behind": int(data["behind"]), "head": str(data["head"]), "origin": str(data["origin"]),
+                "at": float(data["at"])}
+    except (OSError, ValueError, KeyError, TypeError):
+        return {}
+
+
 PARKED_WHY = {"idle": "runs with no new commit", "reworks": "rework rounds used up",
               "fixes": "fix reworks used up",
               "secret": "secret-shaped text in a push", "person": "needs a person",
