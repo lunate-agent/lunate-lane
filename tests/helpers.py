@@ -7,6 +7,7 @@ import pathlib
 import subprocess
 import sys
 import tempfile
+from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 from scripts import common, github  # noqa: E402
@@ -138,7 +139,8 @@ class TempState:
         self.saved = common._CONFIG
         common._CONFIG = self.cfg
         self.github = FakeIssues()
-        self._fakes = self.github.install()
+        # the feeder compares the lane's own checkout with origin each tick: never a real fetch in a test
+        self._fakes = [*self.github.install(), mock.patch.object(common, "lane_behind", return_value=(0, "a" * 40, "a" * 40))]
         for patch in self._fakes:
             patch.start()
 

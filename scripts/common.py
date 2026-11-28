@@ -300,6 +300,19 @@ def git(repo: pathlib.Path, *args: str, timeout: int = 300, env: dict | None = N
     return run(git_argv(repo, *args), error=GitError, timeout=timeout, env=git_env(env)).strip()
 
 
+LANE_BASE = "main"  # the lane's own repository's branch, not the card repository's `base`
+
+
+def lane_behind(root: pathlib.Path = ROOT, base: str = LANE_BASE) -> tuple[int, str, str]:
+    """(commits behind, HEAD, origin/<base>) for the checkout this code runs from — the one cron runs. Fetched
+    now, never pulled: #77 merged on 2026-11-25 and #789 parked on its exact case on 2026-11-28, because nothing
+    had pulled it. Raises GitError when the fetch or a read fails."""
+    git(root, "fetch", "-q", "origin", base, timeout=60)
+    head = git(root, "rev-parse", "HEAD")
+    origin = git(root, "rev-parse", f"origin/{base}")
+    return int(git(root, "rev-list", "--count", f"HEAD..origin/{base}") or 0), head, origin
+
+
 def inside_state(path: pathlib.Path, under: str = "") -> pathlib.Path:
     """`path`, resolved, if it lies strictly inside the state directory (or its `under` folder): no `..` in it, not
     itself a symlink. Anything else — a forged record, a symlink a session planted — is a StateError, never a path

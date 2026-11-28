@@ -226,8 +226,25 @@ def start(cfg: common.Config, launch: cards.Launch) -> int:
     return proc.pid
 
 
+def check_lane_code(dry_run: bool) -> None:
+    """Compare the lane's own checkout with origin each tick and say so when it is behind — the code cron runs is
+    this checkout, and nothing pulls it (#789 parked on a case #77 had fixed three days before). Never a pull: a
+    person decides when lane code goes live. A fetch that fails is logged, and the tick goes on."""
+    try:
+        behind, head, origin = common.lane_behind()
+    except LaneError as exc:
+        common.log(JOB, f"could not compare the lane code with origin/{common.LANE_BASE}: {exc}")
+        return
+    if behind:
+        common.log(JOB, f"lane code {behind} commit(s) behind origin/{common.LANE_BASE} (at {head[:9]}, origin at "
+                        f"{origin[:9]}) — `git -C {common.ROOT} pull --ff-only origin {common.LANE_BASE}` to take it")
+    if not dry_run:
+        harness.note_lane_code(behind, head, origin)
+
+
 def tick(dry_run: bool = False) -> None:
     cfg = common.config()
+    check_lane_code(dry_run)
     if not dry_run:
         swept = open_pr.sweep_secret_dir()
         if swept:
