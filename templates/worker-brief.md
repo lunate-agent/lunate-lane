@@ -14,6 +14,14 @@ uses and say so in your final report.
   mistake with a new commit.
 - **The pull request number.** {{PR_LINE}}
 - Work only inside this worktree. Write temporary files under `$TMPDIR`, never `/tmp`.
+- **The NuGet cache is `$NUGET_PACKAGES`.** Your `$HOME` is a scratch directory, so `~/.nuget/packages` is
+  empty: the lane points `NUGET_PACKAGES` at the real package cache (when one exists), and
+  `dotnet nuget locals global-packages --list` prints where it is. A package's assemblies and XML docs are under
+  `$NUGET_PACKAGES/<package id, lowercased>/<version>/`.
+- **Never search from `/` or `$HOME`** — no `find /`, `find ~`, `grep -r /`, `ls -R ~`. A walk of the whole disk
+  prints nothing until it ends, and under the sandbox it outlasts the lane's 20 minutes of silence: the lane stops
+  the session with nothing done (#1027, three runs in a row). Search the repository, `$NUGET_PACKAGES`, or a
+  folder `dotnet nuget locals all --list` names.
 - **Never create a container VM**: no `podman machine`, `docker machine`, colima or lima. The sandbox refuses
   them, and a VM image is gigabytes. A check that needs a container runtime cannot run here: say so in your
   report and go on with the rest — it stays an acceptance check, not met, unless the card lists it under

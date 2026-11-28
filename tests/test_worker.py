@@ -1022,6 +1022,22 @@ class NeedsPersonDriveTests(DriveCase):
         self.assertIn("the failure is in src/Other.cs", self.comments[0][1])
         self.assertEqual(harness.parked_cards(), frozenset({3}))
 
+    def test_the_brief_names_the_nuget_cache_and_forbids_searching_the_disk(self) -> None:
+        """#1027: three sessions ran `find /` for Microsoft.Extensions.AI.Abstractions — `~/.nuget/packages` is
+        empty under the scratch HOME — and each was stopped after 1200 s of silence."""
+        text = worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), None, "", True)
+        self.assertIn("**The NuGet cache is `$NUGET_PACKAGES`.**", text)
+        self.assertIn("`dotnet nuget locals global-packages --list`", text)
+        self.assertIn("**Never search from `/` or `$HOME`** — no `find /`, `find ~`", text)
+        self.assertIn("Search the repository, `$NUGET_PACKAGES`, or a\n  folder `dotnet nuget locals all --list` names.",
+                      text)
+        real_home = self.cfg.state / "real-home"
+        (real_home / ".nuget" / "packages").mkdir(parents=True)
+        env = harness.session_env(self.cfg, common.state_dir("scratch", "issue-3"), real_home=real_home)
+        self.assertEqual(env["NUGET_PACKAGES"], str(real_home / ".nuget" / "packages"),
+                         "the variable the brief names is the one the session gets")
+        self.assertNotEqual(env["HOME"], str(real_home))
+
     def test_the_brief_tells_the_worker_how_to_stop(self) -> None:
         text = worker.brief(self.cfg, ISSUE, pathlib.Path("/w"), None, "", True)
         self.assertIn("NEEDS-PERSON: <what has to be decided or supplied", text)
