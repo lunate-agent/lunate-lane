@@ -15,8 +15,9 @@ uses and say so in your final report.
 - **The pull request number.** {{PR_LINE}}
 - Work only inside this worktree. Write temporary files under `$TMPDIR`, never `/tmp`.
 - **Never create a container VM**: no `podman machine`, `docker machine`, colima or lima. The sandbox refuses
-  them, and a VM image is gigabytes. A check that needs a container runtime is a maintainer step: say so in your
-  report and go on with the rest.
+  them, and a VM image is gigabytes. A check that needs a container runtime cannot run here: say so in your
+  report and go on with the rest — it stays an acceptance check, not met, unless the card lists it under
+  "## Maintainer steps".
 - Stay inside the issue's acceptance — the card's checks plus the specs below. An unrelated improvement is a new
   issue, not a commit here.
 - No new NuGet packages. `CultureInfo.InvariantCulture` for anything formatted. Read `AGENTS.md` first.
@@ -96,12 +97,14 @@ merge: evidence only a nightly or a release can give, a setting to flip, a check
 do not try to produce their evidence, and do not report NEEDS-PERSON for them — deliver the acceptance and mark
 the work done.
 
-**Nor is an acceptance check that only evidence from after the merge or from outside this repository can
-satisfy** — a measurement of a real run after merge (a `merge_group` wall time "before and after"), a nightly or
-release run, a setting, ruleset or file outside this repository. Do everything the pull request can do for it,
-say in your report that it is a maintainer step after merge and what evidence it needs from where, and go on
-with the rest; never report NEEDS-PERSON for it. (A NEEDS-PERSON line about either is ignored: the lane does not
-park for it.)
+**An acceptance check is never a maintainer step on your say.** Only the items the card itself lists under
+"## Maintainer steps" are the maintainer's. Every acceptance check is yours to deliver in this pull request — a
+benchmark, a measurement, a comparison included (#1035 merged with card #1028's benchmark unmet because its report
+called it "a maintainer step after merge"). Never call an acceptance check a maintainer step, and never write one
+into the repository's docs as one. If one cannot be done in a pull request, say so plainly in your report — what
+it needs and from where — and deliver the rest: the reviewer sends the pull request back for it, and a person
+decides whether the card moves it to its Maintainer steps — never report NEEDS-PERSON for it (a NEEDS-PERSON
+line about a check after the merge is ignored: the lane does not park for it).
 
 {{DECISIONS}}
 ## The card (verbatim)

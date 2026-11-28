@@ -53,20 +53,17 @@ class AfterMergeChecksTests(unittest.TestCase):
         first = "NEEDS-PERSON: blocked by #826; it can only land after the merge of #826."
         self.assertEqual(github.needs_person(first), first.split(": ", 1)[1], "a merge-first stays a blocked-by wait")
 
-    def test_both_briefs_say_so_and_the_review_lists_it_as_non_blocking(self) -> None:
+    def test_neither_brief_lets_an_acceptance_check_become_a_maintainer_step(self) -> None:
+        """Superseded by #1035 (card #1028): an after-merge acceptance check still parks nothing, but it is no
+        longer non-blocking — only the card's own "## Maintainer steps" are the maintainer's."""
         review_brief = (common.ROOT / "templates" / "review-brief.md").read_text()
         worker_brief = (common.ROOT / "templates" / "worker-brief.md").read_text()
         verdict_part = review_brief[review_brief.index("## Your verdict"):]
-        self.assertIn("**Nor is an acceptance check that only evidence from after the merge or from outside this "
-                      "repository can\nsatisfy**", verdict_part)
-        self.assertIn("`check <n>: maintainer step after merge — <what evidence, from where>`", verdict_part)
-        self.assertIn("**Non-blocking**", verdict_part)
-        self.assertIn("judge the\nother checks on their own", verdict_part)
-        self.assertIn("the lane's own briefs\nare one", verdict_part)  # #849's check 5
-        self.assertIn("`merge_group` wall time", verdict_part)  # #843's check 6
-        self.assertNotIn("only a\nreal release can show it", review_brief)
-        self.assertIn("never report NEEDS-PERSON for it", worker_brief)
-        self.assertNotIn("can only come from a real release", worker_brief)
+        self.assertNotIn("Nor is an acceptance check", review_brief + worker_brief)
+        self.assertIn("**An acceptance check is never a maintainer step on the worker's say**", verdict_part)
+        self.assertIn("is **not met**: REQUEST_CHANGES", verdict_part)
+        self.assertIn("**An acceptance check is never a maintainer step on your say.**", worker_brief)
+        self.assertNotIn("A check that needs a container runtime is a maintainer step", worker_brief)
 
 
 class VerdictCommandTests(unittest.TestCase):
@@ -133,8 +130,7 @@ class RunReviewVerdictTests(unittest.TestCase):
             self.assertEqual(len(commands), 1, "the brief names the command")
             body_file = pathlib.Path(shlex.split(commands[0])[shlex.split(commands[0]).index("--body-file") + 1])
             self.assertEqual(body_file.parent, scratch)
-            body_file.write_text("1. **Met.**\n\n**Non-blocking**\n\n- check 6: maintainer step after merge — "
-                                 "the `merge_group` wall time of the first queue run\n")
+            body_file.write_text("1. **Met.**\n\n**Non-blocking**\n\n- the title could say more\n")
             for event in ("APPROVE", "REQUEST_CHANGES"):
                 subprocess.run(commands[0].replace("--event APPROVE", f"--event {event}"), shell=True,
                                capture_output=True, check=False)
@@ -149,7 +145,7 @@ class RunReviewVerdictTests(unittest.TestCase):
                 mock.patch.object(github, "open_pulls", return_value=[]):
             event, body, _ = review.run_review(self.cfg, pull(5, 9, head=head, files=("docs/a.md",)))
         self.assertEqual(event, "APPROVE")
-        self.assertIn("check 6: maintainer step after merge", body)
+        self.assertIn("the title could say more", body)
         log = (self.cfg.state / "logs" / "review.log").read_text()
         self.assertIn("#5 ERROR — the reviewer tried to write a second verdict (REQUEST_CHANGES", log)
 

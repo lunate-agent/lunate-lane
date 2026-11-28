@@ -100,8 +100,60 @@ def due(cfg: common.Config) -> list[github.Pull]:
     return found
 
 
-def read_verdict(path: pathlib.Path) -> tuple[str, str]:
-    """(event, body) from the reviewer's verdict file. Anything else is a ReviewError — never an approval."""
+# A line of the review that puts acceptance check <n> on the maintainer: `4. **Not evidenced; maintainer step after
+# merge**` or `- **Check 4:** maintainer step after merge — …` (#1035, card #1028). A check marked met is not one.
+DEFERRAL = re.compile(r"^[ \t>*_`-]*(?:check[ \t]+)?(\d+)\b(?![.):]?[ \t*_`]*met\b)[.):]?[^\n]*?\bmaintainer[ -]steps?\b",
+                      re.IGNORECASE | re.MULTILINE)
+LIST_ITEM = re.compile(r"^[ ]{0,1}(?:[-*+]|\d+[.)])[ \t]+(?:\[[ xX]\][ \t]+)?(.*)")
+
+
+def list_items(section: str) -> list[str]:
+    """The top-level list items of a card section, in order, each with its continuation lines."""
+    items: list[str] = []
+    for line in section.splitlines():
+        match = LIST_ITEM.match(line)
+        if match:
+            items.append(match.group(1))
+        elif items and line.strip() and line.startswith((" ", "\t")):
+            items[-1] += " " + line.strip()
+    return items
+
+
+def _plain(text: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"[*_`]", "", text)).strip(" .;:").lower()
+
+
+def deferred_acceptance(review_body: str, card_body: str) -> list[int]:
+    """The acceptance checks the review leaves to the maintainer although the card does not (lunate-lane, after
+    #1035: card #1028's benchmark comparison merged unmet, relabelled "maintainer step after merge"). Check <n> is
+    the card's n-th `## Acceptance` item; it is the maintainer's only when the card itself lists that item under
+    `## Maintainer steps`. A number past the acceptance items is one of the Maintainer steps when the card has any."""
+    acceptance = list_items(card_section(card_body or "", "Acceptance"))
+    steps = [_plain(s) for s in list_items(card_section(card_body or "", "Maintainer steps"))]
+    held = []
+    for n in sorted({int(m) for m in DEFERRAL.findall(review_body or "")}):
+        if 1 <= n <= len(acceptance):
+            item = _plain(acceptance[n - 1])
+            if not any(item and step and (item in step or step in item) for step in steps):
+                held.append(n)
+        elif not steps:
+            held.append(n)
+    return held
+
+
+def deferral_note(held: list[int]) -> str:
+    checks = ", ".join(f"check {n}" for n in held)
+    return ("## Blocking (the lane)\n\n"
+            f"- **{checks} not met.** An acceptance check is never a maintainer step on the worker's or the "
+            "reviewer's say: only an item the card itself lists under \"## Maintainer steps\" is. Deliver it in "
+            "this pull request. If no pull request can, say so in the report: a person decides whether the card "
+            "moves it to its Maintainer steps.")
+
+
+def read_verdict(path: pathlib.Path, card_body: str = "") -> tuple[str, str]:
+    """(event, body) from the reviewer's verdict file. Anything else is a ReviewError — never an approval. A review
+    that leaves an acceptance check to the maintainer which the card does not (`deferred_acceptance`) is a request
+    for changes, with the lane's note on it, whatever the reviewer chose."""
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
     except FileNotFoundError as exc:
@@ -115,6 +167,9 @@ def read_verdict(path: pathlib.Path) -> tuple[str, str]:
     body = data.get("body")
     if not isinstance(body, str) or not body.strip():
         raise ReviewError("the verdict has no body")
+    held = deferred_acceptance(body, card_body)
+    if held:
+        return "REQUEST_CHANGES", body.strip() + "\n\n" + deferral_note(held)
     if data["event"] == "APPROVE" and github.needs_person(body) is not None:
         return "REQUEST_CHANGES", body.strip()  # a check nobody can evidence is not an approval
     return data["event"], body.strip()
@@ -302,7 +357,7 @@ def run_review(cfg: common.Config, p: github.Pull) -> tuple[str, str, str]:
             crashed = (f" — the session's own process crashed (its PATH: {harness.session_path(cfg)}; a crash "
                        "report is in ~/Library/Logs/DiagnosticReports)") if (outcome.rc or 0) < 0 else ""
             raise ReviewError(f"the review session did not finish cleanly ({harness.describe_rc(outcome.rc)}){crashed}")
-        return (*read_verdict(verdict_file), model)
+        return (*read_verdict(verdict_file, issue.get("body") or ""), model)
     finally:
         remove_review_worktree(cfg, p.number)
         harness.clear_review(p.number, driver)
