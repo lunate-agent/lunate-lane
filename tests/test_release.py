@@ -324,8 +324,9 @@ class TrainTests(ReleaseCase):
         self.routes["repos/lunate-agent/lunate/milestones"] = lambda path: [
             {**m, "open_issues": sum(1 for v in self.items.values() if v == m["number"]),
              "closed_issues": self.closed_items.get(m["number"], 0)} for m in self.milestones]
+        self.extra = {}  # an open item's labels or `pull_request`, by number
         self.routes["repos/lunate-agent/lunate/issues?milestone="] = lambda path: [
-            {"number": n} for n, m in sorted(self.items.items()) if f"milestone={m}&" in path]
+            {"number": n, **self.extra.get(n, {})} for n, m in sorted(self.items.items()) if f"milestone={m}&" in path]
         common.rest.side_effect = self.github
 
     def github(self, token, method, path, payload=None):
@@ -431,12 +432,51 @@ class TrainTests(ReleaseCase):
         self.items.update({979: 8, 980: 8, 981: 8})
         release.abandon("test")
         common.git.side_effect = lambda repo, *args: "changes/975.md\n" if "ls-tree" in args else ""
-        self.assertEqual(release.train_version(common.config()), (None, "0.6.0 still has 3 open card(s)"))
-        del self.items[979], self.items[980]
-        self.assertEqual(release.train_version(common.config()), (None, "0.6.0 still has 1 open card(s)"))
-        self.items[981] = 9  # moved to the next milestone by hand
-        self.assertEqual(release.train_version(common.config()),
-                         ("0.6.0", "0.6.0 has no open card; 1 changelog fragment(s) on main"))
+        with mock.patch.object(github, "open_pulls", return_value=[]):
+            self.assertEqual(release.train_version(common.config()),
+                             (None, "0.6.0 still has 3 open card(s):\n  #979 — open\n  #980 — open\n  #981 — open"))
+            del self.items[979], self.items[980]
+            self.assertEqual(release.train_version(common.config()), (None, "0.6.0 still has 1 open card(s):\n  #981 — open"))
+            self.items[981] = 9  # moved to the next milestone by hand
+            self.assertEqual(release.train_version(common.config()),
+                             ("0.6.0", "0.6.0 has no open card; 1 changelog fragment(s) on main"))
+            self.assertIsNone(release.train_held(common.config()), "a train that ships is not held")
+
+    def test_a_parked_card_holds_the_train_and_each_blocker_says_what_it_is(self) -> None:
+        """Parked cards and umbrellas still count; the held train names each one with its state, so a straggler is
+        visible where the release waits (the train's output and the digest's "Waiting on you")."""
+        common._CONFIG = __import__("dataclasses").replace(self.cfg, milestone="0.6.0")
+        cfg = common.config()
+        self.milestones.append({"title": "0.6.0", "number": 8, "state": "open"})
+        self.items.update({1027: 8, 1043: 8, 357: 8, 990: 8})
+        self.extra = {1027: {"labels": [{"name": cfg.parked_label}]}, 357: {"labels": [{"name": cfg.umbrella_label}]},
+                      1043: {"pull_request": {"url": "u"}}}
+        harness.park(1027, "idle")
+        release.abandon("test")
+        common.git.side_effect = lambda repo, *args: "changes/975.md\n" if "ls-tree" in args else ""
+        worker_pr = github.Pull(1043, cfg.worker_app, "wt/issue-990", cards=(990,))
+        with mock.patch.object(github, "open_pulls", return_value=[worker_pr]):
+            version, why = release.train_version(cfg)
+            held = release.train_held(cfg)
+        self.assertIsNone(version)
+        self.assertEqual(why.splitlines(), [
+            "0.6.0 still has 4 open card(s):",
+            "  #357 — umbrella",
+            "  #990 — open PR #1043",
+            "  #1027 — parked: runs with no new commit",
+            "  #1043 — open pull request"])
+        self.assertEqual(held, ("0.6.0", [release.Blocker(357, "umbrella", "umbrella"),
+                                          release.Blocker(990, "open PR #1043", "PR #1043"),
+                                          release.Blocker(1027, "parked: runs with no new commit", "parked"),
+                                          release.Blocker(1043, "open pull request", "pull request")]))
+        out = io.StringIO()
+        with mock.patch.object(release, "train_version", return_value=(version, why)), \
+                mock.patch.object(harness, "exit_on_signals"), mock.patch("sys.stdout", new=out):
+            from scripts import lane
+            self.assertEqual(lane.main(["release", "--train", "--yes"]), 0)
+        self.assertIn("no release train — 0.6.0 still has 4 open card(s):\n  #357 — umbrella", out.getvalue())
+        self.assertIn("  #1027 — parked: runs with no new commit", out.getvalue())
+        self.assertIsNone(release.intent(), "nothing was cut")
 
     def test_the_train_says_so_when_the_feeders_milestone_does_not_exist(self) -> None:
         common._CONFIG = __import__("dataclasses").replace(self.cfg, milestone="0.6.0")

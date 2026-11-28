@@ -51,6 +51,7 @@ import shutil
 import subprocess
 import tarfile
 import time
+import typing
 
 from scripts import common, github, harness, identity, open_pr
 from scripts.common import LaneError, StateError
@@ -157,14 +158,37 @@ def start(version: str, by: str) -> dict:
     return data
 
 
+class Blocker(typing.NamedTuple):
+    """An open item of the feeder's milestone that holds the train: its number, its state in words (a parked card
+    with its reason, an umbrella, an open pull request) and the same state as one short word for the digest."""
+    number: int
+    state: str
+    short: str
+
+
 def train_version(cfg: common.Config) -> tuple[str | None, str]:
     """The train's version, or None and why there is no train today. The train ships the milestone the feeder works
     once that milestone is complete (lunate-lane#78): it runs when no other release is open, main has at least one
     changelog fragment (a pull request with a release note merged since the last tag), and the milestone has no open
-    issue or pull request left. A straggler holds it until someone moves that card to the next milestone by hand."""
+    issue or pull request left. A straggler holds it until someone moves that card to the next milestone by hand.
+    Held on open cards, the reason lists each one with its state, one per line (`train_held`)."""
+    version, why, blockers = _train(cfg)
+    if blockers:
+        why += ":\n" + "\n".join(f"  #{b.number} — {b.state}" for b in blockers)
+    return version, why
+
+
+def train_held(cfg: common.Config) -> tuple[str, list[Blocker]] | None:
+    """(the milestone, its open items) when the train holds only on open cards — parked cards and umbrellas count
+    too; None when it ships, has nothing to ship, or another release is open."""
+    version, _, blockers = _train(cfg)
+    return (cfg.milestone, blockers) if version is None and blockers else None
+
+
+def _train(cfg: common.Config) -> tuple[str | None, str, list[Blocker]]:
     current = intent()
     if current:
-        return None, f"release {current['version']} is still open"
+        return None, f"release {current['version']} is still open", []
     v = parse(cfg.milestone)
     if not v.stable:
         raise LaneError(f"the feeder's milestone {cfg.milestone!r} is not a stable version — the train ships X.Y.Z")
@@ -173,14 +197,43 @@ def train_version(cfg: common.Config) -> tuple[str | None, str]:
     listed = common.git(cfg.checkout, "ls-tree", "--name-only", f"origin/{cfg.base}", "changes/")
     fragments = [p for p in listed.splitlines() if p.strip().endswith(".md")]
     if not fragments:
-        return None, f"nothing to ship: {cfg.base} has no changelog fragment since the last tag"
+        return None, f"nothing to ship: {cfg.base} has no changelog fragment since the last tag", []
     milestone = _milestone(cfg, v.text)
     if milestone is None:
-        return None, f"there is no milestone {v.text!r} in {cfg.slug}"
+        return None, f"there is no milestone {v.text!r} in {cfg.slug}", []
     still_open = int(milestone.get("open_issues") or 0)
     if still_open:
-        return None, f"{v.text} still has {still_open} open card(s)"
-    return v.text, f"{v.text} has no open card; {len(fragments)} changelog fragment(s) on {cfg.base}"
+        return None, f"{v.text} still has {still_open} open card(s)", _blockers(cfg, int(milestone["number"]))
+    return v.text, f"{v.text} has no open card; {len(fragments)} changelog fragment(s) on {cfg.base}", []
+
+
+def _blockers(cfg: common.Config, milestone: int) -> list[Blocker]:
+    """Each open item of the milestone, by number, with what it is: parked (and why, from the lane's record),
+    an umbrella, a pull request, or a card with an open worker pull request."""
+    parked = harness.parked_info()
+    pr_of: dict[int, int] = {}
+    for p in github.open_pulls(cfg):
+        if p.card is not None and p.author == cfg.worker_app:
+            pr_of.setdefault(p.card, p.number)
+    found = []
+    for item in sorted(_open_items(cfg, milestone), key=lambda i: int(i["number"])):
+        n = int(item["number"])
+        labels = {str(l.get("name") if isinstance(l, dict) else l) for l in item.get("labels") or []}
+        states, short = [], []
+        if n in parked or cfg.parked_label in labels:
+            states.append("parked: " + harness.parked_line(parked[n]) if n in parked else "parked")
+            short.append("parked")
+        if cfg.umbrella_label in labels:
+            states.append("umbrella")
+            short.append("umbrella")
+        if item.get("pull_request"):
+            states.append("open pull request")
+            short.append("pull request")
+        elif n in pr_of:
+            states.append(f"open PR #{pr_of[n]}")
+            short.append(f"PR #{pr_of[n]}")
+        found.append(Blocker(n, "; ".join(states) or "open", ", ".join(short) or "open"))
+    return found
 
 
 def fix(number: int) -> dict:
@@ -833,14 +886,18 @@ def step_smoke(cfg: common.Config, v: Version, data: dict) -> str | None:
 
 def _open_in(cfg: common.Config, number: int) -> list[int]:
     """Every open issue and pull request in milestone `number` (the issues endpoint lists both), all pages."""
+    return sorted(int(i["number"]) for i in _open_items(cfg, number))
+
+
+def _open_items(cfg: common.Config, number: int) -> list[dict]:
     found, page = [], 1
     while True:
         batch = _api(f"repos/{cfg.slug}/issues?milestone={number}&state=open&per_page=100&page={page}")
         if not isinstance(batch, list):
             raise LaneError(f"the open items of milestone {number} came back as {type(batch).__name__}, not a list")
-        found += [int(i["number"]) for i in batch]
+        found += batch
         if len(batch) < 100:
-            return sorted(found)
+            return found
         page += 1
 
 

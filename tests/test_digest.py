@@ -9,7 +9,7 @@ import unittest
 from unittest import mock
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
-from scripts import common, digest, github, harness  # noqa: E402
+from scripts import common, digest, github, harness, release  # noqa: E402
 from scripts.common import GhError  # noqa: E402
 from tests.helpers import REQUIRED, TempState, card, pull, review  # noqa: E402
 
@@ -240,6 +240,29 @@ class WaitingOnYouTests(unittest.TestCase):
         self.assertEqual(text.splitlines()[1:3], ["Waiting on you (1):",
                                                   "  parked #3: runs with no new commit https://github.com/lunate-agent/lunate/issues/3"],
                          "every park is on you, not only a person-park")
+
+    def test_a_train_held_by_a_parked_card_is_waiting_on_you(self) -> None:
+        """The train waits for 0.9.0 to empty; a parked card keeps it open. The digest says which cards hold it, and
+        what each is, first — the park itself stays listed too."""
+        train = ("0.9.0", [release.Blocker(357, "umbrella", "umbrella"),
+                           release.Blocker(1027, "parked: runs with no new commit", "parked"),
+                           release.Blocker(1043, "open pull request", "pull request")])
+        text = digest.compose(CFG, [card(1027)], [], [], REQUIRED, NOW, {1027: ("idle", "")}, train=train)
+        lines = text.splitlines()
+        self.assertEqual(lines[1:4], [
+            "Waiting on you (2):",
+            "  train held: 0.9.0 by #357 (umbrella), #1027 (parked), #1043 (pull request)",
+            "  parked #1027: runs with no new commit https://github.com/lunate-agent/lunate/issues/1027"])
+        self.assertEqual(digest.compose(CFG, [], [], [], REQUIRED, NOW, {}, train=None).splitlines()[1],
+                         "Waiting on you: nothing", "a train that is not held says nothing")
+
+    def test_an_unreadable_train_is_logged_and_left_out(self) -> None:
+        state = TempState()
+        self.addCleanup(state.close)
+        with mock.patch.object(release, "train_held", side_effect=GhError("gh api failed (1): HTTP 502")):
+            self.assertIsNone(digest.train_held(state.cfg))
+        self.assertIn("the release train could not be read: gh api failed (1): HTTP 502",
+                      (state.cfg.state / "logs" / "digest.log").read_text())
 
     def test_a_parked_card_frees_its_wip_slot_in_the_digest_too(self) -> None:
         text = digest.compose(CFG, [], [pull(813, 794), pull(815, 804)], [], REQUIRED, NOW, {794: ("person", "x")})

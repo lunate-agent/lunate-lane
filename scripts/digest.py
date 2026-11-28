@@ -17,7 +17,7 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(pathlib.Path(__file__).resolve().parents[1]))
 
 from scripts import cleanup, common, github, harness, parked, release  # noqa: E402
-from scripts.common import GhError  # noqa: E402
+from scripts.common import GhError, LaneError  # noqa: E402
 
 JOB = "digest"
 MERGED_LIMIT = 100
@@ -65,17 +65,8 @@ def age_days(created: str, now: datetime.datetime) -> float:
     return (now - opened).total_seconds() / 86400
 
 
-PARKED_WHY = {"idle": "runs with no new commit", "reworks": "rework rounds used up",
-              "fixes": "fix reworks used up",
-              "secret": "secret-shaped text in a push", "person": "needs a person",
-              "ready": "CI never ran it as ready", "manual": "parked by hand"}
-
-
-def parked_line(why) -> str:
-    """One parked card's reason: the kind, and for a person's decision or a failed ready run, the words why."""
-    reason, detail = why if isinstance(why, tuple) else (why, "")
-    text = PARKED_WHY.get(reason, reason)
-    return f"{text}: {detail}" if detail else text
+PARKED_WHY = harness.PARKED_WHY  # the wording lives in harness: the held train's lines say it too
+parked_line = harness.parked_line
 
 
 def in_flight(cfg: common.Config, pulls: list, running: dict, parked=frozenset()) -> list[str]:
@@ -148,14 +139,18 @@ def _left_open(cfg: common.Config, number: int) -> bool:
 
 
 def waiting_on_you(cfg: common.Config, decisions: list, pulls: list, required: frozenset, parked: dict,
-                   merged: list, cards: list, flag_errors: dict | None = None, codeowners: tuple = ()) -> list[str]:
+                   merged: list, cards: list, flag_errors: dict | None = None, codeowners: tuple = (),
+                   train: tuple | None = None) -> list[str]:
     """The lines a maintainer acts on, short enough for a phone: open decisions (oldest first, with the cards each
     blocks), every parked card whatever the reason (its reason and a link), a park whose label or assignment
     failed, pull requests waiting for a maintainer's approval (`code-owner review: #n (paths)` when the bot approved
-    and the paths it changes are code-owned: the feeder enqueues it on the tick after that approval), and a merge that left its card
-    open."""
+    and the paths it changes are code-owned: the feeder enqueues it on the tick after that approval), a merge that left its card
+    open, and a release train held on open cards (`release.train_held`): each one by number and what it is."""
     url = f"https://github.com/{cfg.slug}"
     lines = []
+    if train:
+        milestone, blockers = train
+        lines.append(f"  train held: {milestone} by " + ", ".join(f"#{b.number} ({b.short})" for b in blockers))
     for d in decisions:
         blocks = (" — blocks " + ", ".join(f"#{n}" for n in d.blocking)) if d.blocking else ""
         lines.append(f"  decide #{d.number} {_short(d.title, WAIT_TITLE)}{blocks}")
@@ -251,13 +246,14 @@ def compose(cfg: common.Config, cards: list, pulls: list, merged: list, required
             kept: dict | None = None, decisions: list | None = None, died: dict | None = None,
             requeued: dict | None = None, queue_events: list | None = None, flag_errors: dict | None = None,
             codeowners: tuple = (), stats: list | None = None, stats_all: list | None = None,
-            scratch: list | None = None, releasing: str = "") -> str:
+            scratch: list | None = None, releasing: str = "", train: tuple | None = None) -> str:
     running = running or {}
     parked = parked or {}
     flight = in_flight(cfg, pulls, running, frozenset(parked))
     lines = [f"Lunate lane — {now:%Y-%m-%d}",
              *([f"Release: {releasing}"] if releasing else []),  # an open `lane.py release`: where it stands
-             *waiting_on_you(cfg, decisions or [], pulls, required, parked, merged, cards, flag_errors, codeowners),
+             *waiting_on_you(cfg, decisions or [], pulls, required, parked, merged, cards, flag_errors, codeowners,
+                             train),
              f"{cfg.milestone}: {len(cards)} open issue(s)",
              f"WIP {len(flight)} of {cfg.wip_limit}" + (": " + ", ".join(flight) if flight else "")]
     lines.append(f"Open PRs ({len(pulls)}):" if pulls else "Open PRs: none")
@@ -302,13 +298,22 @@ def tick() -> None:
                       harness.queue_events((now - datetime.timedelta(days=1)).timestamp()), parked.errors(),
                       github.codeowners(cfg), harness.session_stats((now - datetime.timedelta(days=1)).timestamp()),
                       harness.session_stats(), harness.large_scratch(cfg),
-                      release.status() if release.intent() else "")
+                      release.status() if release.intent() else "", train_held(cfg))
     latest = common.state_dir("digest") / "latest.md"
     try:
         latest.write_text(message + "\n", encoding="utf-8")
     except OSError as exc:
         raise common.StateError(f"the digest {latest} could not be written: {exc}") from exc
     print(message)
+
+
+def train_held(cfg: common.Config) -> tuple | None:
+    """The held train for "Waiting on you", or None; one the digest cannot read is logged, never a failed digest."""
+    try:
+        return release.train_held(cfg)
+    except (LaneError, GhError) as exc:
+        common.log(JOB, f"the release train could not be read: {exc}")
+        return None
 
 
 def main() -> int:
