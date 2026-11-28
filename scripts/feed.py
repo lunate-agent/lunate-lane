@@ -271,8 +271,11 @@ def tick(dry_run: bool = False) -> None:
                             f"{launch.person}")
             continue
         # only the reviewer's request for changes spends a review round (#58); a conflict, a red check, a queue
-        # failure, an orphaned draft or a Decision is a fix, with its own larger cap
-        review = launch.reason == "changes requested"
+        # failure, an orphaned draft or a Decision is a fix, with its own larger cap — except the draft a worker
+        # left on a NEEDS-PERSON that asks for nothing (#789): that goes back to it as a review round
+        review = launch.reason == "changes requested" or (
+            launch.reason == cards.ORPHANED and bool(launch.rework_pr)
+            and harness.no_ask_on(launch.card, launch.rework_pr))
         kind, limit, words = (("reworks", harness.REWORK_LIMIT, "rework rounds") if review else
                               ("fixes", harness.FIX_LIMIT, "fix reworks (conflicts, red checks, unfinished drafts)"))
         rounds = 0

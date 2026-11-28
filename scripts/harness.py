@@ -978,21 +978,22 @@ def _attempts(card: int) -> pathlib.Path:
 def _read_attempts(path: pathlib.Path) -> dict:
     if not path.exists():
         return {"idle_runs": 0, "parked": False, "reason": "", "detail": "", "reworks": {}, "fixes": {}, "died": "",
-                "fallback": ""}
+                "fallback": "", "no_ask": 0}
     try:
         data = json.loads(path.read_text())
         return {"idle_runs": int(data["idle_runs"]), "parked": bool(data["parked"]),
                 "reason": str(data.get("reason") or ""), "detail": str(data.get("detail") or ""),
                 "reworks": {str(int(k)): int(v) for k, v in (data.get("reworks") or {}).items()},
                 "fixes": {str(int(k)): int(v) for k, v in (data.get("fixes") or {}).items()},
-                "died": str(data.get("died") or ""), "fallback": str(data.get("fallback") or "")}
+                "died": str(data.get("died") or ""), "fallback": str(data.get("fallback") or ""),
+                "no_ask": int(data.get("no_ask") or 0)}
     except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
         raise StateError(f"the attempts record {path} could not be read: {exc}") from exc
 
 
 def _write_attempts(path: pathlib.Path, data: dict) -> None:
     if not data["idle_runs"] and not data["parked"] and not data["reworks"] and not data.get("fixes") \
-            and not data["died"] and not data.get("fallback"):
+            and not data["died"] and not data.get("fallback") and not data.get("no_ask"):
         try:
             path.unlink(missing_ok=True)
         except OSError as exc:
@@ -1042,11 +1043,26 @@ def note_run(card: int, new_commit: bool) -> tuple[int, bool]:
     return data["idle_runs"], parked_now
 
 
-def note_rework(card: int, pr: int, review: bool = True) -> int:
-    """Count one rework started on this pull request — a review round when the reviewer asked for changes
-    (`review`), a fix otherwise; returns that count so far, this one included."""
+def note_no_ask(card: int, pr: int) -> None:
+    """The worker's last run on this pull request ended on a NEEDS-PERSON that asks for nothing (#789): its next
+    rework is a review round (`no_ask_on`), not a fix."""
     path = _attempts(card)
     data = _read_attempts(path)
+    data["no_ask"] = int(pr)
+    _write_attempts(path, data)
+
+
+def no_ask_on(card: int, pr: int) -> bool:
+    return _read_attempts(_attempts(card))["no_ask"] == int(pr)
+
+
+def note_rework(card: int, pr: int, review: bool = True) -> int:
+    """Count one rework started on this pull request — a review round when the reviewer asked for changes
+    (`review`), a fix otherwise; returns that count so far, this one included. A rework started clears a pending
+    `note_no_ask`: the run it starts sets it again if it ends the same way."""
+    path = _attempts(card)
+    data = _read_attempts(path)
+    data["no_ask"] = 0
     kind = "reworks" if review else "fixes"
     data[kind][str(int(pr))] = data[kind].get(str(int(pr)), 0) + 1
     _write_attempts(path, data)

@@ -608,7 +608,7 @@ class NeedsPersonTests(unittest.TestCase):
                 ("done.\nNEEDS-PERSON: a maintainer must pick the default locale\nmore", "a maintainer must pick the default locale"),
                 ("**NEEDS-PERSON:** check 4 needs a real release", "check 4 needs a real release"),
                 ("`NEEDS-PERSON` — the failure is in src/Other.cs, untouched", "the failure is in src/Other.cs, untouched"),
-                ("NEEDS-PERSON", "(no reason given)")):
+                ("NEEDS-PERSON:\nthe key must be rotated by a maintainer\n", "the key must be rotated by a maintainer")):
             with self.subTest(text=text):
                 self.assertEqual(github.needs_person(text), reason)
 
@@ -625,6 +625,29 @@ class NeedsPersonTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertIsNone(github.needs_person(text))
                 self.assertIsNone(github.raw_needs_person(text))
+
+    def test_a_line_that_asks_for_nothing_is_none_and_is_read_back_as_written(self) -> None:
+        """#789 parked on `NEEDS-PERSON: none.`; a bare marker parked as "(no reason given)". None of these names
+        anything a person could do: no park, and `empty_needs_person` gives the line for the rework round."""
+        for text in ("Nothing left unfinished.\n\nNEEDS-PERSON: none.", "NEEDS-PERSON", "NEEDS-PERSON:",
+                     "NEEDS-PERSON: -", "NEEDS-PERSON: (none)", "NEEDS-PERSON: TBD", "NEEDS-PERSON: ?",
+                     "NEEDS-PERSON: no person is needed", "NEEDS-PERSON: no decision required.",
+                     "NEEDS-PERSON: nothing to decide", "NEEDS-PERSON:\n\n## Intent decisions"):
+            with self.subTest(text=text):
+                self.assertIsNone(github.needs_person(text))
+                self.assertIsNone(github.raw_needs_person(text))
+                line = github.empty_needs_person(text)
+                self.assertIsNotNone(line)
+                self.assertTrue(line.startswith("NEEDS-PERSON"), line)
+        self.assertEqual(github.empty_needs_person("done.\nNEEDS-PERSON: none.\n"), "NEEDS-PERSON: none.")
+
+    def test_a_concrete_ask_or_no_line_is_no_empty_one(self) -> None:
+        for text in ("", "all checks met", "NEEDS-PERSON: a maintainer must rotate the key",
+                     "NEEDS-PERSON: no test can evidence check 3 without a real release",
+                     "NEEDS-PERSON: nothing in the repository says which locale is the default",
+                     "NEEDS-PERSON:\nthe key must be rotated by a maintainer"):
+            with self.subTest(text=text):
+                self.assertIsNone(github.empty_needs_person(text))
 
     def test_a_reason_that_only_starts_like_a_denial_is_still_a_reason(self) -> None:
         for reason in ("a maintainer must rotate the key", "no test can evidence check 3 without a real release",
